@@ -20,6 +20,12 @@ FIXTURE = (
 RUST_HELD_OUT_FIXTURE = FIXTURE.with_name(
     "umap-learn-0.6.0-supplied-neighbors-held-out-windows-x86_64.json"
 )
+PYTHON_FIXTURE = FIXTURE.with_name(
+    "umap-learn-0.6.0-supplied-neighbors-python-windows-x86_64.json"
+)
+PYTHON_LINUX_FIXTURE = PYTHON_FIXTURE.with_name(
+    "umap-learn-0.6.0-supplied-neighbors-python-linux-x86_64.json"
+)
 PARAMETERS = {
     "n_neighbors": 4,
     "n_components": 2,
@@ -55,7 +61,7 @@ def pinned_environment():
     }
 
 
-def capture(rust_held_out=False):
+def capture(rust_held_out=False, python_estimator=False):
     import numpy as np
     from umap import UMAP
 
@@ -134,6 +140,52 @@ def capture(rust_held_out=False):
         if "graph" in result["fit_transform"]:
             result["transform_held_out"] = observe(lambda: model.transform(held_out))
         return result
+
+    if python_estimator:
+        explicit = np.array(
+            [[0, 0], [0, 1], [3, 2], [5, -1], [0.25, 0.25], [-1, 5], [2, -1], [1, 5]],
+            dtype=np.float32,
+        )
+        layouts = {}
+        for name, init, epochs, cutoff in (
+            ("random_initial", "random", 0, None),
+            ("random_optimized", "random", 25, None),
+            ("explicit_initial", explicit, 0, None),
+            ("explicit_optimized", explicit, 25, None),
+            ("spectral_connected", "spectral", 6, None),
+            ("spectral_disconnected", "spectral", 6, 1.75),
+            ("random_isolated", "random", 25, 1.0),
+        ):
+            i, d = indices.copy(), overridden.copy()
+            model = UMAP(**(PARAMETERS | {
+                "transform_mode": "embedding", "init": init, "n_epochs": epochs,
+                "disconnection_distance": cutoff, "precomputed_knn": (i, d, None),
+            }))
+            with warnings.catch_warnings(record=True) as captured:
+                warnings.simplefilter("always")
+                coordinates = model.fit_transform(training)
+            assert model.transform(training.copy()) is model.embedding_
+            layouts[name] = {
+                "init": init if isinstance(init, str) else init.tolist(),
+                "n_epochs": epochs,
+                "disconnection_distance": cutoff,
+                "graph": graph_record(model.graph_),
+                "coordinates_bits": coordinates.view(np.uint32).tolist(),
+                "warnings": [
+                    {"type": item.category.__name__, "message": str(item.message)}
+                    for item in captured
+                ],
+            }
+        return {
+            "training": training.tolist(), "held_out": held_out.tolist(),
+            "layout_indices": indices.tolist(), "layout_distance_bits": overridden.view(np.uint32).tolist(),
+            "layouts": layouts,
+            "cases": {
+                "width_fallback_at_cutoff": fit_case(
+                    (indices[:, :-1], distances[:, :-1]), disconnection_distance=1.0
+                ),
+            },
+        }
 
     if rust_held_out:
 
@@ -248,9 +300,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--check", action="store_true")
-    parser.add_argument("--rust-held-out", action="store_true")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--rust-held-out", action="store_true")
+    group.add_argument("--python-estimator", action="store_true")
     args = parser.parse_args()
-    output = args.output or (RUST_HELD_OUT_FIXTURE if args.rust_held_out else FIXTURE)
+    default_fixture = RUST_HELD_OUT_FIXTURE if args.rust_held_out else FIXTURE
+    if args.python_estimator:
+        default_fixture = PYTHON_LINUX_FIXTURE if platform.system() == "Linux" else PYTHON_FIXTURE
+    output = args.output or default_fixture
     environment = pinned_environment()
     os.environ.update(THREADS)
     with tempfile.TemporaryDirectory(prefix="umap-precomputed-neighbors-") as cache:
@@ -258,7 +315,7 @@ def main():
         fixture = {
             "environment": environment,
             "base_parameters": PARAMETERS,
-            **capture(rust_held_out=args.rust_held_out),
+            **capture(rust_held_out=args.rust_held_out, python_estimator=args.python_estimator),
         }
     content = json.dumps(fixture, separators=(",", ":"), allow_nan=False) + "\n"
     if args.check:

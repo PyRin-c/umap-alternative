@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
+from scipy.spatial.distance import cdist
 
 from umap_alternative import UMAP, _umap
 
@@ -186,22 +187,7 @@ def test_disconnected_spectral_graph_layout_and_rng(name, monkeypatch):
     case = DISCONNECTED["cases"][name]
     features = np.asarray(DISCONNECTED["inputs"][case["input"]], dtype=np.float32)
     graph = DISCONNECTED["graphs"][case["graph"]]
-    expected_warnings = case["warnings"]
-    if case["input"] in DISCONNECTED["explicit_labels"]:
-        # These probes supply neighbor lists to the reference estimator.
-        # Replay the public graph at the dense graph builder boundary.
-        sizes = (len(features),) * 2
-        values = np.asarray(graph["bits"], dtype=np.uint32).view(np.float32).tolist()
-
-        def explicit_graph(*args, graph_options=None):
-            assert graph_options is None
-            return sizes, graph["indptr"], graph["indices"], values
-
-        monkeypatch.setattr(_umap._native, "_fit_dense_graph", explicit_graph)
-        expected_warnings = [
-            message for message in expected_warnings
-            if not message.startswith(("precomputed_knn[2]", "A few of your vertices"))
-        ]
+    explicit_labels = DISCONNECTED["explicit_labels"].get(case["input"])
 
     streams = []
     fit_layout = _umap._fit_spectral_embedding
@@ -214,10 +200,18 @@ def test_disconnected_spectral_graph_layout_and_rng(name, monkeypatch):
     model = UMAP(**DISCONNECTED["settings"])
     for method in ("fit", "fit_transform"):
         model.set_params(**case["params"], random_state=case["seed"])
+        if explicit_labels is not None:
+            labels = np.asarray(explicit_labels)
+            distances = cdist(features, features).astype(np.float32)
+            distances[labels[:, None] != labels] = np.inf
+            indices = np.argsort(distances, axis=1)[:, : model.n_neighbors].astype(np.int32)
+            distances = np.take_along_axis(distances, indices, axis=1)
+            indices[~np.isfinite(distances)] = -1
+            model.set_params(precomputed_knn=(indices, distances))
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             fitted = getattr(model, method)(features)
-        assert [str(w.message).splitlines()[0] for w in caught] == expected_warnings
+        assert [str(w.message).splitlines()[0] for w in caught] == case["warnings"]
         assert fitted is (model if method == "fit" else model.embedding_)
         assert model.transform(features.copy()) is model.embedding_
         assert_graph_bits(model.graph_, len(features), graph)

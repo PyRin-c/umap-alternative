@@ -8,7 +8,7 @@ use umap_core::embedding::{
 };
 use umap_core::fit::{
     fit_dense_categorical_graph_with_options, fit_dense_graph_with_options,
-    fit_precomputed_graph_with_options,
+    fit_precomputed_graph_with_options, fit_supplied_neighbors_graph,
 };
 use umap_core::fuzzy_graph::{CsrGraph, GraphOptions};
 use umap_core::neighbors::DistanceMetric;
@@ -16,7 +16,7 @@ use umap_core::rng::Mt19937;
 use umap_core::sparse::{SparseDistanceMetric, fit_sparse_graph_with_options};
 use umap_core::transform::{
     CooGraph, DenseEmbeddingTransformConfig, transform_dense_embedding_with_options,
-    transform_dense_graph_with_options,
+    transform_dense_graph_with_cutoff,
 };
 
 type CsrComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
@@ -255,9 +255,37 @@ fn _fit_precomputed_graph(
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+/// Fit a fuzzy graph from row-major indices and distances after estimator masking.
+#[pyfunction]
+#[pyo3(signature = (indices, distances, shape, k, *, graph_options=None))]
+fn _fit_supplied_neighbors_graph(
+    py: Python<'_>,
+    indices: Vec<i32>,
+    distances: Vec<f32>,
+    shape: (usize, usize),
+    k: usize,
+    graph_options: Option<(f64, f64)>,
+) -> PyResult<CsrComponents> {
+    let (n_rows, width) = shape;
+    let options = parse_graph_options(graph_options)?.unwrap_or_default();
+    py.detach(|| {
+        fit_supplied_neighbors_graph(
+            &indices,
+            &distances,
+            n_rows,
+            width,
+            k,
+            options,
+            f32::INFINITY,
+        )
+    })
+    .map(csr_components)
+    .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// Return the shape, row indices, column indices, and memberships in COO order.
 #[pyfunction]
-#[pyo3(signature = (training, n_training_rows, queries, n_query_rows, n_features, k, metric, *, local_connectivity=1.0))]
+#[pyo3(signature = (training, n_training_rows, queries, n_query_rows, n_features, k, metric, *, local_connectivity=1.0, disconnection_distance=None))]
 #[allow(clippy::too_many_arguments)]
 fn _transform_dense_graph(
     training: Vec<f32>,
@@ -268,6 +296,7 @@ fn _transform_dense_graph(
     k: usize,
     metric: &str,
     local_connectivity: f64,
+    disconnection_distance: Option<f32>,
 ) -> PyResult<CooComponents> {
     let metric = parse_metric(metric)?;
     let options = GraphOptions::new(local_connectivity, 1.0)
@@ -278,7 +307,7 @@ fn _transform_dense_graph(
         row,
         col,
         data,
-    } = transform_dense_graph_with_options(
+    } = transform_dense_graph_with_cutoff(
         &training,
         n_training_rows,
         &queries,
@@ -286,6 +315,7 @@ fn _transform_dense_graph(
         n_features,
         k,
         metric,
+        disconnection_distance.unwrap_or(f32::INFINITY),
         options,
     )
     .map_err(|error| PyValueError::new_err(error.to_string()))?;
@@ -360,6 +390,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_fit_graph_embedding_with_rng, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_categorical_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_precomputed_graph, module)?)?;
+    module.add_function(wrap_pyfunction!(_fit_supplied_neighbors_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_transform_dense_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_transform_dense_embedding, module)?)
 }

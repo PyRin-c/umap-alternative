@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import numbers
+import sys
 import warnings
 
 import numpy as np
 from scipy.sparse import coo_matrix, csc_matrix, csr_matrix, issparse
 from scipy.sparse.csgraph import connected_components
 from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.metrics import pairwise_distances
 from sklearn.utils.validation import check_array
 
 from . import _native
@@ -33,12 +35,35 @@ _TRUNCATION_WARNING = (
     "n_neighbors is larger than the dataset size; truncating to X.shape[0] - 1"
 )
 _PRECOMPUTED_WARNING = "using precomputed metric; inverse_transform will be unavailable"
+_DEFAULT_PRECOMPUTED_KNN = (None, None, None)
+_KNN_SEARCH_WARNING = (
+    "precomputed_knn[2] (knn_search_index) is not an NNDescent object: "
+    "transforming new data with transform will be unavailable."
+)
+_KNN_WIDTH_WARNING = (
+    "precomputed_knn has a lower number of neighbors than n_neighbors parameter. "
+    "precomputed_knn will be ignored and the k-nn will be computed normally."
+)
+_KNN_ROWS_WARNING = (
+    "precomputed_knn has a different number of samples than the data you are fitting. "
+    "precomputed_knn will be ignored andthe k-nn will be computed normally."
+)
+_NO_SEARCH_INDEX = (
+    "No search index available: transforming data into an existing embedding is not supported"
+)
+_EXTERNAL_SEARCH_UNAVAILABLE = "transform with a supplied search index is not implemented"
 _DISCONNECTION_WARNING = (
     "A large number of your vertices were disconnected from the manifold.\n"
-    "Disconnection_distance = inf has removed 0 edges.\n"
+    "Disconnection_distance = {cutoff} has removed {removed} edges.\n"
     "It has fully disconnected {count} vertices.\n"
     "You might consider using find_disconnected_points() to find and remove "
     "these points from your data.\n"
+    "Use umap.utils.disconnected_vertices() to identify them."
+)
+_FEW_DISCONNECTIONS_WARNING = (
+    "A few of your vertices were disconnected from the manifold.  This shouldn't cause problems.\n"
+    "Disconnection_distance = {cutoff} has removed {removed} edges.\n"
+    "It has only fully disconnected {count} vertices.\n"
     "Use umap.utils.disconnected_vertices() to identify them."
 )
 _COMPATIBILITY_WARNING = (
@@ -63,31 +88,36 @@ def _validate_epochs(n_epochs):
     return int(n_epochs)
 
 
-def _fit_spectral_embedding(
-    graph, features, metric, rng, *, n_epochs, n_components, **layout_options
+def _fit_graph_embedding(
+    graph, features, metric, rng, initial, *, spectral, n_epochs, n_components, **layout_options
 ):
     # Public graph_ retains the CSR entries whose memberships were zeroed.
     # Fits of at most ten epochs use the default budget for this cutoff.
     sampling_epochs = n_epochs if n_epochs > 10 else _default_epochs(graph.shape[0])
     unsampled = graph.data < np.float32(graph.data.max() / sampling_epochs)
-    spectral_graph = graph
+    sampling_graph = graph
     if np.any(unsampled):
         graph.data[unsampled] = 0
         # SciPy's connectivity check treats stored zeros as edges.
-        spectral_graph = graph.copy()
-        spectral_graph.eliminate_zeros()
+        sampling_graph = graph.copy()
+        sampling_graph.eliminate_zeros()
 
-    count, labels = connected_components(spectral_graph, directed=False)
-    if count == 1:
-        initial = _spectral_initialization(spectral_graph, n_components, rng)
-    else:
-        initial = _disconnected_spectral_initialization(
-            spectral_graph, features, metric, n_components, rng, labels
-        )
+    if spectral:
+        count, labels = connected_components(sampling_graph, directed=False)
+        if count == 1:
+            initial = _spectral_initialization(sampling_graph, n_components, rng)
+        else:
+            initial = _disconnected_spectral_initialization(
+                sampling_graph, features, metric, n_components, rng, labels
+            )
+        initial = initial.ravel().tolist()
+    elif initial is None:
+        initial = rng.uniform(-10, 10, (graph.shape[0], n_components)).astype(np.float32)
+        initial = initial.ravel().tolist()
     algorithm, words, cursor, has_gaussian, cached_gaussian = rng.get_state()
     shape, coordinates, (words, cursor) = _native._fit_graph_embedding_with_rng(
         (graph.shape, graph.indptr.tolist(), graph.indices.tolist(), graph.data.tolist()),
-        initial.ravel().tolist(),
+        initial,
         (words.tolist(), cursor),
         n_epochs=n_epochs,
         n_components=n_components,
@@ -98,8 +128,41 @@ def _fit_spectral_embedding(
     )
     embedding = np.asarray(coordinates, dtype=np.float32).reshape(shape)
     # Isolated rows participate in normalization and sampling before masking.
-    embedding[np.diff(spectral_graph.indptr) == 0] = np.nan
+    embedding[np.diff(sampling_graph.indptr) == 0] = np.nan
     return embedding
+
+
+def _fit_spectral_embedding(graph, features, metric, rng, **layout_options):
+    return _fit_graph_embedding(graph, features, metric, rng, None, spectral=True, **layout_options)
+
+
+def _fit_neighbor_arrays(indices, distances, k, graph_options):
+    if indices.dtype.kind == "f":
+        if not np.all(np.isfinite(indices) & (indices == np.trunc(indices))):
+            raise ValueError("precomputed_knn indices must contain integer values")
+        indices = indices.astype(np.int64)
+    if indices.dtype.kind not in "iu" or distances.dtype.kind not in "fiu":
+        raise ValueError("precomputed_knn requires integer indices and real distances")
+    return _native._fit_supplied_neighbors_graph(
+        indices.ravel().tolist(),
+        distances.astype(np.float32, copy=False).ravel().tolist(),
+        indices.shape,
+        k,
+        graph_options=graph_options,
+    )
+
+
+def _fit_dense_graph_with_cutoff(features, metric, k, cutoff, graph_options):
+    distances = pairwise_distances(features, metric=metric).astype(np.float32, copy=False)
+    # Rank the finite distances before masking because all excluded entries
+    # become the same missing marker.
+    indices = np.argsort(distances, axis=1, kind="stable")[:, :k].copy()
+    removed = np.count_nonzero(distances >= cutoff)
+    distances = np.take_along_axis(distances, indices, axis=1)
+    cut = distances >= cutoff
+    indices[cut] = -1
+    distances[cut] = np.inf
+    return _fit_neighbor_arrays(indices, distances, k, graph_options), removed
 
 
 def _check_sparse_indices(indices, n_entries, axis_size):
@@ -178,6 +241,15 @@ class UMAP(BaseEstimator, TransformerMixin):
     distances are accepted. Each row's selected neighbors must include its
     diagonal entry, which can be excluded when there are ties at zero distance.
 
+    ``precomputed_knn=(indices, distances, search_index)`` supplies neighbor
+    arrays for an unsupervised fit. All columns of matching two-dimensional
+    arrays are used when the width reaches ``n_neighbors``. A short width or
+    mismatched row count falls back to computed neighbors. The inclusive
+    ``disconnection_distance`` cutoff writes ``(-1, +inf)`` into the caller's
+    arrays. The fitted input still returns the stored graph or coordinates.
+    Held-out transforms after a supplied fit require a search backend, which
+    this estimator does not implement.
+
     For an embedding, use dense features, an integer ``random_state`` in
     ``[0, 2**32 - 1]``, and ``compatibility_layout=True``. The default
     ``init="spectral"`` uses the sampled graph to place its connected components.
@@ -217,6 +289,8 @@ class UMAP(BaseEstimator, TransformerMixin):
         b=None,
         optimizer=None,
         transform_seed=42,
+        precomputed_knn=_DEFAULT_PRECOMPUTED_KNN,
+        disconnection_distance=None,
     ):
         self.n_components = n_components
         self.n_neighbors = n_neighbors
@@ -240,6 +314,8 @@ class UMAP(BaseEstimator, TransformerMixin):
         self.b = b
         self.optimizer = optimizer
         self.transform_seed = transform_seed
+        self.precomputed_knn = precomputed_knn
+        self.disconnection_distance = disconnection_distance
 
     def fit(self, X, y=None):
         """Fit the fuzzy graph and, in embedding mode, the training layout."""
@@ -295,6 +371,18 @@ class UMAP(BaseEstimator, TransformerMixin):
             embedding_options = self._embedding_options(n_rows)
             initial_coordinates = self._embedding_init(n_rows, embedding_options["n_components"])
             spectral = isinstance(self.init, str) and self.init == "spectral"
+        supplied_requested = self.precomputed_knn is not _DEFAULT_PRECOMPUTED_KNN
+        if supplied_requested and hasattr(self, "_graph_transform_fit"):
+            # Held-out search sees the newly validated input during a refit.
+            # The exact-input shortcut still identifies the last completed fit.
+            self._graph_transform_fit = transform_fit
+        cutoff = self.disconnection_distance
+        if cutoff is None:
+            cutoff = np.inf
+        elif not isinstance(cutoff, (int, float)):
+            raise ValueError("disconnection_distance must either be None or a numeric.")
+        supplied = self._supplied_neighbors(n_rows, n_neighbors)
+        requested_neighbors = n_neighbors
 
         # Singletons have no graph. Embedding mode exposes the public zero layout.
         if n_rows == 1:
@@ -312,7 +400,33 @@ class UMAP(BaseEstimator, TransformerMixin):
             n_neighbors = n_rows - 1
 
         embedding = None
-        if precomputed:
+        transform_error = None
+        transform_cutoff = None
+        removed = 0
+        graph_from_neighbors = supplied is not None or cutoff < np.inf
+        if supplied is not None:
+            if y is not None:
+                raise NotImplementedError("supervised fitting with precomputed_knn is not implemented")
+            indices, distances, search_index = supplied
+            transform_error = _NO_SEARCH_INDEX if search_index is None else _EXTERNAL_SEARCH_UNAVAILABLE
+            self._supplied_transform_error = transform_error
+            cut = distances >= cutoff
+            # Assignment order matters if the second array is read-only.
+            indices[cut] = -1
+            distances[cut] = np.inf
+            removed = np.count_nonzero(cut)
+            components = _fit_neighbor_arrays(indices, distances, requested_neighbors, graph_options)
+            transform_fit = (X_checked.copy() if precomputed else X_checked, metric)
+        elif cutoff < np.inf:
+            if sparse or precomputed or y is not None:
+                raise NotImplementedError(
+                    "disconnection_distance with computed neighbors requires unsupervised dense features"
+                )
+            transform_cutoff = cutoff
+            components, removed = _fit_dense_graph_with_cutoff(
+                X_checked, metric, n_neighbors, cutoff, graph_options
+            )
+        elif precomputed:
             components = _native._fit_precomputed_graph(
                 X_checked.ravel(order="C").tolist(), n_rows, n_neighbors, graph_options=graph_options
             )
@@ -354,26 +468,38 @@ class UMAP(BaseEstimator, TransformerMixin):
             shape=tuple(shape),
             dtype=np.float32,
         )
-        # Two rows have no edges after self-neighbors are removed. The public
-        # graph fit returns the empty graph and the layout fit rejects it.
-        if graph.nnz == 0:
+        if supplied is not None and embedding_mode:
+            # This stage has succeeded even if the subsequent layout fails.
+            self.graph_ = graph
+            self.n_neighbors_ = n_neighbors
+        isolated = np.count_nonzero(np.diff(graph.indptr) == 0) if graph_from_neighbors else 0
+        if isolated or graph.nnz == 0:
+            isolated = isolated or n_rows
+            warning = (
+                _DISCONNECTION_WARNING if isolated * 10 > n_rows else _FEW_DISCONNECTIONS_WARNING
+            )
             warnings.warn(
-                _DISCONNECTION_WARNING.format(count=n_rows),
+                warning.format(count=isolated, cutoff=cutoff, removed=removed),
                 UserWarning,
                 stacklevel=2,
             )
-            if embedding_mode:
-                raise ValueError(
-                    "zero-size array to reduction operation maximum which has no identity"
-                )
+        if embedding_mode and graph.nnz == 0:
+            raise ValueError("zero-size array to reduction operation maximum which has no identity")
         if spectral:
             rng = np.random.RandomState(embedding_options.pop("seed"))
             embedding = _fit_spectral_embedding(graph, X_checked, metric, rng, **embedding_options)
+        elif embedding_mode and graph_from_neighbors:
+            rng = np.random.RandomState(embedding_options.pop("seed"))
+            embedding = _fit_graph_embedding(
+                graph, X_checked, metric, rng, initial_coordinates, spectral=False, **embedding_options
+            )
         elif embedding is not None:
             embedding[np.diff(graph.indptr) == 0] = np.nan
         return self._store_fit(
             n_features, transform_fit, graph, n_neighbors, embedding,
             embedding_options=embedding_options if embedding_mode else None,
+            transform_error=transform_error,
+            transform_cutoff=transform_cutoff,
         )
 
     def fit_transform(self, X, y=None, **fit_params):
@@ -409,14 +535,22 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise TypeError("sparse input is not supported; pass a dense array")
         queries = check_array(X, dtype=np.float32, order="C")
         n_query_rows, n_query_features = queries.shape
+        # The observed fast path compares normalized float32 data by bits.
+        fitted_input = getattr(self, "_exact_fit_input", training)
+        if fitted_input is not None and np.array_equal(
+            queries.view(np.uint32), fitted_input.view(np.uint32)
+        ):
+            return self.embedding_ if self.transform_mode == "embedding" else self.graph_
+        if metric == "precomputed":
+            raise NotImplementedError("transform with metric='precomputed' is not implemented")
+        transform_error = getattr(self, "_supplied_transform_error", None)
+        if transform_error is not None:
+            raise NotImplementedError(transform_error)
         if n_query_features != n_features:
             raise ValueError(
                 f"X has {n_query_features} features, but UMAP is expecting "
                 f"{n_features} features as input."
             )
-        # The observed fast path compares normalized float32 data by bits.
-        if np.array_equal(queries.view(np.uint32), training.view(np.uint32)):
-            return self.embedding_ if self.transform_mode == "embedding" else self.graph_
         if self.transform_mode == "embedding":
             return self._transform_embedding(training, queries, metric)
 
@@ -429,6 +563,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             self.n_neighbors_,
             metric,
             local_connectivity=self.local_connectivity,
+            disconnection_distance=getattr(self, "_transform_cutoff", None),
         )
         return coo_matrix(
             (
@@ -463,6 +598,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             negative_sample_rate=negative_rate,
             transform_seed=int(seed),
             local_connectivity=self.local_connectivity,
+            disconnection_distance=getattr(self, "_transform_cutoff", None),
             **self._embedding_transform_options,
         )
         return np.asarray(coordinates, dtype=np.float32).reshape(queries.shape[0], n_components)
@@ -491,8 +627,36 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise ValueError("set_op_mix_ratio must be between 0 and 1, inclusive")
         return None if (connectivity, mix) == (1.0, 1.0) else (connectivity, mix)
 
+    def _supplied_neighbors(self, n_rows, n_neighbors):
+        neighbors = self.precomputed_knn
+        indices, distances = neighbors[0], neighbors[1]
+        search_index = None if len(neighbors) == 2 else neighbors[2]
+        if distances is None:
+            return None
+        if not isinstance(indices, np.ndarray):
+            raise ValueError("precomputed_knn[0] must be ndarray object.")
+        if not isinstance(distances, np.ndarray):
+            raise ValueError("precomputed_knn[1] must be ndarray object.")
+        if indices.shape != distances.shape:
+            raise ValueError("precomputed_knn[0] and precomputed_knn[1] must be numpy arrays of the same size.")
+        # A supplied NNDescent instance already has its public module loaded.
+        search_type = getattr(sys.modules.get("pynndescent"), "NNDescent", ())
+        if not isinstance(search_index, search_type):
+            warnings.warn(_KNN_SEARCH_WARNING, UserWarning, stacklevel=3)
+        width = indices.shape[1]
+        if width < n_neighbors:
+            warnings.warn(_KNN_WIDTH_WARNING, UserWarning, stacklevel=3)
+            return None
+        if indices.shape[0] != n_rows:
+            warnings.warn(_KNN_ROWS_WARNING, UserWarning, stacklevel=3)
+            return None
+        if indices.ndim != 2:
+            raise ValueError("precomputed_knn arrays must be two-dimensional")
+        return indices, distances, search_index
+
     def _store_fit(
-        self, n_features, transform_fit, graph, n_neighbors, embedding, *, embedding_options=None
+        self, n_features, transform_fit, graph, n_neighbors, embedding, *,
+        embedding_options=None, transform_error=None, transform_cutoff=None,
     ):
         if graph is not None:
             self.graph_ = graph
@@ -506,6 +670,11 @@ class UMAP(BaseEstimator, TransformerMixin):
             del self.embedding_
         self.n_features_in_ = n_features
         self._graph_transform_fit = transform_fit
+        self._exact_fit_input = (
+            transform_fit[0] if transform_fit is not None and not issparse(transform_fit[0]) else None
+        )
+        self._supplied_transform_error = transform_error
+        self._transform_cutoff = transform_cutoff
         self._embedding_transform_options = None
         if embedding_options is not None:
             self._embedding_transform_options = {

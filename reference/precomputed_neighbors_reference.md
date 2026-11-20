@@ -26,9 +26,52 @@ All thirteen successful cases that used the supplied neighbors raised
 the fit changed both arrays supplied by the caller, replacing cut indices
 with `-1` and their distances with `+inf`. Windows and Ubuntu WSL
 reproduced the same outputs and warnings for all 17 cases. The scope is
-small dense graph fits with default local connectivity. Large data,
-approximate search, supplied search indexes, and embedding fit need
-separate checks.
+small dense graph fits with default local connectivity.
+
+## Python estimator
+
+Pass `precomputed_knn=(indices, distances, None)` for an unsupervised graph
+or serial seeded dense embedding. A two-item tuple also works. The width
+check uses the requested `n_neighbors` before dataset-size truncation. A
+short width takes precedence over a row-count mismatch. Fallback bypasses
+both caller-array writes and the supplied search index. The fixtures include
+a fallback fit at cutoff `1.0`, including the held-out COO coordinates and
+stored zeros at `(0, 0)` for cut entries.
+
+The estimator evaluates `distances >= disconnection_distance` in the
+array's dtype and assigns `-1` to those indices before writing `+inf` to
+the distances. It attempts both assignments even for an empty mask. A
+read-only index array prevents either write. A read-only distance array
+can leave the indices changed while the previously fitted output remains
+available for exact input. After an accepted tuple reaches the masking
+stage, a write error still leaves held-out search subject to the supplied
+search-index check. Shape validation and cutoff type validation precede
+both writes. A shape error during refit preserves the previous graph and
+exact-input match while held-out search sees the new, validated features.
+A singleton validates the arrays and returns before assigning either one.
+Native graph validation applies to the remaining index-distance pairs
+after masking. These regression cases use in-range integral indices with
+finite, non-negative distances or the paired `(-1, +inf)` marker.
+
+The exact normalized input returns the stored `graph_` or `embedding_`
+by identity. With `None` as the search index, held-out input is validated
+before the public `NotImplementedError` is raised. A public-wheel
+probe with a PyNNDescent `NNDescent` object called its public `query`
+method for held-out features. External search adapters are outside the
+verified estimator scope and raise `NotImplementedError` for held-out
+input. Approximate or large-data paths also need separate compatibility
+checks. An empty supplied graph is observable through `graph_` even when
+layout fitting raises. A previous `embedding_` stays available.
+
+The Python fixtures record seven layouts with random, explicit and
+spectral initialization. They include connected, disconnected and isolated
+rows. The installed Windows and Ubuntu 24.04 wheels reproduced all graph
+bits and matched the coordinates of the respective public wheel. The
+25-epoch explicit initialization differs across platforms by up to
+2.58837 in a coordinate, so each platform has its own layout fixture. An
+embedding uses the existing Rust layout over the supplied graph after
+epoch-dependent pruning. Large duplicate weights can still exceed the
+native layout's unit-interval limit.
 
 ## Rust graph stage
 
@@ -111,4 +154,9 @@ Verify both fixtures with the locked reference environment.
 uv sync --project reference --locked --python 3.13.12
 & reference/.venv/Scripts/python.exe -I reference/generate_precomputed_neighbors_fixture.py --check
 & reference/.venv/Scripts/python.exe -I reference/generate_precomputed_neighbors_fixture.py --rust-held-out --check
+& reference/.venv/Scripts/python.exe -I reference/generate_precomputed_neighbors_fixture.py --python-estimator --check
 ```
+
+On Ubuntu, run the last command with the locked environment's
+`reference/.venv/bin/python` interpreter. The Python regression tests in
+`tests/test_supplied_neighbors.py` use the platform's layout fixture.

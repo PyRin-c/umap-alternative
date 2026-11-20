@@ -15,9 +15,10 @@ use crate::sampling::EdgeSamplingCursor;
 /// A rectangular coordinate (COO) graph of directed fuzzy memberships.
 ///
 /// Each stored entry consists of the query row, training column, and membership
-/// at the same position in the three vectors. Entries are grouped by ascending
-/// query row and ordered within a row by ascending distance, breaking ties by
-/// ascending training index. The shape is `n_rows x n_cols`.
+/// at the same position in the three vectors. Uncut entries are grouped by
+/// ascending query row and ordered within a row by ascending distance, breaking
+/// ties by ascending training index. A distance cutoff can leave stored zeros
+/// at placeholder coordinates. The shape is `n_rows x n_cols`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CooGraph {
     /// Number of query rows.
@@ -574,8 +575,11 @@ pub fn transform_dense_graph_with_options(
     )
 }
 
+/// Build a held-out graph with an inclusive distance cutoff.
+/// Cut entries retain a zero weight at coordinate `(0, 0)` in their original
+/// storage positions. Query scales still use every selected distance.
 #[allow(clippy::too_many_arguments)]
-fn transform_dense_graph_with_cutoff(
+pub fn transform_dense_graph_with_cutoff(
     training: &[f32],
     n_training_rows: usize,
     queries: &[f32],
@@ -641,14 +645,16 @@ fn transform_dense_graph_with_cutoff(
     } else {
         batch_scale_floor(&graph.data)
     };
-    for distances in graph.data.chunks_exact_mut(k) {
+    for (row, distances) in graph.data.chunks_exact_mut(k).enumerate() {
         let (rho, sigma) = if connectivity == 0.0 {
             (0.0, transform_scale(distances, target).max(min_scale))
         } else {
             row_parameters(distances, connectivity, min_scale)
         };
-        for distance in distances {
+        for (column, distance) in distances.iter_mut().enumerate() {
             *distance = if *distance >= cutoff {
+                graph.row[row * k + column] = 0;
+                graph.col[row * k + column] = 0;
                 0.0
             } else {
                 membership(*distance, rho, sigma)

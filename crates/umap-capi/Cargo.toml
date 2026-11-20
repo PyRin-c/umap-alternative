@@ -1,0 +1,13 @@
+[package]
+name = "umap-capi"
+description = "C ABI for the native UMAP graph primitive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+umap-core = { path = "../umap-core" }

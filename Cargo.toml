@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/umap-core", "crates/umap-python"]
+members = ["crates/umap-core", "crates/umap-python", "crates/umap-capi"]
 resolver = "3"
 
 [workspace.package]

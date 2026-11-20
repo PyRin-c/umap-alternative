@@ -228,6 +228,70 @@ impl fmt::Display for LayoutError {
 
 impl std::error::Error for LayoutError {}
 
+#[derive(Clone, Copy)]
+pub(crate) enum DistanceReduction {
+    Sequential,
+    SeededCompatibility,
+}
+
+impl DistanceReduction {
+    fn squared(self, left: &[f32], right: &[f32]) -> f32 {
+        let (initial, left, right) = match self {
+            Self::Sequential => (0.0, left, right),
+            Self::SeededCompatibility => compatibility_distance_prefix(left, right),
+        };
+        left.iter()
+            .zip(right)
+            .fold(initial, |sum, (&left, &right)| {
+                let difference = left - right;
+                difference.mul_add(difference, sum)
+            })
+    }
+}
+
+// This order reproduces isolated-edge compatibility fits from the Windows
+// x86-64 wheel. The scalar remainder is folded by DistanceReduction::squared.
+fn compatibility_distance_prefix<'a>(
+    left: &'a [f32],
+    right: &'a [f32],
+) -> (f32, &'a [f32], &'a [f32]) {
+    let (blocks_left, left) = left.as_chunks::<32>();
+    let (blocks_right, right) = right.as_chunks::<32>();
+    let mut sum = 0.0;
+    if !blocks_left.is_empty() {
+        let lanes = accumulate_squared_lanes(blocks_left, blocks_right, [0.0; 32]);
+        let merged: [f32; 8] =
+            std::array::from_fn(|i| (lanes[i] + lanes[i + 8]) + (lanes[i + 16] + lanes[i + 24]));
+        sum = reduce_four_lanes(std::array::from_fn(|i| merged[i] + merged[i + 4]));
+    }
+
+    let (blocks_left, left) = left.as_chunks::<4>();
+    let (blocks_right, right) = right.as_chunks::<4>();
+    if !blocks_left.is_empty() {
+        let lanes = accumulate_squared_lanes(blocks_left, blocks_right, [sum, 0.0, 0.0, 0.0]);
+        sum = reduce_four_lanes(lanes);
+    }
+    (sum, left, right)
+}
+
+fn accumulate_squared_lanes<const N: usize>(
+    left: &[[f32; N]],
+    right: &[[f32; N]],
+    mut lanes: [f32; N],
+) -> [f32; N] {
+    for (left, right) in left.iter().zip(right) {
+        for i in 0..N {
+            let difference = left[i] - right[i];
+            lanes[i] = difference.mul_add(difference, lanes[i]);
+        }
+    }
+    lanes
+}
+
+fn reduce_four_lanes(lanes: [f32; 4]) -> f32 {
+    (lanes[0] + lanes[2]) + (lanes[1] + lanes[3])
+}
+
 /// Apply one symmetric attractive update to two endpoint vectors.
 ///
 /// The endpoint vectors are interpreted as Euclidean coordinates.  The loss
@@ -250,6 +314,24 @@ pub fn attractive_update_pair(
     b: impl Into<f64>,
     learning_rate: impl Into<f64>,
 ) -> Result<(), LayoutError> {
+    attractive_update_pair_with_distance(
+        head,
+        tail,
+        a,
+        b,
+        learning_rate,
+        DistanceReduction::Sequential,
+    )
+}
+
+fn attractive_update_pair_with_distance(
+    head: &mut [f32],
+    tail: &mut [f32],
+    a: impl Into<f64>,
+    b: impl Into<f64>,
+    learning_rate: impl Into<f64>,
+    distance_reduction: DistanceReduction,
+) -> Result<(), LayoutError> {
     if head.is_empty() || head.len() != tail.len() {
         return Err(if head.len() != tail.len() {
             LayoutError::InvalidEndpointShape {
@@ -267,7 +349,7 @@ pub fn attractive_update_pair(
     let (a, b, learning_rate) = (a.into(), b.into(), learning_rate.into());
     validate_parameters(a, b, learning_rate)?;
 
-    let distance = scalar_squared_distance(head, tail, 0.0);
+    let distance = distance_reduction.squared(head, tail);
     let Some(gradient_scale) = attractive_scale(head, tail, distance, a, b, learning_rate)? else {
         return Ok(());
     };
@@ -316,7 +398,7 @@ pub(crate) fn attractive_update_fixed_tail(
     b: f64,
     learning_rate: f64,
 ) -> Result<(), LayoutError> {
-    let distance = transform_squared_distance(head, tail);
+    let distance = DistanceReduction::SeededCompatibility.squared(head, tail);
     let Some(gradient_scale) = attractive_scale(head, tail, distance, a, b, learning_rate)? else {
         return Ok(());
     };
@@ -413,6 +495,26 @@ pub fn negative_example_update(
     repulsion_strength: impl Into<f64>,
     learning_rate: impl Into<f64>,
 ) -> Result<(), LayoutError> {
+    negative_example_update_with_distance(
+        current,
+        other,
+        a,
+        b,
+        repulsion_strength,
+        learning_rate,
+        DistanceReduction::Sequential,
+    )
+}
+
+pub(crate) fn negative_example_update_with_distance(
+    current: &mut [f32],
+    other: &[f32],
+    a: impl Into<f64>,
+    b: impl Into<f64>,
+    repulsion_strength: impl Into<f64>,
+    learning_rate: impl Into<f64>,
+    distance_reduction: DistanceReduction,
+) -> Result<(), LayoutError> {
     if current.is_empty() || current.len() != other.len() {
         return Err(if current.len() != other.len() {
             LayoutError::InvalidEndpointShape {
@@ -438,7 +540,7 @@ pub fn negative_example_update(
     validate_endpoint(current, "current")?;
     validate_endpoint(other, "other")?;
 
-    let distance = scalar_squared_distance(current, other, 0.0);
+    let distance = distance_reduction.squared(current, other);
     apply_negative_update(
         current,
         other,
@@ -458,7 +560,7 @@ pub(crate) fn negative_update_fixed_tail(
     repulsion_strength: f64,
     learning_rate: f64,
 ) -> Result<(), LayoutError> {
-    let distance = transform_squared_distance(current, other);
+    let distance = DistanceReduction::SeededCompatibility.squared(current, other);
     apply_negative_update(
         current,
         other,
@@ -557,57 +659,6 @@ fn apply_negative_update(
     Ok(())
 }
 
-fn scalar_squared_distance(head: &[f32], tail: &[f32], mut sum: f32) -> f32 {
-    for (&head, &tail) in head.iter().zip(tail) {
-        let difference = head - tail;
-        sum = difference.mul_add(difference, sum);
-    }
-    sum
-}
-
-// The Windows x86-64 transform checkpoints distinguish three accumulation
-// stages, with float32 rounding at every lane combination.
-fn transform_squared_distance(head: &[f32], tail: &[f32]) -> f32 {
-    let (head_blocks, head) = head.as_chunks::<32>();
-    let (tail_blocks, tail) = tail.as_chunks::<32>();
-    let mut sum = 0.0;
-    if !head_blocks.is_empty() {
-        let mut lanes = [0.0; 32];
-        accumulate_squared_blocks(&mut lanes, head_blocks, tail_blocks);
-        let combined: [f32; 8] = std::array::from_fn(|lane| {
-            (lanes[lane] + lanes[lane + 8]) + (lanes[lane + 16] + lanes[lane + 24])
-        });
-        let [a, b, c, d, e, f, g, h] = combined;
-        sum = reduce_four([a + e, b + f, c + g, d + h]);
-    }
-
-    let (head_blocks, head) = head.as_chunks::<4>();
-    let (tail_blocks, tail) = tail.as_chunks::<4>();
-    if !head_blocks.is_empty() {
-        let mut lanes = [sum, 0.0, 0.0, 0.0];
-        accumulate_squared_blocks(&mut lanes, head_blocks, tail_blocks);
-        sum = reduce_four(lanes);
-    }
-    scalar_squared_distance(head, tail, sum)
-}
-
-fn reduce_four([a, b, c, d]: [f32; 4]) -> f32 {
-    (a + c) + (b + d)
-}
-
-fn accumulate_squared_blocks<const N: usize>(
-    lanes: &mut [f32; N],
-    head: &[[f32; N]],
-    tail: &[[f32; N]],
-) {
-    for (head, tail) in head.iter().zip(tail) {
-        for ((sum, &head), &tail) in lanes.iter_mut().zip(head).zip(tail) {
-            let difference = head - tail;
-            *sum = difference.mul_add(difference, *sum);
-        }
-    }
-}
-
 /// Apply one symmetric attractive update to two rows in a row-major matrix.
 ///
 /// `embedding` has shape `n_rows x n_components`; `head_row` and `tail_row`
@@ -621,6 +672,29 @@ pub fn attractive_update(
     a: impl Into<f64>,
     b: impl Into<f64>,
     learning_rate: impl Into<f64>,
+) -> Result<(), LayoutError> {
+    attractive_update_with_distance(
+        embedding,
+        n_components,
+        head_row,
+        tail_row,
+        a,
+        b,
+        learning_rate,
+        DistanceReduction::Sequential,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn attractive_update_with_distance(
+    embedding: &mut [f32],
+    n_components: usize,
+    head_row: usize,
+    tail_row: usize,
+    a: impl Into<f64>,
+    b: impl Into<f64>,
+    learning_rate: impl Into<f64>,
+    distance_reduction: DistanceReduction,
 ) -> Result<(), LayoutError> {
     if n_components == 0 || !embedding.len().is_multiple_of(n_components) {
         return Err(LayoutError::InvalidShape {
@@ -654,17 +728,18 @@ pub fn attractive_update(
 
     let head_start = head_row * n_components;
     let tail_start = tail_row * n_components;
-    if head_start < tail_start {
+    let (head, tail) = if head_start < tail_start {
         let (before_tail, after_tail) = embedding.split_at_mut(tail_start);
         let head = &mut before_tail[head_start..head_start + n_components];
         let tail = &mut after_tail[..n_components];
-        attractive_update_pair(head, tail, a, b, learning_rate)
+        (head, tail)
     } else {
         let (before_head, after_head) = embedding.split_at_mut(head_start);
         let tail = &mut before_head[tail_start..tail_start + n_components];
         let head = &mut after_head[..n_components];
-        attractive_update_pair(head, tail, a, b, learning_rate)
-    }
+        (head, tail)
+    };
+    attractive_update_pair_with_distance(head, tail, a, b, learning_rate, distance_reduction)
 }
 
 /// Apply one ascending CSR sweep of symmetric attractive updates.

@@ -1,19 +1,24 @@
-//! Sequential CSR optimization with an injected negative-vertex sampler.
+//! Sequential CSR optimization with injected or seeded negative sampling.
 //!
-//! The optimizer composes the existing [`crate::layout::attractive_update`]
-//! and [`crate::layout::negative_example_update`] kernels.  It deliberately
-//! keeps vertex selection outside the core: callers supply a deterministic or
-//! random `FnMut(usize) -> usize`, receiving the current source row and
-//! returning a candidate vertex.
+//! The optimizer composes the attractive and negative-example kernels.
+//! Vertex selection is supplied as a deterministic or random
+//! `FnMut(usize) -> usize`, receiving the current source row and returning a
+//! candidate vertex.
 
 use std::fmt;
 
 use crate::fuzzy_graph::CsrGraph;
 use crate::layout::{
-    LayoutError, attractive_update, negative_example_update, validate_csr_inputs,
-    validate_repulsion_strength,
+    DistanceReduction, LayoutError, attractive_update_with_distance,
+    negative_example_update_with_distance, validate_csr_inputs, validate_repulsion_strength,
 };
-use crate::sampling::{EdgeSamplingCursor, SamplingError};
+use crate::sampling::{EdgeSamplingCursor, SamplingError, seeded_train_positive_interval};
+
+#[derive(Clone, Copy)]
+pub(crate) enum OptimizeMode {
+    Injected,
+    SeededCompatibility,
+}
 
 /// Failures while running [`optimize_csr`].
 #[derive(Clone, Debug, PartialEq)]
@@ -123,6 +128,35 @@ pub fn optimize_csr<F>(
 where
     F: FnMut(usize) -> usize,
 {
+    optimize_csr_with_mode(
+        embedding,
+        n_components,
+        graph,
+        a,
+        b,
+        learning_rate,
+        repulsion_strength,
+        negative_sample_rate,
+        n_epochs,
+        negative_sampler,
+        OptimizeMode::Injected,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn optimize_csr_with_mode(
+    embedding: &mut [f32],
+    n_components: usize,
+    graph: &CsrGraph,
+    a: impl Into<f64>,
+    b: impl Into<f64>,
+    learning_rate: impl Into<f64>,
+    repulsion_strength: impl Into<f64>,
+    negative_sample_rate: f64,
+    n_epochs: usize,
+    mut negative_sampler: impl FnMut(usize) -> usize,
+    mode: OptimizeMode,
+) -> Result<(), OptimizeError> {
     let (a, b, learning_rate, repulsion_strength) = (
         a.into(),
         b.into(),
@@ -152,19 +186,33 @@ where
         .copied()
         .map(|weight| {
             if weight == 0.0 {
-                Ok(None)
-            } else {
-                EdgeSamplingCursor::from_graph_weights(
+                return Ok(None);
+            }
+            match mode {
+                OptimizeMode::Injected => EdgeSamplingCursor::from_graph_weights(
                     maximum_positive_weight,
                     weight,
                     negative_sample_rate,
                 )
-                .map(Some)
+                .map(Some),
+                OptimizeMode::SeededCompatibility => {
+                    seeded_train_positive_interval(n_epochs, maximum_positive_weight, weight)
+                        .map(|interval| {
+                            EdgeSamplingCursor::from_positive_interval(
+                                interval,
+                                negative_sample_rate,
+                            )
+                        })
+                        .transpose()
+                }
             }
         })
         .collect::<Result<Vec<_>, SamplingError>>()?;
 
-    let mut negative_sampler = negative_sampler;
+    let distance_reduction = match mode {
+        OptimizeMode::Injected => DistanceReduction::Sequential,
+        OptimizeMode::SeededCompatibility => DistanceReduction::SeededCompatibility,
+    };
     let mut alpha = learning_rate;
     for epoch in 0..n_epochs {
         let epoch_as_f64 = epoch as f64;
@@ -187,7 +235,16 @@ where
                 };
 
                 if positive_due {
-                    attractive_update(embedding, n_components, row, index, a, b, alpha)?;
+                    attractive_update_with_distance(
+                        embedding,
+                        n_components,
+                        row,
+                        index,
+                        a,
+                        b,
+                        alpha,
+                        distance_reduction,
+                    )?;
                 }
 
                 for _ in 0..negative_count {
@@ -211,6 +268,7 @@ where
                         b,
                         repulsion_strength,
                         alpha,
+                        distance_reduction,
                     )?;
                 }
             }
@@ -234,20 +292,30 @@ fn negative_update_rows(
     b: f64,
     repulsion_strength: f64,
     learning_rate: f64,
+    distance_reduction: DistanceReduction,
 ) -> Result<(), LayoutError> {
     let source_start = source * n_components;
     let vertex_start = vertex * n_components;
-    if source_start < vertex_start {
+    let (current, other) = if source_start < vertex_start {
         let (before_vertex, after_vertex) = embedding.split_at_mut(vertex_start);
         let current = &mut before_vertex[source_start..source_start + n_components];
         let other = &after_vertex[..n_components];
-        negative_example_update(current, other, a, b, repulsion_strength, learning_rate)
+        (current, other)
     } else {
         let (before_source, after_source) = embedding.split_at_mut(source_start);
         let other = &before_source[vertex_start..vertex_start + n_components];
         let current = &mut after_source[..n_components];
-        negative_example_update(current, other, a, b, repulsion_strength, learning_rate)
-    }
+        (current, other)
+    };
+    negative_example_update_with_distance(
+        current,
+        other,
+        a,
+        b,
+        repulsion_strength,
+        learning_rate,
+        distance_reduction,
+    )
 }
 
 #[cfg(test)]

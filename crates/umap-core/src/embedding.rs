@@ -11,7 +11,7 @@ use crate::initialization::{
     InitializationError, normalize_columns, random_initialization_with_rng,
 };
 use crate::neighbors::DistanceMetric;
-use crate::optimize::{OptimizeError, optimize_csr};
+use crate::optimize::{OptimizeError, OptimizeMode, optimize_csr_with_mode};
 use crate::rng::{Mt19937, NegativeSamplerError, SerialNegativeSampler};
 
 /// Initialization choices for a dense embedding fit.
@@ -57,7 +57,7 @@ impl DenseEmbeddingInit {
 /// `n_rows`/`n_features` arguments to [`fit_dense_embedding`].
 /// The first type parameter controls the precision of the curve parameters
 /// and the initial learning rate. The second controls repulsion strength.
-/// Use `DenseEmbeddingConfig<f64, f64>` for double precision throughout.
+/// Use `DenseEmbeddingConfig<f64, f64>` to supply those parameters in double precision.
 /// Both type parameters default to `f32`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DenseEmbeddingConfig<T = f32, R = f32> {
@@ -193,9 +193,10 @@ impl From<OptimizeError> for DenseEmbeddingFitError {
 /// `data` is a finite row-major matrix with shape `n_rows` by `n_features`.
 /// The graph is built by [`fit_dense_graph`]. The fit generates or copies the
 /// initial coordinates into a private buffer, normalizes the columns, and
-/// passes the result to [`optimize_csr`]. At zero epochs, the fit returns the
-/// normalized coordinates after validation. Each scheduled negative sample
-/// passes its source row to the sampler, which returns a candidate vertex.
+/// passes the result to [`crate::optimize::optimize_csr`]. At zero epochs, the
+/// fit returns the normalized coordinates after validation. Each scheduled
+/// negative sample passes its source row to the sampler, which returns a
+/// candidate vertex.
 ///
 /// If graph construction, initialization, or optimizer validation fails before
 /// an update, no caller-owned buffer is changed.  The returned coordinates are
@@ -216,6 +217,7 @@ where
         coordinates,
         &config.layout_config(),
         negative_sampler,
+        OptimizeMode::Injected,
     )
 }
 
@@ -225,7 +227,11 @@ where
 /// initializes an RNG that draws the layout and then seeds the sampler.
 /// For explicit initialization, `explicit_seed` initializes the RNG and the
 /// sampler is seeded after the supplied coordinates have been normalized.
-/// Each row's sampling stream persists across all edges and epochs.
+/// Each row's sampling stream persists across all edges and epochs. The
+/// compatibility schedule rounds normalized weights and expected sample
+/// counts to `f32` before computing the intervals in `f64`. The compatibility
+/// distance reduction uses the same component grouping for attraction and
+/// repulsion.
 pub fn fit_dense_embedding_seeded(
     data: &[f32],
     n_rows: usize,
@@ -245,7 +251,8 @@ pub fn fit_dense_embedding_seeded(
 /// positioned immediately after any draws used to produce them. This function
 /// copies and normalizes the layout, seeds the serial negative sampler from
 /// the current stream position (including at zero epochs), and optimizes the
-/// layout. The returned embedding owns the supplied graph and final coordinates.
+/// layout with the same compatibility schedule as [`fit_dense_embedding_seeded`].
+/// The returned embedding owns the supplied graph and final coordinates.
 /// On success the caller RNG advances past sampler seeding. On error it keeps
 /// its original state.
 pub fn fit_graph_embedding_with_rng(
@@ -288,11 +295,17 @@ fn finish_seeded_embedding(
                     }
                 }
             })?;
-    finish_embedding(graph, coordinates, config, |row| {
-        sampler
-            .sample(row)
-            .expect("optimizer source row is in bounds")
-    })
+    finish_embedding(
+        graph,
+        coordinates,
+        config,
+        |row| {
+            sampler
+                .sample(row)
+                .expect("optimizer source row is in bounds")
+        },
+        OptimizeMode::SeededCompatibility,
+    )
 }
 
 fn prepare_dense_embedding(
@@ -325,8 +338,9 @@ fn finish_embedding(
     mut coordinates: Vec<f32>,
     config: &EmbeddingLayoutConfig<impl Copy + Into<f64>, impl Copy + Into<f64>>,
     negative_sampler: impl FnMut(usize) -> usize,
+    mode: OptimizeMode,
 ) -> Result<DenseEmbedding, DenseEmbeddingFitError> {
-    optimize_csr(
+    optimize_csr_with_mode(
         &mut coordinates,
         config.n_components,
         &graph,
@@ -337,6 +351,7 @@ fn finish_embedding(
         config.negative_sample_rate,
         config.n_epochs,
         negative_sampler,
+        mode,
     )?;
 
     Ok(DenseEmbedding {

@@ -12,6 +12,21 @@
 
 use std::fmt;
 
+/// Build a serial compatibility-training interval from validated weights.
+///
+/// The normalized weight and expected sample count each round to float32.
+/// The final division and the timing cursor use float64. An edge with zero
+/// expected samples has no cursor, including every edge at zero epochs.
+pub(crate) fn seeded_train_positive_interval(
+    n_epochs: usize,
+    maximum_weight: f32,
+    weight: f32,
+) -> Option<f64> {
+    let normalized_weight = weight / maximum_weight;
+    let expected_samples = n_epochs as f32 * normalized_weight;
+    (expected_samples > 0.0).then(|| n_epochs as f64 / f64::from(expected_samples))
+}
+
 /// Failures while constructing or advancing an [`EdgeSamplingCursor`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum SamplingError {
@@ -317,7 +332,34 @@ fn exceeds_usize(value: f64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{EdgeSamplingCursor, SamplingError};
+    use super::{EdgeSamplingCursor, SamplingError, seeded_train_positive_interval};
+
+    #[test]
+    fn seeded_training_intervals_match_public_rounding_at_integer_boundaries() {
+        assert_eq!(seeded_train_positive_interval(0, 1.0, 1.0), None);
+        assert_eq!(seeded_train_positive_interval(100, 1.0, 0.0), None);
+        let cases = [
+            (1, 0x3f80_0000, 0x3eff_ffff, 0x4000_0000_1000_0010),
+            (1, 0x3f80_0000, 0x3f00_0000, 0x4000_0000_0000_0000),
+            (1, 0x3f80_0000, 0x3f00_0001, 0x3fff_ffff_c000_0080),
+            (3, 0x3f80_0000, 0x3eaa_aaab, 0x4008_0000_0000_0000),
+            (100, 0x3f35_c28f, 0x3f35_c28f, 0x3ff0_0000_0000_0000),
+            (100, 0x3f35_c28f, 0x3c45_29d3, 0x404d_7fff_f433_3338),
+            (100, 0x3f35_c28f, 0x3c45_29d4, 0x404d_7fff_f433_3338),
+            (100, 0x3f35_c28f, 0x3c45_29d5, 0x404d_7fff_d163_d754),
+            (16_777_217, 0x3f35_c28f, 0x3f35_c28f, 0x3ff0_0000_1000_0000),
+        ];
+        for (epochs, max, weight, expected) in cases {
+            let interval =
+                seeded_train_positive_interval(epochs, f32::from_bits(max), f32::from_bits(weight))
+                    .unwrap();
+            assert_eq!(
+                interval.to_bits(),
+                expected,
+                "{epochs}, {max:08x}, {weight:08x}"
+            );
+        }
+    }
 
     #[test]
     fn published_unit_interval_checkpoints_match() {

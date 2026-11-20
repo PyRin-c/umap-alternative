@@ -145,6 +145,26 @@ Sparse feature updates, additional metrics, externally supplied neighbors,
 general equal-distance ranking, and failures during the optimizer remain
 open.
 
+### Finite-cutoff fit timing
+
+The Windows benchmark uses dense Euclidean features from NumPy
+`default_rng(20261121).standard_normal((n_rows, 8)).astype(np.float32)`,
+15 neighbors, a distance cutoff of 2.75, and one thread. Each measurement
+is the median of seven runs after warming both paths. The former path used
+scikit-learn pairwise distances and NumPy's stable row sort before handing
+the selected ranks to Rust. The native path includes the Python-to-Rust
+conversion, distance computation, cutoff counting, and CSR construction.
+
+| Rows | Former graph build | Native graph build | Former differing weights | Native differing weights |
+| ---: | ---: | ---: | ---: | ---: |
+| 1,024 | 44.17 ms | 7.18 ms | 6,940 / 19,860 | 0 / 19,860 |
+| 2,048 | 183.29 ms | 24.62 ms | 13,960 / 40,734 | 0 / 40,734 |
+
+Both paths match the CSR structure of the pinned public wheel for these
+inputs. The former distance and index matrices occupy 48 MiB combined at
+2,048 rows. The native search retains the selected ranks and one row of
+candidates at a time.
+
 ## Reproduction
 
 Run from the repository root. The reference lock specifies CPython 3.13.12

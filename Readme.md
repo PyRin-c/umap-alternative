@@ -79,6 +79,8 @@ Euclidean、Manhattan、Chebyshev、cosine の互換レイアウトでは、CSR�
 
 `hamming` は特徴量の値を比較します。`matching`、`jaccard`、`dice`、`russellrao`、`rogerstanimoto`、`sokalmichener`、`sokalsneath`、`yule`、`kulsinski` は各特徴量の値が非ゼロかどうかを比較します。これらの距離は密な特徴量のグラフ学習、互換レイアウトの学習、外部変換、更新で使えます。CSR の学習では `yule` が `ValueError` になります。逆変換を呼ぶと `ValueError` になります。[ブール距離の比較記録](reference/boolean_metric_reference.md)・[更新の比較記録](reference/boolean_update_reference.md)
 
+パック済みのビット列には `bit_hamming` と `bit_jaccard` を指定できます。密な入力を `uint8` に変換し、教師なし学習と外部変換でビット単位の距離を計算します。[パック済みビット距離の比較記録](reference/packed_metric_reference.md)
+
 `umap_alternative.umap_` で近傍距離の平滑化、メンバーシップ、近傍配列からのグラフ構築を利用できます。孤立した入力行は `umap_alternative.utils.disconnected_vertices` で確認できます。[グラフ補助関数の参照記録](reference/graph_primitives_reference.md)
 
 同じ頂点を持つ疎グラフの有向和・重み付き積・局所接続度の再正規化は、`umap_alternative.umap_` の補助関数で実行できます。`umap_alternative.sparse` の演算は COO の値バッファへ直接書き込みます。[グラフ演算の比較記録](reference/graph_operators_reference.md)

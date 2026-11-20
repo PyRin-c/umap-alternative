@@ -51,6 +51,29 @@ ratios with union counts up to 99. Windows and Ubuntu differ by one
 float32 ULP on 30 ratios. The native path matches all 4,950 named
 outputs on each host. Each host fixture includes the grid digest.
 
+## Independent holdouts and timings
+
+On both hosts, 128-, 512-, and 1,024-row holdouts matched all 37,066 fit
+CSR weights and 648 held-out COO weights, including their indices.
+For each row count `n`, use `np.random.RandomState(788 + n)` to draw
+`uint8` training bytes of shape `(n, 16)` and then query bytes of shape
+`(12, 16)` with `randint(0, 256, size=..., dtype=np.uint8)`. Fit with
+`n_neighbors=9`, `n_jobs=1`, `random_state=42`, `transform_mode="graph"`,
+`compatibility_layout=True`, and `disconnection_distance=np.inf`.
+
+The table records median milliseconds for seven fresh estimator fits
+after one warmup. Each caller used one numerical thread on the Intel Core
+Ultra 9 285K workstation. The timers cover estimator creation and fit.
+
+| Rows | Metric | Windows public | Windows Rust | Ubuntu WSL public | Ubuntu WSL Rust |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 128 | Hamming | 7.720 | 0.432 | 4.958 | 0.408 |
+| 128 | Jaccard | 8.485 | 0.635 | 5.046 | 0.621 |
+| 512 | Hamming | 113.509 | 3.460 | 66.824 | 3.434 |
+| 512 | Jaccard | 114.734 | 6.710 | 70.377 | 6.440 |
+| 1,024 | Hamming | 459.102 | 11.934 | 267.006 | 11.773 |
+| 1,024 | Jaccard | 473.795 | 24.164 | 282.453 | 24.161 |
+
 ## Remaining differences
 
 Narrow queries compare their prefix against the training rows. With a

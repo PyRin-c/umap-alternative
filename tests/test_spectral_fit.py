@@ -193,7 +193,8 @@ def test_disconnected_spectral_graph_layout_and_rng(name, monkeypatch):
         sizes = (len(features),) * 2
         values = np.asarray(graph["bits"], dtype=np.uint32).view(np.float32).tolist()
 
-        def explicit_graph(*args):
+        def explicit_graph(*args, graph_options=None):
+            assert graph_options is None
             return sizes, graph["indptr"], graph["indices"], values
 
         monkeypatch.setattr(_umap._native, "_fit_dense_graph", explicit_graph)

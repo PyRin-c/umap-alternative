@@ -1,5 +1,9 @@
 # Tied recursive hubs in UMAP 0.6.0
 
+The [coarse transition follow-up](modern_recursive_transition_reference.md)
+resolves the four-level repulsive mismatch and isolates the remaining
+attraction-only residual.
+
 The [fixture generator](generate_modern_recursive_hub_fixture.py) uses the
 pinned public `label_propagation_init`, `UMAP.fit` and `UMAP.fit_transform`
 interfaces. The one-contraction controls supply a fixed CSR, anchor and

@@ -90,6 +90,7 @@ pub struct ModernSampledLayout {
     sampling: ModernSamplingConfig,
     indptr: Vec<usize>,
     indices: Vec<usize>,
+    coarse_ordinals: Option<Vec<usize>>,
     cursors: Vec<EdgeSamplingCursor>,
     pending_cursors: Vec<EdgeSamplingCursor>,
     shuffled: Vec<usize>,
@@ -132,6 +133,27 @@ impl ModernSampledLayout {
         coordinates: Vec<f32>,
         layout: ModernLayoutConfig,
         sampling: ModernSamplingConfig,
+    ) -> Result<Self, ModernSamplingError> {
+        Self::with_candidates(graph, coordinates, layout, sampling, false)
+    }
+
+    /// Supply candidate orders for a recursive coarse layout. Inactive edges
+    /// still occupy positions in the original CSR used for negative dispatch.
+    pub fn with_coarse_candidates(
+        graph: &CsrGraph,
+        coordinates: Vec<f32>,
+        layout: ModernLayoutConfig,
+        sampling: ModernSamplingConfig,
+    ) -> Result<Self, ModernSamplingError> {
+        Self::with_candidates(graph, coordinates, layout, sampling, true)
+    }
+
+    fn with_candidates(
+        graph: &CsrGraph,
+        coordinates: Vec<f32>,
+        layout: ModernLayoutConfig,
+        sampling: ModernSamplingConfig,
+        coarse: bool,
     ) -> Result<Self, ModernSamplingError> {
         let n_rows = graph.n_rows;
         if n_rows == 0 || n_rows > i32::MAX as usize {
@@ -180,6 +202,7 @@ impl ModernSampledLayout {
         let cutoff = max_weight / cutoff_epochs as f32;
         let mut indptr = Vec::with_capacity(n_rows + 1);
         let mut indices = Vec::new();
+        let mut coarse_ordinals = coarse.then(Vec::new);
         let mut cursors = Vec::new();
         indptr.push(0);
         for head in 0..n_rows {
@@ -208,6 +231,9 @@ impl ModernSampledLayout {
                     cursor.next_negative = cursor.negative_interval;
                     cursors.push(cursor);
                     indices.push(graph.indices[edge]);
+                    if let Some(ordinals) = &mut coarse_ordinals {
+                        ordinals.push(edge);
+                    }
                 }
             }
             indptr.push(indices.len());
@@ -220,6 +246,7 @@ impl ModernSampledLayout {
             sampling,
             indptr,
             indices,
+            coarse_ordinals,
             pending_cursors: cursors.clone(),
             cursors,
             shuffled: (0..n_rows).collect(),
@@ -339,8 +366,12 @@ impl ModernSampledLayout {
                 self.negative
                     .try_reserve(count)
                     .map_err(|_| ModernSamplingError::SampleCapacity)?;
-                let start = (edge as u128 * (epoch as u128 + 1) % n_rows as u128) as usize;
-                let stride = if exclude { 1 } else { edge % n_rows };
+                let ordinal = self
+                    .coarse_ordinals
+                    .as_ref()
+                    .map_or(edge, |ordinals| ordinals[edge]);
+                let start = (ordinal as u128 * (epoch as u128 + 1) % n_rows as u128) as usize;
+                let stride = if exclude { 1 } else { ordinal % n_rows };
                 let mut position = start;
                 let mut remaining = count;
                 while remaining != 0 {

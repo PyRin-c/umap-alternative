@@ -191,6 +191,46 @@ fn public_adam_epochs_match_modern_sampling_replay() {
 }
 
 #[test]
+fn coarse_dispatch_retains_inactive_edge_ordinals() {
+    let graph = CsrGraph {
+        n_rows: 5,
+        n_cols: 5,
+        indptr: vec![0, 1, 2, 3, 3, 3],
+        indices: vec![4, 2, 1],
+        data: vec![0.0001, 1.0, 1.0],
+    };
+    let layout = ModernLayoutConfig {
+        optimizer: ModernOptimizer::Adam,
+        n_components: 1,
+        n_epochs: 2,
+        learning_rate: 0.5,
+        a: 1.0,
+        b: 1.0,
+        repulsion_strength: 4.0,
+    };
+    let sampling = ModernSamplingConfig {
+        negative_sample_rate: 5.0,
+        ..ModernSamplingConfig::default()
+    };
+    let order = [0, 1, 2, 3, 4];
+    let coordinates = vec![0.0, 1.0, 2.0, 3.0, 4.0];
+    let mut coarse =
+        ModernSampledLayout::with_coarse_candidates(&graph, coordinates.clone(), layout, sampling)
+            .unwrap();
+    let mut outer =
+        ModernSampledLayout::with_supplied_candidates(&graph, coordinates, layout, sampling)
+            .unwrap();
+    coarse.step_with_candidate_order(&order).unwrap();
+    outer.step_with_candidate_order(&order).unwrap();
+    let coarse_epoch = coarse.step_with_candidate_order(&order).unwrap();
+    let outer_epoch = outer.step_with_candidate_order(&order).unwrap();
+    assert_eq!(coarse_epoch.positive, &[(1, 2), (2, 1)]);
+    assert_eq!(coarse_epoch.positive, outer_epoch.positive);
+    assert_eq!(coarse_epoch.negative, &[(1, 2), (1, 3), (2, 4), (2, 1)]);
+    assert_eq!(outer_epoch.negative, &[(1, 0), (1, 0), (2, 3)]);
+}
+
+#[test]
 fn ambiguous_projection_leaves_the_next_epoch_uncommitted() {
     let graph = CsrGraph {
         n_rows: 3,

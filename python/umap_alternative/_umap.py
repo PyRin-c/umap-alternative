@@ -351,7 +351,7 @@ def _refine_recursive_level(graph, coordinates, n_epochs, rng, *, a, b, options,
         optimizer="adam", n_components=shape[1], n_epochs=n_epochs, a=a, b=b,
         learning_rate=0.5, repulsion_strength=options.get("recursive_repulsion_strength", 4.0),
         negative_sample_rate=options.get("recursive_negative_sample_rate", 1.0),
-        exclude_graph_neighbors=False, project=order, refinement_schedule=use_refinement,
+        exclude_graph_neighbors=False, project=order, refinement_schedule=use_refinement, coarse=True,
     )
     return np.asarray(values, dtype=np.float32).reshape(shape)
 

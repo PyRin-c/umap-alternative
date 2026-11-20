@@ -960,7 +960,7 @@ fn _recursive_hub_order(degrees: Vec<f32>) -> Vec<usize> {
 #[pyo3(signature = (
     components, coordinates, rng_state, *, optimizer, n_components, n_epochs, a, b,
     learning_rate, repulsion_strength, negative_sample_rate, exclude_graph_neighbors,
-    checkpoint_epochs=None, project=None, refinement_schedule=false
+    checkpoint_epochs=None, project=None, refinement_schedule=false, coarse=false
 ))]
 #[allow(clippy::too_many_arguments)]
 fn _fit_modern_layout(
@@ -980,6 +980,7 @@ fn _fit_modern_layout(
     checkpoint_epochs: Option<Vec<usize>>,
     project: Option<Py<PyAny>>,
     refinement_schedule: bool,
+    coarse: bool,
 ) -> PyResult<ModernEmbeddingComponents> {
     let ((n_rows, n_cols), indptr, indices, data) = components;
     let graph = CsrGraph {
@@ -1014,9 +1015,16 @@ fn _fit_modern_layout(
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
 
     let use_projection = project.is_some();
+    if coarse && !use_projection {
+        return Err(PyValueError::new_err(
+            "coarse layout requires a supplied candidate order",
+        ));
+    }
     let mut sampled = py
         .detach(|| {
-            if use_projection {
+            if coarse {
+                ModernSampledLayout::with_coarse_candidates(&graph, coordinates, config, sampling)
+            } else if use_projection {
                 ModernSampledLayout::with_supplied_candidates(&graph, coordinates, config, sampling)
             } else {
                 ModernSampledLayout::new(&graph, coordinates, config, sampling, &mut rng)

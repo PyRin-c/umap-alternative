@@ -6,8 +6,9 @@ use std::fmt;
 use crate::fit::{build_fitted_graph, build_graph_with_cutoff};
 use crate::fuzzy_graph::{CsrGraph, GraphError, GraphOptions};
 use crate::neighbors::{
-    DistanceMetric, Neighbor, collect_neighbors, cosine_distance_pairs, euclidean_distance_pairs,
-    manhattan_distance_pairs, manhattan_distance_pairs_wide,
+    DistanceMetric, Neighbor, bray_curtis_distance_pairs, canberra_distance_pairs,
+    collect_neighbors, cosine_distance_pairs, euclidean_distance_pairs, manhattan_distance_pairs,
+    manhattan_distance_pairs_wide,
 };
 use crate::transform::{DenseGraphTransformError, QueryTieRanking};
 
@@ -942,6 +943,10 @@ fn sparse_distance(left: CsrRow<'_>, right: CsrRow<'_>, metric: DistanceMetric) 
             .fold(0.0_f64, |maximum, (left, right)| {
                 maximum.max((f64::from(left) - f64::from(right)).abs())
             }) as f32,
+        DistanceMetric::Canberra => canberra_distance_pairs(merged_features(left, right)) as f32,
+        DistanceMetric::BrayCurtis => {
+            bray_curtis_distance_pairs(merged_features(left, right)) as f32
+        }
         DistanceMetric::Manhattan | DistanceMetric::Cosine | DistanceMetric::Correlation => {
             unreachable!("CSR metric was dispatched before merging coordinates")
         }

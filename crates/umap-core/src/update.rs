@@ -240,7 +240,7 @@ fn prepare_with_rng(
     let neighbors =
         exhaustive_knn_with_metric(data, n_rows, n_features, config.n_neighbors, config.metric)
             .map_err(|error| DenseUpdateError::Graph(error.into()))?;
-    let graph = if config.metric.is_angular() {
+    let graph = if config.metric.uses_ranked_graph() {
         build_graph_with_cutoff(
             &neighbors,
             config.n_neighbors,

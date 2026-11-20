@@ -22,6 +22,8 @@ fn metric_top_k_matches_full_sort() {
         DistanceMetric::Chebyshev,
         DistanceMetric::Cosine,
         DistanceMetric::Correlation,
+        DistanceMetric::Canberra,
+        DistanceMetric::BrayCurtis,
     ] {
         assert_top_k(
             |query, candidate| {
@@ -62,6 +64,26 @@ fn metric_top_k_matches_full_sort() {
                             0.0
                         } else {
                             2.0
+                        }
+                    }
+                    DistanceMetric::Canberra => {
+                        let term = |left: f32, right: f32| {
+                            if left == 0.0 && right == 0.0 {
+                                0.0
+                            } else {
+                                f64::from((left - right).abs() / (left.abs() + right.abs()))
+                            }
+                        };
+                        (term(x, other_x) + term(y, other_y)) as f32
+                    }
+                    DistanceMetric::BrayCurtis => {
+                        let divisor =
+                            f64::from((x + other_x).abs()) + f64::from((y + other_y).abs());
+                        if divisor == 0.0 {
+                            0.0
+                        } else {
+                            ((f64::from((x - other_x).abs()) + f64::from((y - other_y).abs()))
+                                / divisor) as f32
                         }
                     }
                 }

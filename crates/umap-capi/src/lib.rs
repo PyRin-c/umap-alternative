@@ -172,6 +172,8 @@ enum MetricTag {
     Chebyshev = 2,
     Cosine = 3,
     Correlation = 4,
+    Canberra = 5,
+    BrayCurtis = 6,
 }
 
 impl MetricTag {
@@ -182,6 +184,8 @@ impl MetricTag {
             2 => Some(Self::Chebyshev),
             3 => Some(Self::Cosine),
             4 => Some(Self::Correlation),
+            5 => Some(Self::Canberra),
+            6 => Some(Self::BrayCurtis),
             _ => None,
         }
     }
@@ -193,6 +197,8 @@ impl MetricTag {
             Self::Chebyshev => DistanceMetric::Chebyshev,
             Self::Cosine => DistanceMetric::Cosine,
             Self::Correlation => DistanceMetric::Correlation,
+            Self::Canberra => DistanceMetric::Canberra,
+            Self::BrayCurtis => DistanceMetric::BrayCurtis,
         }
     }
 }

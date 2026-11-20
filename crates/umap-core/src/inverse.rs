@@ -6,8 +6,8 @@ use crate::fuzzy_graph::supplied_neighbors::ranked_scales;
 use crate::fuzzy_graph::{GraphOptions, batch_scale_floor, row_parameters};
 use crate::layout::{LayoutError, validate_parameters, validate_repulsion_strength};
 use crate::neighbors::{
-    DistanceMetric, KnnError, correlation_products, cosine_products, euclidean_distance_wide,
-    exhaustive_knn_with_metric,
+    DistanceMetric, KnnError, bray_curtis_sums, correlation_products, cosine_products,
+    euclidean_distance_wide, exhaustive_knn_with_metric,
 };
 use crate::rng::{Mt19937, draw_negative_seed, sample_vertex};
 use crate::sampling::{EdgeSamplingCursor, SamplingError};
@@ -196,7 +196,7 @@ pub fn fit_dense_inverse_scales_with_metric(
             }
         })
         .collect::<Vec<_>>();
-    if cutoff.is_some() || metric.is_angular() {
+    if cutoff.is_some() || metric.uses_ranked_graph() {
         return fit_inverse_scales_from_ranked_distances(
             &distances,
             n_neighbors,
@@ -593,6 +593,37 @@ fn metric_gradient(
         }
         DistanceMetric::Cosine | DistanceMetric::Correlation => {
             angular_gradient(left, right, gradient, metric == DistanceMetric::Correlation)
+        }
+        DistanceMetric::Canberra => {
+            let mut distance = 0.0;
+            for ((value, &left), &right) in gradient.iter_mut().zip(left).zip(right) {
+                let denominator = left.abs() + right.abs();
+                let difference = left - right;
+                *value = if denominator == 0.0 {
+                    0.0
+                } else {
+                    distance += f64::from(difference.abs() / denominator);
+                    f64::from(
+                        signed_step(difference) as f32 / denominator
+                            - signed_step(left) as f32 * difference.abs()
+                                / (denominator * denominator),
+                    )
+                };
+            }
+            distance
+        }
+        DistanceMetric::BrayCurtis => {
+            let (numerator, denominator) =
+                bray_curtis_sums(left.iter().copied().zip(right.iter().copied()));
+            if denominator == 0.0 {
+                gradient.fill(0.0);
+                return 0.0;
+            }
+            let distance = numerator / denominator;
+            for ((value, &left), &right) in gradient.iter_mut().zip(left).zip(right) {
+                *value = (signed_step(left - right) - distance) / denominator;
+            }
+            distance
         }
     }
 }

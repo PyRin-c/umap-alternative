@@ -218,6 +218,8 @@ fn parse_metric(metric: &str) -> PyResult<DistanceMetric> {
         "chebyshev" | "linfty" | "linfinity" | "max" => Ok(DistanceMetric::Chebyshev),
         "cosine" => Ok(DistanceMetric::Cosine),
         "correlation" => Ok(DistanceMetric::Correlation),
+        "canberra" => Ok(DistanceMetric::Canberra),
+        "braycurtis" => Ok(DistanceMetric::BrayCurtis),
         _ => Err(PyValueError::new_err(format!(
             "unsupported metric {metric:?}"
         ))),

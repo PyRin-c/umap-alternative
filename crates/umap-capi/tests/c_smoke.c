@@ -1128,6 +1128,38 @@ static void check_angular_update(void) {
     }
 }
 
+static void check_ratio_embeddings(void) {
+    const float training[] = {
+        1, 0, 0, 0, .3f, .7f, 0, 0, .5f, 0, 1, 0, .8f, 0, 0, 1,
+        0, 1.4f, 1, 0, 0, .7f, 0, 1, 0, 0, .2f, 1, 1.1f, .5f, .7f, 0,
+    };
+    const umap_capi_metric_t metrics[] = {UMAP_CAPI_METRIC_CANBERRA, UMAP_CAPI_METRIC_BRAYCURTIS};
+    const uint32_t expected[][16] = {
+        {1077616405u, 1090714251u, 1087455682u, 1084885373u, 1082544333u, 1072226114u,
+            1072638000u, 1090710117u, 1085030929u, 1080183741u, 1073365253u, 1092387318u,
+            1091130056u, 1075043800u, 1084049820u, 1068746500u},
+        {1079473953u, 1088949300u, 1090577585u, 1085932750u, 1084857078u, 1083869755u,
+            1074249528u, 1089657091u, 1086171968u, 1084531670u, 1074400501u, 1091732729u,
+            1090757152u, 1074751646u, 1087602294u, 1086774499u},
+    };
+    for (size_t metric = 0; metric < COUNT(metrics); ++metric) {
+        const umap_capi_dense_embedding_config_t options = {
+            .n_neighbors = 4, .n_components = 2, .n_epochs = 9, .a = 1.2, .b = .8,
+            .learning_rate = 1.0, .repulsion_strength = 1.0, .negative_sample_rate = 5.0,
+            .metric = metrics[metric], .init = UMAP_CAPI_INIT_RANDOM, .seed = 42,
+        };
+        umap_capi_dense_embedding_t *fit = NULL;
+        CHECK(umap_capi_fit_dense_embedding_seeded(training, COUNT(training), 8, 4, &options, &fit)
+            == UMAP_CAPI_STATUS_OK);
+        umap_capi_dense_embedding_view_t view = {0};
+        CHECK(umap_capi_dense_embedding_view(fit, &view) == UMAP_CAPI_STATUS_OK);
+        CHECK(view.n_rows == 8 && view.n_components == 2 && view.coordinates_len == 16);
+        CHECK(view.graph.data_len == 26);
+        check_bits(view.coordinates, expected[metric], view.coordinates_len);
+        CHECK(umap_capi_dense_embedding_release(fit) == UMAP_CAPI_STATUS_OK);
+    }
+}
+
 int main(void) {
     check_graph_only();
     check_graph_options();
@@ -1145,5 +1177,6 @@ int main(void) {
     check_precomputed_transform();
     check_angular_embedding();
     check_angular_update();
+    check_ratio_embeddings();
     return EXIT_SUCCESS;
 }

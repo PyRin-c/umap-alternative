@@ -116,14 +116,16 @@ pub fn fit_dense_graph_with_options(
     metric: DistanceMetric,
     options: Option<GraphOptions>,
 ) -> Result<CsrGraph, DenseGraphFitError> {
-    if let Some(cutoff) = metric.default_disconnection_distance() {
+    if metric.uses_ranked_graph() {
         return fit_dense_graph_with_cutoff(
             data,
             n_rows,
             n_features,
             k,
             metric,
-            cutoff,
+            metric
+                .default_disconnection_distance()
+                .unwrap_or(f32::INFINITY),
             options.unwrap_or_default(),
         )
         .map(|(graph, _)| graph);

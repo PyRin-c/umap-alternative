@@ -31,6 +31,10 @@ pub enum DistanceMetric {
     Cosine,
     /// One minus the cosine similarity of mean-centered rows.
     Correlation,
+    /// Sum of coordinate differences divided by the corresponding absolute sums.
+    Canberra,
+    /// Sum of absolute differences divided by the sum of absolute pair sums.
+    BrayCurtis,
 }
 
 /// Input validation failures for [`exhaustive_knn`] and
@@ -411,6 +415,10 @@ impl DistanceMetric {
         self.is_angular().then_some(2.0)
     }
 
+    pub(crate) fn uses_ranked_graph(self) -> bool {
+        self.is_angular() || matches!(self, Self::Canberra | Self::BrayCurtis)
+    }
+
     pub(crate) fn distance(self, left: &[f32], right: &[f32]) -> f32 {
         match self {
             Self::Euclidean => euclidean_distance(left, right),
@@ -418,7 +426,42 @@ impl DistanceMetric {
             Self::Chebyshev => chebyshev_distance(left, right),
             Self::Cosine => cosine_distance(left, right),
             Self::Correlation => correlation_distance(left, right),
+            Self::Canberra => {
+                canberra_distance_pairs(left.iter().copied().zip(right.iter().copied())) as f32
+            }
+            Self::BrayCurtis => {
+                bray_curtis_distance_pairs(left.iter().copied().zip(right.iter().copied())) as f32
+            }
         }
+    }
+}
+
+pub(crate) fn canberra_distance_pairs(values: impl Iterator<Item = (f32, f32)>) -> f64 {
+    values.fold(0.0, |distance, (left, right)| {
+        let divisor = left.abs() + right.abs();
+        if divisor == 0.0 {
+            distance
+        } else {
+            distance + f64::from((left - right).abs() / divisor)
+        }
+    })
+}
+
+pub(crate) fn bray_curtis_sums(values: impl Iterator<Item = (f32, f32)>) -> (f64, f64) {
+    values.fold((0.0, 0.0), |(numerator, denominator), (left, right)| {
+        (
+            numerator + f64::from((left - right).abs()),
+            denominator + f64::from((left + right).abs()),
+        )
+    })
+}
+
+pub(crate) fn bray_curtis_distance_pairs(values: impl Iterator<Item = (f32, f32)>) -> f64 {
+    let (numerator, denominator) = bray_curtis_sums(values);
+    if denominator == 0.0 {
+        0.0
+    } else {
+        numerator / denominator
     }
 }
 

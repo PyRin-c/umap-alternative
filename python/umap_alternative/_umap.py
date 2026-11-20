@@ -35,9 +35,13 @@ _METRIC_ALIASES = {
     "linfty": "chebyshev",
     "linfinity": "chebyshev",
     "max": "chebyshev",
+    "canberra": "canberra",
+    "braycurtis": "braycurtis",
 }
 _ANGULAR_METRICS = ("cosine", "correlation")
-_SPARSE_LAYOUT_METRICS = ("euclidean", "manhattan", "chebyshev", "cosine")
+_RATIO_METRICS = ("canberra", "braycurtis")
+_TIE_RANKED_METRICS = _ANGULAR_METRICS + _RATIO_METRICS
+_SPARSE_LAYOUT_METRICS = ("euclidean", "manhattan", "chebyshev", "cosine") + _RATIO_METRICS
 
 _TRUNCATION_WARNING = (
     "n_neighbors is larger than the dataset size; truncating to X.shape[0] - 1"
@@ -283,6 +287,10 @@ def _fit_modern_initialization(
 
 def _rank_tied_dense_distances(distances, k):
     return np.argsort(np.asarray(distances, dtype=np.float32))[:k].tolist()
+
+
+def _rank_stable_dense_distances(distances, k):
+    return np.argsort(np.asarray(distances, dtype=np.float32), kind="stable")[:k].tolist()
 
 
 def _rank_tied_manhattan_distances(distances, k):
@@ -692,10 +700,12 @@ class UMAP(BaseEstimator, TransformerMixin):
         sparse_feature_layout = sparse and metric in _SPARSE_LAYOUT_METRICS
         sparse_embedding = sparse and not precomputed and embedding_mode
         angular = not sparse and metric in _ANGULAR_METRICS
+        ratio_metric = not sparse and metric in _RATIO_METRICS
         if sparse and not precomputed:
             if sparse_embedding and not sparse_feature_layout:
                 raise TypeError(
-                    "sparse input in embedding mode requires Euclidean, Manhattan, Chebyshev, or cosine"
+                    "sparse input in embedding mode requires Euclidean, Manhattan, Chebyshev, "
+                    "cosine, Canberra, or Bray–Curtis"
                 )
             if y is not None:
                 raise TypeError("sparse input is not supported for supervised fitting")
@@ -855,6 +865,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         )
         graph_from_neighbors = (
             supplied is not None or cutoff < np.inf or (sparse and precomputed) or ranked_sparse_graph
+            or ratio_metric
         )
         if supplied is not None:
             if y is not None:
@@ -875,7 +886,7 @@ class UMAP(BaseEstimator, TransformerMixin):
                 )
             if precomputed:
                 transform_fit = (X_checked.copy(), metric)
-        elif (angular or cutoff < np.inf) and not (precomputed or sparse) and y is None:
+        elif (angular or ratio_metric or cutoff < np.inf) and not (precomputed or sparse) and y is None:
             transform_cutoff = cutoff
             components, removed = _native._fit_dense_graph_with_cutoff(
                 X_checked.ravel().tolist(), n_rows, n_features, n_neighbors, metric, cutoff,
@@ -912,7 +923,7 @@ class UMAP(BaseEstimator, TransformerMixin):
                 n_neighbors,
                 metric,
                 cutoff,
-                _sparse_tie_ranker(metric),
+                _rank_stable_dense_distances if metric in _RATIO_METRICS else _sparse_tie_ranker(metric),
                 graph_options=graph_options,
             )
             if cutoff < np.inf:
@@ -1230,7 +1241,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             local_connectivity=self.local_connectivity,
             disconnection_distance=getattr(self, "_transform_cutoff", None),
             ranked_columns=ranked_columns,
-            rank_ties=_rank_tied_dense_distances if self.unique or metric in _ANGULAR_METRICS else None,
+            rank_ties=_rank_tied_dense_distances if self.unique or metric in _TIE_RANKED_METRICS else None,
         )
         return coo_matrix(
             (
@@ -1268,7 +1279,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             local_connectivity=self.local_connectivity,
             disconnection_distance=cutoff,
             ranked_columns=ranked_columns,
-            rank_ties=_rank_tied_dense_distances if self.unique or metric in _ANGULAR_METRICS else None,
+            rank_ties=_rank_tied_dense_distances if self.unique or metric in _TIE_RANKED_METRICS else None,
             **self._embedding_transform_options,
         )
         return np.asarray(coordinates, dtype=np.float32).reshape(queries.shape[0], n_components)

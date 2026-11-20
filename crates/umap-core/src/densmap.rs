@@ -2,9 +2,7 @@
 
 use std::fmt;
 
-use crate::density::{
-    DensityError, LOG_OFFSET, RadiusSpace, radii_and_weights_from_edge_distances,
-};
+use crate::density::{DensityError, RadiusSpace, radii_and_weights_from_edge_distances};
 use crate::embedding::EmbeddingLayoutConfig;
 use crate::fuzzy_graph::CsrGraph;
 use crate::layout::{DistanceReduction, LayoutError};
@@ -205,38 +203,38 @@ impl DensityOptimizer {
                 let affinity = (1.0 + a * f64::from(q).powf(b)).recip();
                 let weighted_distance = (affinity * f64::from(q)) as f32;
                 for endpoint in [head, tail] {
-                    affinity_sums[endpoint] += affinity as f32;
+                    affinity_sums[endpoint] =
+                        (f64::from(affinity_sums[endpoint]) + affinity) as f32;
                     log_radii[endpoint] += weighted_distance;
                 }
             }
         }
 
         for (radius, &affinity_sum) in log_radii.iter_mut().zip(affinity_sums.iter()) {
-            *radius = (*radius / affinity_sum + LOG_OFFSET).ln();
+            // Round the weighted mean before adding the offset and taking the log.
+            *radius = (f64::from(*radius / affinity_sum) + 1e-8).ln() as f32;
         }
         let radius_mean = mean(log_radii);
-        let shifted_var = f64::from(variance(
-            log_radii,
-            radius_mean,
-            &mut self.squared_deviations,
-        )) + self.options.dens_var_shift;
-        let cross_product = log_radii
+        let shifted_var = variance(log_radii, radius_mean, &mut self.squared_deviations)
+            + self.options.dens_var_shift as f32;
+        let standard_deviation = f64::from(shifted_var.sqrt());
+        let cross_product: f64 = log_radii
             .iter()
             .zip(&self.original)
-            .fold(0.0_f32, |sum, (&radius, &original)| {
-                (radius - radius_mean).mul_add(original, sum)
-            });
-        let covariance = f64::from(cross_product) / (graph.n_rows as f64 - 1.0);
+            .map(|(&radius, &original)| f64::from(radius - radius_mean) * f64::from(original))
+            .sum();
+        let covariance = cross_product / (graph.n_rows as f64 - 1.0);
         for ((weight, &radius), &original) in correlation_weights
             .iter_mut()
             .zip(log_radii.iter())
             .zip(&self.original)
         {
             *weight = f64::from(original)
-                - covariance * (f64::from(radius) - f64::from(radius_mean)) / shifted_var;
+                - covariance * (f64::from(radius) - f64::from(radius_mean))
+                    / f64::from(shifted_var);
         }
         *scale = 2.0 * self.options.dens_lambda * self.membership_sum
-            / (graph.n_rows as f64 * shifted_var.sqrt());
+            / (graph.n_rows as f64 * standard_deviation);
         Some(&self.epoch)
     }
 }

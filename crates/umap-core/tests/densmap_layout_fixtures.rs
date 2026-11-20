@@ -179,17 +179,16 @@ fn assert_checkpoint(platform: &str, name: &str, key: usize, actual: &[u32], exp
     // Only the observed active residuals receive a tolerance. Inactive
     // checkpoints and isolated cases with exact replay require identical bits.
     let residual = match name {
-        "pairs_shift_0.0" | "pairs_shift_4.0" if key >= 1 => Some((1, 2.4e-7)),
-        "weighted_active" | "frac_above_half" | "frac_below_one" if key >= 1 => Some((3, 1e-6)),
-        "frac_below_half" | "frac_exact_half" if key >= 2 => Some((2, 2.4e-7)),
-        "frac_default" if key >= 7 => Some((1, 4.8e-7)),
-        "weighted_repel" if key >= 1 => Some((1, 1e-6)),
-        "weighted_weak_density" if key >= 1 => Some((1, 4e-9)),
-        "weak_edges_short" if key >= 1 => Some((10, 1.2e-7)),
-        "weak_edges_long" if key >= 2 => Some((12, 3.4e-6)),
-        "held_out_1d" if key >= 4 => Some((1, 7.5e-9)),
-        "held_out_3d_first_active" if key >= 1 => Some((16, 2.2e-6)),
-        "held_out_3d" if key >= 3 => Some((211, 6.7e-5)),
+        "weighted_active" | "frac_above_half" | "frac_below_one" if key >= 1 => Some((1, 1e-6)),
+        "frac_below_half" | "frac_exact_half" if key >= 2 => Some((1, 2.4e-7)),
+        "weighted_repel" if key >= 1 => Some((1, 2.4e-7)),
+        "weighted_weak_density" if key == 1 => Some((1, 4e-9)),
+        "weak_edges_short" if key >= 1 => Some((25, 1.2e-7)),
+        "weak_edges_long" if key >= 3 => Some((10, 1e-6)),
+        "held_out_1d" if (4..=5).contains(&key) => Some((1, 7.5e-9)),
+        "held_out_3d_small_shift" if key >= 1 => Some((4, 4.8e-7)),
+        "held_out_3d_first_active" if key >= 1 => Some((16, 2e-6)),
+        "held_out_3d" if key >= 3 => Some((190, 6.45e-5)),
         _ => None,
     };
     let Some((max_steps, max_error)) = residual else {
@@ -278,11 +277,16 @@ fn variance_and_fraction_errors_preserve_completed_checkpoints() {
     check_error(&replay, &original.checkpoints[&0]);
 
     let shifted = &fixture.cases["equal_embedding_shifted"];
-    let unshifted = &fixture.errors["equal_embedding_unshifted"];
-    assert_eq!(unshifted.error, "ZeroDivisionError");
     replay = Replay::new(&fixture, shifted);
-    replay.density.dens_var_shift = unshifted.options.dens_var_shift.unwrap();
-    check_error(&replay, &shifted.checkpoints[&0]);
+    for name in [
+        "equal_embedding_unshifted",
+        "equal_embedding_underflow_shift",
+    ] {
+        let invalid = &fixture.errors[name];
+        assert_eq!(invalid.error, "ZeroDivisionError");
+        replay.density.dens_var_shift = invalid.options.dens_var_shift.unwrap();
+        check_error(&replay, &shifted.checkpoints[&0]);
+    }
 
     for name in ["frac_below_zero", "frac_above_one"] {
         let invalid = &fixture.errors[name];
@@ -297,4 +301,22 @@ fn variance_and_fraction_errors_preserve_completed_checkpoints() {
             })
         ));
     }
+}
+
+#[test]
+fn coincident_edges_need_no_gradient_even_with_zero_variance() {
+    let fixture: Fixture = serde_json::from_str(WINDOWS).unwrap();
+    let mut replay = Replay::new(&fixture, &fixture.cases["equal_embedding_shifted"]);
+    replay.initial = vec![0.0, 0.0, 10.0, 10.0];
+    replay.density.dens_var_shift = 0.0;
+    let expected = bits(&replay.initial);
+    let mut keys = Vec::new();
+    let final_bits = replay
+        .run(|key, coordinates| {
+            keys.push(key);
+            assert_eq!(bits(coordinates), expected);
+        })
+        .unwrap();
+    assert_eq!(keys, [0, 1, 2]);
+    assert_eq!(final_bits, expected);
 }

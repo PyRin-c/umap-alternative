@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 import platform
 import sys
@@ -22,8 +23,15 @@ REFERENCE = Path(__file__).resolve().parent
 BASE = dict(n_jobs=1, random_state=42, compatibility_layout=True, metric="precomputed",
             learning_rate=.1, negative_sample_rate=1, repulsion_strength=0., a=1.7, b=.9)
 DATASETS = {
+    "paired_holdout": dict(data=[[4 * row + offset] for row in range(9)
+                                  for offset in (0, .15 + (row * 11 % 19) / 16)],
+                           init=[[row * 3 + offset] for row in range(9)
+                                 for offset in (0, .1 + (row * 7 % 13) / 5)],
+                           n_neighbors=2),
     "pairs": dict(data=[[0], [.2], [4], [4.8], [10], [11.4]],
                   init=[[0], [2], [3], [4], [7], [10]], n_neighbors=2),
+    "balanced_pairs": dict(data=[[0], [4], [10], [11]],
+                           init=[[0], [1], [9], [10]], n_neighbors=2),
     "equal_input": dict(data=[[0], [1], [4], [5]],
                         init=[[0], [2], [3], [4]], n_neighbors=2),
     "equal_embedding": dict(data=[[0], [.2], [4], [4.8]],
@@ -97,7 +105,7 @@ def build():
             if type(error).__name__ == expected_error:
                 errors[name] = dict(dataset=dataset, epochs=epochs, options=options, error=expected_error)
                 return
-            raise RuntimeError(f"{name}: published fit raised {type(error).__name__}") from None
+            raise RuntimeError(f"{name}: {type(error).__name__}: {error}") from None
         if expected_error:
             raise AssertionError(f"{name}: expected {expected_error}")
         cases[name] = case
@@ -108,6 +116,25 @@ def build():
     add("pairs_first_active_scalar", "pairs", 2, dens_frac=1., scalar=True)
     for shift in (0., .1, 1., 4.):
         add(f"pairs_shift_{shift}", "pairs", 2, dens_frac=1., dens_var_shift=shift)
+    for shift in (0., 1e-12, .27):
+        add(f"paired_holdout_shift_{shift}", "paired_holdout", 2, dens_frac=1.,
+            dens_var_shift=shift, dens_lambda=1.2, learning_rate=.13, a=.87, b=1.42,
+            output_dens=True)
+    add("equal_embedding_tiny_shift", "equal_embedding", 2, dens_frac=1., dens_var_shift=1e-12)
+    add("held_out_3d_small_shift", "held_out_3d", 2, dens_frac=1., dens_var_shift=1e-12,
+        dens_lambda=.4, a=.73, b=1.43, learning_rate=.19)
+    # The first pair starts at squared distance one with a standardized radius
+    # of +1. Balance the two forces so the head isolates their last-bit errors.
+    a, b = BASE["a"], BASE["b"]
+    affinity = 1 / (1 + a)
+    derivative = a * b * affinity
+    shift = .17
+    strength = derivative * math.sqrt(shift) / (1 - b * (1 - affinity) + derivative)
+    add("balanced_pair_forces", "balanced_pairs", 2, dens_frac=1., dens_var_shift=shift,
+        dens_lambda=strength, learning_rate=.0001)
+    add("equal_embedding_subnormal_shift", "equal_embedding", 2, dens_frac=1., dens_var_shift=1e-40)
+    add("equal_embedding_underflow_shift", "equal_embedding", 2, dens_frac=1., dens_var_shift=1e-50,
+        expected_error="ZeroDivisionError")
     add("pairs_clipped", "pairs", 2, dens_frac=1., dens_lambda=80.)
     add("weighted_plain", "weighted", 4, density=False)
     add("weighted_active", "weighted", 4, dens_frac=1.)

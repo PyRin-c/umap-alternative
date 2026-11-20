@@ -95,50 +95,68 @@ component are clipped independently to `[-4, 4]` before addition and
 learning-rate scaling. The large-`lambda` pair fixture exposes the
 separate clipping. [Narayan, Berger & Cho, Methods](https://pmc.ncbi.nlm.nih.gov/articles/PMC8195812/)
 
-The native radius numerators, affinity sums, and original standardized
-radii are stored in float32. The embedding sweep rounds each affinity
-and its distance-weighted product separately before adding them. The
-subsequent edge derivative and coordinate step use the existing wide
-curve arithmetic. The sum of positive memberships is reduced as half
-the sum of the float32 incident weights from the original radius pass.
+The embedding sweep stores both sums in float32. For the affinity sum,
+add the wide affinity to the stored value and round once. For the distance
+sum, round the weighted product before adding it. Divide the two sums in
+float32, widen the quotient for the offset and logarithm, then round the log
+radius to float32. The mean and population variance use float32 pairwise
+reductions. The variance shift and square root also round to float32.
+The covariance sums wide products of the float32 centered embedding
+radii and standardized input radii. The sum of positive memberships is
+half the float32 sum of the incident weights from the original radius pass.
+
+The first-active probes include nine disjoint reciprocal pairs with distinct
+radii and three variance shifts. They isolate the log and covariance
+reductions from the weighted graph and repulsion. The balanced pair probe
+uses equal embedding radii and distinct input radii. Its two forces almost
+cancel at a coordinate initialized to zero. The wheel moves that coordinate
+by about -3.08e-12. Using a float64 square root or exponential changes the result at that
+coordinate by several tenths of the measured displacement. The replay
+uses a float32 exponential and adds the clipped forces in float64 before
+scaling and rounding the coordinate write.
 
 ## Degeneracy and replay limits
 
 Equal input log radii have zero standard deviation. The wheel returns
 NaN coordinates at the first active update in the equal-input probe and
 finite coordinates at zero effective density updates. Equal embedding log
-radii with distinct input radii produce a finite update for shift 0.1
-and `ZeroDivisionError` for shift zero. Rust reports a nonfinite
-density-gradient error before writing the affected edge in both undefined
-cases. Checkpoints for earlier completed epochs remain available.
+radii with distinct input radii produce finite updates for shifts 0.1,
+1e-12, and 1e-40. At shift zero or 1e-50 the wheel reports
+`ZeroDivisionError`. The latter shift rounds to zero in float32. Rust
+reports a nonfinite density-gradient error before writing the affected edge
+in these undefined cases. Checkpoints for earlier completed epochs remain
+available. The native test also supplies exactly coincident endpoints with
+zero variance and verifies that the zero-distance positives do not request
+a gradient.
 
-Plain fits, disabled-density controls, zero and one epoch, the scalar
-pair first-active fit, the large-`lambda` pair and the shifted
-equal-embedding case replay bit for bit. Other cases compare each
-checkpoint against the stored bits with explicit residual bounds. These
-are the largest observed residuals over all coordinates and keys on
-both platforms.
+For the original finite fixtures, replay improved from 1,866 to 1,948
+bit-identical coordinate values out of 2,176 per capture. This counts
+each captured epoch key once, including the final key. Both Rust hosts
+gave the same comparison for both captures. All inactive checkpoints,
+plain controls, paired first-active cases and the default fraction case
+agree bit for bit.
 
-| Probe | Max absolute difference | Max float32 steps |
-| --- | ---: | ---: |
-| Pairs with shifts 0 or 4 | 2.38e-7 | 1 |
-| Weighted, density active at key 1 | 9.54e-7 | 3 |
-| Weighted, half or the predecessor of half | 2.38e-7 | 2 |
-| Weighted, default fraction | 4.77e-7 | 1 |
-| Weighted with effective repulsion | 9.54e-7 | 1 |
-| Weighted with `dens_lambda=0.2` | 3.73e-9 | 1 |
-| Weak edges, retained in the 3-epoch run | 1.19e-7 | 9 |
-| Weak edges, pruned in the 16-epoch run | 3.34e-6 | 12 |
-| Independent 1D run | 7.45e-9 | 1 |
-| Independent 3D first-active run with no effective negatives | 2.15e-6 | 16 |
-| Independent 3D run with effective negatives | 6.63e-5 | 211 |
+| Probe with residuals | Max absolute difference before | Max absolute difference after | Max float32 steps after |
+| --- | ---: | ---: | ---: |
+| Weighted, density active at key 1 | 9.54e-7 | 9.54e-7 | 1 |
+| Weighted, half or the predecessor of half | 2.38e-7 | 2.38e-7 | 1 |
+| Weighted with effective repulsion | 9.54e-7 | 2.38e-7 | 1 |
+| Weighted with `dens_lambda=0.2` | 3.73e-9 | 3.73e-9 | 1 |
+| Weak edges, retained in the 3-epoch run | 1.19e-7 | 1.19e-7 | 25 |
+| Weak edges, pruned in the 16-epoch run | 3.34e-6 | 9.54e-7 | 10 |
+| Independent 1D run | 7.45e-9 | 7.45e-9 | 1 |
+| Independent 3D first-active run with no effective negatives | 2.15e-6 | 1.91e-6 | 16 |
+| Independent 3D first-active run with shift 1e-12 | 4.77e-7 | 4.77e-7 | 4 |
+| Independent 3D run with effective negatives | 6.63e-5 | 6.44e-5 | 190 |
 
-The 3D run matches through epoch 2 before density activates. Its plain
-control matches for all eight epochs.
-Intermediate rounding in the per-epoch statistics and edge gradient
-remains incompletely characterized. The probes cover serial Euclidean
-layouts in one to three embedding dimensions with a supplied training
-graph and explicit initialization.
+The 3D run with effective negatives matches through epoch 2 before density
+activates. At epoch 3, the maximum difference decreased from 5.03e-5 to
+4.53e-5 and one additional coordinate differs. Over all keys of that run,
+the exact count changed from 78 to 76 out of 189, and the maximum float32
+step distance decreased from 211 to 190. Its plain control matches for all
+eight epochs. The short weak-edge run has more float32 steps near zero
+despite the same maximum absolute difference. The remaining numerical
+differences bound the replay to the tested precision.
 
 ## Reproduction
 
@@ -149,12 +167,12 @@ Run from the repository root. Pass the corresponding capture path via
 $env:UV_PROJECT_ENVIRONMENT = "$env:LOCALAPPDATA\uv\umap-densmap-layout-reference"
 $env:NUMBA_CACHE_DIR = "$env:LOCALAPPDATA\uv\umap-densmap-layout-numba"
 uv run --project reference --locked python -I reference/generate_densmap_layout_fixture.py --output reference/fixtures/umap-learn-0.6.0-densmap-layout-windows-x86_64.json --check
-cargo test -p umap-core --test densmap_layout_fixtures
+cargo test -j 2 -p umap-core --test densmap_layout_fixtures
 ```
 
 ```bash
 export UV_PROJECT_ENVIRONMENT="$HOME/.cache/umap-alternative-verification/reference-venv"
 export NUMBA_CACHE_DIR="$HOME/.cache/umap-alternative-verification/densmap-layout-numba"
 uv run --project reference --locked python -I reference/generate_densmap_layout_fixture.py --output reference/fixtures/umap-learn-0.6.0-densmap-layout-ubuntu-x86_64.json --check
-cargo test -p umap-core --test densmap_layout_fixtures
+cargo test -j 2 -p umap-core --test densmap_layout_fixtures
 ```

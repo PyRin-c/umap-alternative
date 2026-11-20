@@ -1,3 +1,5 @@
+use std::slice;
+
 use super::{
     MetricTag, STATUS_INTERNAL_ERROR, STATUS_INVALID_CONFIG, STATUS_INVALID_K,
     STATUS_INVALID_LENGTH, STATUS_INVALID_METRIC, STATUS_INVALID_POINTER, STATUS_INVALID_SHAPE,
@@ -7,11 +9,13 @@ use super::{
 };
 use umap_core::fuzzy_graph::GraphOptions;
 use umap_core::layout::LayoutError;
+use umap_core::neighbors::DistanceMetric;
 use umap_core::optimize::OptimizeError;
 use umap_core::transform::{
     CooGraph, DenseEmbeddingTransformConfig, DenseEmbeddingTransformError,
-    DenseGraphTransformError, TransformInitializationError, transform_dense_embedding_with_options,
-    transform_dense_graph_with_options,
+    DenseGraphTransformError, PrecomputedTransformInput, TransformInitializationError,
+    transform_dense_embedding_with_options, transform_dense_graph_with_options,
+    transform_precomputed_embedding, transform_precomputed_graph,
 };
 
 /// Use the query-count-dependent transform epoch default.
@@ -37,6 +41,24 @@ pub struct UmapCapiDenseTransformInput {
     pub training: *const f32,
     /// Read-only query feature rows, optionally null for zero rows.
     pub queries: *const f32,
+}
+
+/// Borrowed row-major query distances and optional ranked training columns.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct UmapCapiPrecomputedTransformInput {
+    /// Number of fitted rows and columns in the distance matrix.
+    pub n_training_rows: usize,
+    /// Number of rows in the distance matrix.
+    pub n_query_rows: usize,
+    /// Number of floats in the distance matrix.
+    pub distances_len: usize,
+    /// Read-only query-to-training distances.
+    pub distances: *const f32,
+    /// Number of supplied ranks, or zero for native ranking.
+    pub ranked_columns_len: usize,
+    /// Sorted training columns for each query, or null for native ranking.
+    pub ranked_columns: *const usize,
 }
 
 /// Fixed-layout settings for the serial dense embedding transform.
@@ -157,19 +179,91 @@ fn validate_output_shape<T>(n_rows: usize, n_cols: usize) -> Result<(), u32> {
     Ok(())
 }
 
-fn transform_graph_settings(
-    input: &UmapCapiDenseTransformInput,
+fn transform_graph_options(
+    n_training_rows: usize,
+    n_query_rows: usize,
     n_neighbors: usize,
-    metric: u32,
     local_connectivity: f64,
-) -> Result<(MetricTag, GraphOptions), u32> {
-    let metric = MetricTag::parse(metric).ok_or(STATUS_INVALID_METRIC)?;
-    if !(1..=input.n_training_rows).contains(&n_neighbors) {
+) -> Result<GraphOptions, u32> {
+    if !(1..=n_training_rows).contains(&n_neighbors) {
         return Err(STATUS_INVALID_K);
     }
-    validate_output_shape::<usize>(input.n_query_rows, n_neighbors)?;
-    let options = GraphOptions::new(local_connectivity, 1.0).map_err(|_| STATUS_INVALID_CONFIG)?;
-    Ok((metric, options))
+    validate_output_shape::<usize>(n_query_rows, n_neighbors)?;
+    GraphOptions::new(local_connectivity, 1.0).map_err(|_| STATUS_INVALID_CONFIG)
+}
+
+fn transform_layout_config(
+    config: UmapCapiDenseTransformConfig,
+    metric: DistanceMetric,
+) -> Result<DenseEmbeddingTransformConfig, u32> {
+    let fit_epochs = match config.fit_epochs_mode {
+        FIT_EPOCHS_DEFAULT if config.fit_epochs == 0 => None,
+        FIT_EPOCHS_EXPLICIT => Some(config.fit_epochs),
+        _ => return Err(STATUS_INVALID_CONFIG),
+    };
+    Ok(DenseEmbeddingTransformConfig {
+        n_neighbors: config.n_neighbors,
+        metric,
+        n_components: config.n_components,
+        a: config.a,
+        b: config.b,
+        learning_rate: config.learning_rate,
+        fit_epochs,
+        repulsion_strength: config.repulsion_strength,
+        negative_sample_rate: config.negative_sample_rate,
+        transform_seed: u32::try_from(config.transform_seed).map_err(|_| STATUS_INVALID_CONFIG)?,
+        disconnection_distance: Some(config.disconnection_distance),
+    })
+}
+
+fn validate_fitted_shape(
+    fitted_coordinates: *const f32,
+    fitted_len: usize,
+    n_training_rows: usize,
+    n_query_rows: usize,
+    n_components: usize,
+) -> Result<(), u32> {
+    if n_components == 0 {
+        return Err(STATUS_INVALID_SHAPE);
+    }
+    validate_dense_input(
+        fitted_coordinates,
+        fitted_len,
+        n_training_rows,
+        n_components,
+    )?;
+    validate_output_shape::<f32>(n_query_rows, n_components)
+}
+
+unsafe fn read_precomputed_transform_input<'a>(
+    input: *const UmapCapiPrecomputedTransformInput,
+) -> Result<PrecomputedTransformInput<'a>, u32> {
+    validate_required_pointer(input)?;
+    // SAFETY: The descriptor is readable and aligned under the ABI contract.
+    let input = unsafe { input.read() };
+    validate_dense_input(
+        input.distances,
+        input.distances_len,
+        input.n_query_rows,
+        input.n_training_rows,
+    )?;
+    let ranked_columns = if input.ranked_columns.is_null() && input.ranked_columns_len == 0 {
+        None
+    } else {
+        validate_required_pointer(input.ranked_columns)?;
+        if !slice_size_is_representable::<usize>(input.ranked_columns_len) {
+            return Err(STATUS_INVALID_LENGTH);
+        }
+        // SAFETY: The caller promises that the validated length is readable.
+        Some(unsafe { slice::from_raw_parts(input.ranked_columns, input.ranked_columns_len) })
+    };
+    Ok(PrecomputedTransformInput {
+        // SAFETY: The matrix pointer and length were validated above.
+        distances: unsafe { input_slice(input.distances, input.distances_len) },
+        n_training_rows: input.n_training_rows,
+        n_query_rows: input.n_query_rows,
+        ranked_columns,
+    })
 }
 
 fn map_graph_error(error: DenseGraphTransformError) -> u32 {
@@ -179,6 +273,8 @@ fn map_graph_error(error: DenseGraphTransformError) -> u32 {
         }
         DenseGraphTransformError::NoFeatures => STATUS_INVALID_SHAPE,
         DenseGraphTransformError::NonFiniteDistance { .. } => STATUS_NONFINITE_INPUT,
+        DenseGraphTransformError::NegativeDistance { .. }
+        | DenseGraphTransformError::InvalidRank { .. } => STATUS_INVALID_CONFIG,
     }
 }
 
@@ -225,42 +321,21 @@ pub unsafe extern "C" fn umap_capi_transform_dense_embedding(
         // SAFETY: The caller supplies initialized input and config descriptors.
         let input = unsafe { read_transform_input(input)? };
         let config = unsafe { config.read() };
-        let (metric, options) = transform_graph_settings(
-            &input,
+        let metric = MetricTag::parse(config.metric).ok_or(STATUS_INVALID_METRIC)?;
+        let options = transform_graph_options(
+            input.n_training_rows,
+            input.n_query_rows,
             config.n_neighbors,
-            config.metric,
             config.local_connectivity,
         )?;
-        if config.n_components == 0 {
-            return Err(STATUS_INVALID_SHAPE);
-        }
-        validate_dense_input(
+        validate_fitted_shape(
             fitted_coordinates,
             fitted_len,
             input.n_training_rows,
+            input.n_query_rows,
             config.n_components,
         )?;
-        validate_output_shape::<f32>(input.n_query_rows, config.n_components)?;
-
-        let fit_epochs = match config.fit_epochs_mode {
-            FIT_EPOCHS_DEFAULT if config.fit_epochs == 0 => None,
-            FIT_EPOCHS_EXPLICIT => Some(config.fit_epochs),
-            _ => return Err(STATUS_INVALID_CONFIG),
-        };
-        let core_config = DenseEmbeddingTransformConfig {
-            n_neighbors: config.n_neighbors,
-            metric: metric.into_core(),
-            n_components: config.n_components,
-            a: config.a,
-            b: config.b,
-            learning_rate: config.learning_rate,
-            fit_epochs,
-            repulsion_strength: config.repulsion_strength,
-            negative_sample_rate: config.negative_sample_rate,
-            transform_seed: u32::try_from(config.transform_seed)
-                .map_err(|_| STATUS_INVALID_CONFIG)?,
-            disconnection_distance: Some(config.disconnection_distance),
-        };
+        let core_config = transform_layout_config(config, metric.into_core())?;
         // SAFETY: The pointers and lengths were checked above, and the caller
         // guarantees readable storage for the three arrays.
         let coordinates = unsafe {
@@ -282,6 +357,60 @@ pub unsafe extern "C" fn umap_capi_transform_dense_embedding(
             coordinates,
         });
         // SAFETY: The checked output slot is writable and disjoint from the inputs.
+        unsafe { out_transform.write(Box::into_raw(result).cast()) };
+        Ok(())
+    })
+}
+
+/// Transform precomputed query distances against a read-only fitted layout.
+///
+/// The feature metric in `config` is unused. On success, the function returns
+/// a handle with the same ownership as a dense feature transform.
+///
+/// # Safety
+///
+/// Descriptors and input arrays must be aligned, readable for their declared
+/// lengths, and unchanged during the call. The aligned writable output slot
+/// must be disjoint from the inputs. Release a successful result exactly once
+/// using [`umap_capi_dense_transform_release`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn umap_capi_transform_precomputed_embedding(
+    input: *const UmapCapiPrecomputedTransformInput,
+    fitted_coordinates: *const f32,
+    fitted_len: usize,
+    config: *const UmapCapiDenseTransformConfig,
+    out_transform: *mut *mut UmapCapiDenseTransform,
+) -> u32 {
+    catch_result(|| {
+        validate_required_pointer(out_transform)?;
+        validate_required_pointer(config)?;
+        // SAFETY: The caller supplies readable initialized descriptors.
+        let input = unsafe { read_precomputed_transform_input(input)? };
+        let config = unsafe { config.read() };
+        let options = transform_graph_options(
+            input.n_training_rows,
+            input.n_query_rows,
+            config.n_neighbors,
+            config.local_connectivity,
+        )?;
+        validate_fitted_shape(
+            fitted_coordinates,
+            fitted_len,
+            input.n_training_rows,
+            input.n_query_rows,
+            config.n_components,
+        )?;
+        let core_config = transform_layout_config(config, DistanceMetric::Euclidean)?;
+        // SAFETY: Fitted pointer and length were validated above.
+        let fitted = unsafe { input_slice(fitted_coordinates, fitted_len) };
+        let coordinates = transform_precomputed_embedding(input, fitted, &core_config, options)
+            .map_err(map_transform_error)?;
+        let result = Box::new(OwnedTransform {
+            n_rows: input.n_query_rows,
+            n_components: config.n_components,
+            coordinates,
+        });
+        // SAFETY: The caller supplies a writable slot disjoint from the inputs.
         unsafe { out_transform.write(Box::into_raw(result).cast()) };
         Ok(())
     })
@@ -359,8 +488,13 @@ pub unsafe extern "C" fn umap_capi_transform_dense_graph(
         validate_required_pointer(out_graph)?;
         // SAFETY: The caller supplies an initialized input descriptor.
         let input = unsafe { read_transform_input(input)? };
-        let (metric, options) =
-            transform_graph_settings(&input, n_neighbors, metric, local_connectivity)?;
+        let metric = MetricTag::parse(metric).ok_or(STATUS_INVALID_METRIC)?;
+        let options = transform_graph_options(
+            input.n_training_rows,
+            input.n_query_rows,
+            n_neighbors,
+            local_connectivity,
+        )?;
         // SAFETY: The pointers and lengths were checked above, and the caller
         // guarantees readable storage for both matrices.
         let graph = unsafe {
@@ -377,6 +511,43 @@ pub unsafe extern "C" fn umap_capi_transform_dense_graph(
         }
         .map_err(map_graph_error)?;
         // SAFETY: The checked output slot is writable and disjoint from the input.
+        unsafe { out_graph.write(Box::into_raw(Box::new(graph)).cast()) };
+        Ok(())
+    })
+}
+
+/// Construct a directed COO graph from precomputed query-to-training distances.
+///
+/// # Safety
+///
+/// `input` and its arrays must be initialized, aligned, and readable for their
+/// declared lengths. `out_graph` must be a writable aligned slot disjoint from
+/// the inputs. Release a successful graph using [`umap_capi_coo_graph_release`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn umap_capi_transform_precomputed_graph(
+    input: *const UmapCapiPrecomputedTransformInput,
+    n_neighbors: usize,
+    local_connectivity: f64,
+    disconnection_distance: f32,
+    out_graph: *mut *mut UmapCapiCooGraph,
+) -> u32 {
+    catch_result(|| {
+        validate_required_pointer(out_graph)?;
+        if disconnection_distance.is_nan() {
+            return Err(STATUS_INVALID_CONFIG);
+        }
+        // SAFETY: The caller supplies a readable input descriptor and arrays.
+        let input = unsafe { read_precomputed_transform_input(input)? };
+        let options = transform_graph_options(
+            input.n_training_rows,
+            input.n_query_rows,
+            n_neighbors,
+            local_connectivity,
+        )?;
+        let graph =
+            transform_precomputed_graph(input, n_neighbors, disconnection_distance, options)
+                .map_err(map_graph_error)?;
+        // SAFETY: The caller supplies a writable slot disjoint from inputs.
         unsafe { out_graph.write(Box::into_raw(Box::new(graph)).cast()) };
         Ok(())
     })

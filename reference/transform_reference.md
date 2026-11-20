@@ -57,7 +57,7 @@ with `local_connectivity=1.0`. The wheel requires matching feature counts.
 The public small-data probe returned COO for both fewer and more query features.
 The Rust core rejects nonfinite selected distances. The same public probe
 with a finite `float32` maximum coordinate returned COO with four stored zeros
-at column zero. Python rejects sparse input and precomputed transforms.
+at column zero. Python rejects sparse feature input.
 For the held-out embedding path, see the [serial transform reference](transform_embedding_reference.md).
 
 The Rust core uses exhaustive Euclidean, Manhattan, or Chebyshev distances.
@@ -65,6 +65,58 @@ It orders tied neighbors by training index. Tie order and metric arithmetic
 can differ from the reference. The Python tests check exact COO
 structure and float32 bits for the committed Euclidean graph fixture and the
 duplicate-query probe.
+
+## Precomputed query distances
+
+Python `metric="precomputed"` accepts a rectangular matrix with one column
+per fitted row. It returns directed COO memberships in graph mode and
+fixed-tail coordinates in embedding mode. A fitted distance input that
+matches by float32 bits returns the existing fitted object. For an external
+matrix, the public estimator issues a warning and checks nonnegative
+distances and the training column count. A width mismatch or negative
+value raises `AssertionError`. Empty or nonfinite queries fail array
+validation.
+
+The Python adapter uses NumPy's `argsort` for the reference's tie order
+and sends the selected distances and columns to Rust for scale fitting,
+membership weights, and coordinate optimization. Native Rust and C APIs
+accept an optional list of ranked training columns. Their built-in ranking
+uses ascending column indices to resolve ties. In a mixed-zero public probe at width eight,
+NumPy selected columns 2, 7, 6, and 4 in that order. The two hosts used the
+same published fixture values for widths 8, 17, and 65.
+
+With a finite `disconnection_distance`, Python fitting replaces cut
+entries with infinity in the normalized input matrix. For a C-contiguous
+float32 input this is a write to the caller's array. The original copy then
+takes the ordinary transform path, and the changed array fails the
+finite-query check. Rust and C borrow their buffers. A ranked query
+distance exactly at the cutoff stores zero at COO coordinate (0, 0).
+An entirely cut query produces NaN embedding coordinates.
+
+The public captures agree across Windows and Ubuntu WSL. The regressions
+check all 198 weights and their COO coordinates across 11 graph cases,
+and all 132 transformed coordinate bits across 13 embedding cases. The
+cases include zero-epoch warnings, asymmetric distances, local connectivity,
+effective neighbor truncation, cutoff boundaries, and six input errors.
+Sparse precomputed inputs and new data transforms under densMAP remain
+outside this path.
+
+On Windows x86-64 with an Intel Core Ultra 9 285K, ranking and constructing
+the graph for 256 queries, 4,096 fitted rows, and 15 neighbors took a
+median of 13.11 ms with the compact Python-to-Rust handoff. Passing the
+whole distance matrix took 32.60 ms. Both builds produced the same hash
+over the COO shape, ordered indices, and all 3,840 float32 weights. The
+measurement used float32 uniform distances in [0.05, 3) from NumPy
+`RandomState(73)`, three warmups, and nine timings for each build. It
+includes NumPy ranking, conversion, and Rust COO construction.
+
+Reproduce the fixture on either x86-64 host using the locked reference
+environment. Use an OS-specific output path for the environment metadata.
+
+```sh
+uv run --project reference --locked python -I reference/generate_precomputed_transform_fixture.py \
+  --output reference/fixtures/umap-learn-0.6.0-precomputed-transform-windows-x86_64.json --check
+```
 
 ## Reproduce the fixture
 

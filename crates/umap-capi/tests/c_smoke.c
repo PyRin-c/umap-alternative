@@ -916,6 +916,121 @@ static void check_dense_densmap(void) {
     }
 }
 
+static void check_precomputed_transform(void) {
+    /* Ordered COO and six-query embedding from the public precomputed fixture. */
+    const uint32_t query_bits[] = {
+        1052060162, 1043897006, 1059482481, 1057287237, 1065506996, 1073391079,
+        1076957196, 1078724562, 1079391608, 1078504884, 1077353104, 1076327955,
+        1074248404, 1066863165, 1058822472, 1048305381, 1061436587, 1057984713,
+        1064351936, 0, 1063349479, 1070910148, 1075612127, 1076962880,
+        1082130432, 1077936128, 0, 1077936128, 0, 1073741824, 0, 0,
+        1065353216, 1065353216, 1065353216, 1065353216, 1065353216, 1065353216,
+        1065353216, 1065353216, 1082130432, 1077936128, 0, 1077936128,
+        0, 1073741824, 0, 0,
+    };
+    const size_t ranks[] = {
+        1, 0, 3, 2, 7, 6, 5, 4, 3, 1, 0, 4, 2, 7, 6, 4, 0, 1, 2, 3, 2, 7, 6, 4,
+    };
+    const uint32_t graph_bits[] = {
+        1063078797, 1061180965, 1059604002, 1058497478, 1064058802, 1062320750,
+        1059989887, 1056971785, 1065353216, 1060868570, 1059542941, 1058870917,
+        1065353216, 1065353216, 1065353216, 1065353216, 1059760820, 1059760820,
+        1059760820, 1059760820, 1065353216, 1065353216, 1065353216, 1065353216,
+    };
+    const uint32_t fit_bits[] = {
+        1082686716, 1092035152, 1090893604, 1085484144, 1072390314, 1048558045,
+        1065704595, 1091187739, 1087886009, 1087825739, 1046545096, 1092402141,
+        1092315955, 1061385152, 1076583613, 1063409039,
+    };
+    const uint32_t transformed_bits[] = {
+        1082674684, 1086746272, 1083753509, 1081807663, 1065702839, 1091187813,
+        1072585846, 1049062642, 1081609546, 1086289349, 1072585846, 1049062642,
+    };
+    float queries[COUNT(query_bits)];
+    float fitted[COUNT(fit_bits)];
+    memcpy(queries, query_bits, sizeof query_bits);
+    memcpy(fitted, fit_bits, sizeof fit_bits);
+    umap_capi_precomputed_transform_input_t input = {
+        .n_training_rows = 8, .n_query_rows = 6, .distances_len = COUNT(query_bits),
+        .distances = queries, .ranked_columns_len = COUNT(ranks), .ranked_columns = ranks,
+    };
+    umap_capi_coo_graph_t *graph = NULL;
+    CHECK(umap_capi_transform_precomputed_graph(&input, 4, 1.0, INFINITY, &graph)
+        == UMAP_CAPI_STATUS_OK);
+    umap_capi_coo_view_t view = {0};
+    CHECK(umap_capi_coo_graph_view(graph, &view) == UMAP_CAPI_STATUS_OK);
+    CHECK(view.n_rows == 6 && view.n_cols == 8 && view.nnz == COUNT(ranks));
+    for (size_t i = 0; i < view.nnz; ++i) {
+        CHECK(view.row[i] == i / 4 && view.col[i] == ranks[i]);
+    }
+    check_bits(view.data, graph_bits, COUNT(graph_bits));
+
+    umap_capi_precomputed_transform_input_t invalid = input;
+    invalid.distances_len--;
+    umap_capi_coo_graph_t *unchanged = graph;
+    CHECK(umap_capi_transform_precomputed_graph(&invalid, 4, 1.0, INFINITY, &unchanged)
+        == UMAP_CAPI_STATUS_INVALID_LENGTH);
+    CHECK(unchanged == graph);
+    size_t repeated_ranks[COUNT(ranks)];
+    memcpy(repeated_ranks, ranks, sizeof ranks);
+    repeated_ranks[1] = repeated_ranks[0];
+    invalid = input;
+    invalid.ranked_columns = repeated_ranks;
+    CHECK(umap_capi_transform_precomputed_graph(&invalid, 4, 1.0, INFINITY, &unchanged)
+        == UMAP_CAPI_STATUS_INVALID_CONFIG);
+    CHECK(unchanged == graph);
+    CHECK(umap_capi_coo_graph_release(graph) == UMAP_CAPI_STATUS_OK);
+
+    /* The first distance on the first row is exactly at the cutoff. */
+    const float cutoff = queries[ranks[0]];
+    graph = NULL;
+    CHECK(umap_capi_transform_precomputed_graph(&input, 4, 1.0, cutoff, &graph)
+        == UMAP_CAPI_STATUS_OK);
+    CHECK(umap_capi_coo_graph_view(graph, &view) == UMAP_CAPI_STATUS_OK);
+    CHECK(view.nnz == COUNT(ranks));
+    for (size_t i = 0; i < view.nnz; ++i) {
+        const size_t row = i / 4;
+        if (queries[row * 8 + ranks[i]] >= cutoff) {
+            CHECK(view.row[i] == 0 && view.col[i] == 0 && view.data[i] == 0.0f);
+        } else {
+            CHECK(view.row[i] == row && view.col[i] == ranks[i]);
+            check_bits(view.data + i, graph_bits + i, 1);
+        }
+    }
+    CHECK(umap_capi_coo_graph_release(graph) == UMAP_CAPI_STATUS_OK);
+
+    const umap_capi_dense_transform_config_t config = {
+        .n_neighbors = 4, .n_components = 2, .fit_epochs = 6, .a = 1.7, .b = 0.9,
+        .learning_rate = 0.13, .repulsion_strength = 1.0, .negative_sample_rate = 2.0,
+        .local_connectivity = 1.0, .transform_seed = 42,
+        .fit_epochs_mode = UMAP_CAPI_FIT_EPOCHS_EXPLICIT, .disconnection_distance = INFINITY,
+    };
+    umap_capi_dense_transform_t *transformed = NULL;
+    CHECK(umap_capi_transform_precomputed_embedding(&input, fitted, COUNT(fitted), &config,
+        &transformed) == UMAP_CAPI_STATUS_OK);
+    umap_capi_dense_transform_view_t layout = {0};
+    CHECK(umap_capi_dense_transform_view(transformed, &layout) == UMAP_CAPI_STATUS_OK);
+    CHECK(layout.n_rows == 6 && layout.n_components == 2
+        && layout.coordinates_len == COUNT(transformed_bits));
+    check_bits(layout.coordinates, transformed_bits, COUNT(transformed_bits));
+    CHECK(umap_capi_dense_transform_release(transformed) == UMAP_CAPI_STATUS_OK);
+    CHECK(memcmp(queries, query_bits, sizeof query_bits) == 0);
+    CHECK(memcmp(fitted, fit_bits, sizeof fit_bits) == 0);
+
+    input.n_query_rows = 2;
+    input.distances_len = 16;
+    input.ranked_columns = NULL;
+    input.ranked_columns_len = 0;
+    graph = NULL;
+    CHECK(umap_capi_transform_precomputed_graph(&input, 4, 1.0, INFINITY, &graph)
+        == UMAP_CAPI_STATUS_OK);
+    CHECK(umap_capi_coo_graph_view(graph, &view) == UMAP_CAPI_STATUS_OK);
+    CHECK(view.n_rows == 2 && view.nnz == 8);
+    CHECK(memcmp(view.col, ranks, 8 * sizeof ranks[0]) == 0);
+    check_bits(view.data, graph_bits, 8);
+    CHECK(umap_capi_coo_graph_release(graph) == UMAP_CAPI_STATUS_OK);
+}
+
 int main(void) {
     check_graph_only();
     check_graph_options();
@@ -930,5 +1045,6 @@ int main(void) {
     check_directed_graph_transform();
     check_dense_update();
     check_dense_densmap();
+    check_precomputed_transform();
     return EXIT_SUCCESS;
 }

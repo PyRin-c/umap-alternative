@@ -34,6 +34,22 @@ pub struct CooGraph {
     pub data: Vec<f32>,
 }
 
+/// Borrowed row-major distances from held-out rows to fitted rows.
+#[derive(Clone, Copy, Debug)]
+pub struct PrecomputedTransformInput<'a> {
+    /// Rectangular matrix of finite, nonnegative distances.
+    pub distances: &'a [f32],
+    /// Number of columns in the distance matrix.
+    pub n_training_rows: usize,
+    /// Number of query rows in the distance matrix.
+    pub n_query_rows: usize,
+    /// Optional `n_query_rows * k` columns already ranked by increasing distance.
+    ///
+    /// Supplying a ranking preserves the caller's tie order and selection.
+    /// Without one, equal distances are ordered by increasing column index.
+    pub ranked_columns: Option<&'a [usize]>,
+}
+
 /// Validation failures for [`transform_dense_graph`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum DenseGraphTransformError {
@@ -49,6 +65,10 @@ pub enum DenseGraphTransformError {
         training: usize,
         distance: f32,
     },
+    /// A precomputed distance is negative.
+    NegativeDistance { index: usize, distance: f32 },
+    /// A supplied rank is out of bounds, duplicated, or out of distance order.
+    InvalidRank { query: usize, column: usize },
 }
 
 impl fmt::Display for DenseGraphTransformError {
@@ -65,6 +85,18 @@ impl fmt::Display for DenseGraphTransformError {
                 formatter,
                 "distance from query row {query} to training row {training} is not finite: {distance}"
             ),
+            Self::NegativeDistance { index, distance } => {
+                write!(
+                    formatter,
+                    "precomputed distance at offset {index} is negative: {distance}"
+                )
+            }
+            Self::InvalidRank { query, column } => {
+                write!(
+                    formatter,
+                    "invalid ranked column {column} for query {query}"
+                )
+            }
         }
     }
 }
@@ -346,10 +378,7 @@ pub fn transform_dense_embedding_with_options(
 ) -> Result<Vec<f32>, DenseEmbeddingTransformError> {
     use DenseEmbeddingTransformError as Error;
 
-    let cutoff = config.disconnection_distance.unwrap_or(f32::INFINITY);
-    if cutoff.is_nan() || cutoff <= 0.0 {
-        return Err(Error::InvalidDisconnectionDistance(cutoff));
-    }
+    let cutoff = embedding_cutoff(config)?;
     let graph = transform_dense_graph_with_cutoff(
         training,
         n_training_rows,
@@ -362,11 +391,56 @@ pub fn transform_dense_embedding_with_options(
         options,
     )
     .map_err(Error::Graph)?;
+    transform_embedding_from_graph(&graph, fitted_embedding, config)
+}
+
+/// Transform held-out rows from precomputed query-to-training distances.
+///
+/// The matrix and optional rank order follow [`transform_precomputed_graph`].
+/// The optimizer reuses the supplied fitted positions and transform settings.
+/// The feature metric field is unused because the input contains distances.
+pub fn transform_precomputed_embedding(
+    input: PrecomputedTransformInput<'_>,
+    fitted_embedding: &[f32],
+    config: &DenseEmbeddingTransformConfig,
+    options: GraphOptions,
+) -> Result<Vec<f32>, DenseEmbeddingTransformError> {
+    let graph = transform_precomputed_graph(
+        input,
+        config.n_neighbors,
+        embedding_cutoff(config)?,
+        options,
+    )
+    .map_err(DenseEmbeddingTransformError::Graph)?;
+    transform_embedding_from_graph(&graph, fitted_embedding, config)
+}
+
+fn embedding_cutoff(
+    config: &DenseEmbeddingTransformConfig,
+) -> Result<f32, DenseEmbeddingTransformError> {
+    let cutoff = config.disconnection_distance.unwrap_or(f32::INFINITY);
+    if cutoff.is_nan() || cutoff <= 0.0 {
+        return Err(DenseEmbeddingTransformError::InvalidDisconnectionDistance(
+            cutoff,
+        ));
+    }
+    Ok(cutoff)
+}
+
+/// Initialize and optimize held-out coordinates from a directed query graph.
+///
+/// The graph already contains its selected memberships and disconnection
+/// cutoff. The layout configuration controls the fixed-tail optimizer.
+pub fn transform_embedding_from_graph(
+    graph: &CooGraph,
+    fitted_embedding: &[f32],
+    config: &DenseEmbeddingTransformConfig,
+) -> Result<Vec<f32>, DenseEmbeddingTransformError> {
+    use DenseEmbeddingTransformError as Error;
     let mut embedding =
-        initialize_transform_embedding(&graph, fitted_embedding, config.n_components)
+        initialize_transform_embedding(graph, fitted_embedding, config.n_components)
             .map_err(Error::Initialization)?;
-    optimize_transform(&mut embedding, fitted_embedding, &graph, config)
-        .map_err(Error::Optimize)?;
+    optimize_transform(&mut embedding, fitted_embedding, graph, config).map_err(Error::Optimize)?;
     Ok(embedding)
 }
 
@@ -671,6 +745,133 @@ pub fn transform_dense_graph_with_cutoff(
         .map_err(DenseGraphTransformError::Training)?;
     validate_matrix(queries, n_query_rows, n_features)
         .map_err(DenseGraphTransformError::Queries)?;
+    build_transform_graph(
+        n_training_rows,
+        n_query_rows,
+        k,
+        cutoff,
+        options,
+        |row, candidates| {
+            let query = &queries[row * n_features..(row + 1) * n_features];
+            candidates.extend(training.chunks_exact(n_features).enumerate().map(
+                |(index, candidate)| Neighbor {
+                    index,
+                    distance: metric.distance(query, candidate),
+                },
+            ));
+            sort_closest_neighbors(candidates, k);
+        },
+    )
+}
+
+/// Build the directed held-out graph from rectangular precomputed distances.
+///
+/// A supplied ranking must contain exactly `k` distinct in-range columns per
+/// query, ordered by nondecreasing distance. The same local-connectivity and
+/// inclusive cutoff rules as [`transform_dense_graph_with_cutoff`] apply.
+pub fn transform_precomputed_graph(
+    input: PrecomputedTransformInput<'_>,
+    k: usize,
+    cutoff: f32,
+    options: GraphOptions,
+) -> Result<CooGraph, DenseGraphTransformError> {
+    let PrecomputedTransformInput {
+        distances,
+        n_training_rows,
+        n_query_rows,
+        ranked_columns,
+    } = input;
+    validate_matrix(distances, n_query_rows, n_training_rows)
+        .map_err(DenseGraphTransformError::Queries)?;
+    if let Some((index, &distance)) = distances
+        .iter()
+        .enumerate()
+        .find(|(_, value)| **value < 0.0)
+    {
+        return Err(DenseGraphTransformError::NegativeDistance { index, distance });
+    }
+    if let Some(columns) = ranked_columns {
+        validate_precomputed_ranks(input, columns, k)?;
+    }
+    build_transform_graph(
+        n_training_rows,
+        n_query_rows,
+        k,
+        cutoff,
+        options,
+        |row, candidates| {
+            let distances = &distances[row * n_training_rows..(row + 1) * n_training_rows];
+            if let Some(columns) = ranked_columns {
+                candidates.extend(
+                    columns[row * k..(row + 1) * k]
+                        .iter()
+                        .map(|&index| Neighbor {
+                            index,
+                            distance: distances[index],
+                        }),
+                );
+            } else {
+                candidates.extend(distances.iter().enumerate().map(|(index, &distance)| {
+                    Neighbor {
+                        index,
+                        distance: if distance == 0.0 { 0.0 } else { distance },
+                    }
+                }));
+                sort_closest_neighbors(candidates, k);
+            }
+        },
+    )
+}
+
+fn validate_precomputed_ranks(
+    input: PrecomputedTransformInput<'_>,
+    columns: &[usize],
+    k: usize,
+) -> Result<(), DenseGraphTransformError> {
+    let PrecomputedTransformInput {
+        distances,
+        n_training_rows,
+        n_query_rows,
+        ..
+    } = input;
+    if n_query_rows.checked_mul(k) != Some(columns.len()) {
+        return Err(DenseGraphTransformError::Queries(KnnError::InvalidShape {
+            n_rows: n_query_rows,
+            n_features: k,
+            values: columns.len(),
+        }));
+    }
+    if k == 0 || k > n_training_rows || n_query_rows == 0 {
+        // Neighbor-count validation also covers the no-ranking path.
+        return Ok(());
+    }
+    let mut seen = vec![usize::MAX; n_training_rows];
+    for (query, ranked_row) in columns.chunks_exact(k).enumerate() {
+        let mut previous = 0.0;
+        for &column in ranked_row {
+            let distance = if column < n_training_rows {
+                distances[query * n_training_rows + column]
+            } else {
+                return Err(DenseGraphTransformError::InvalidRank { query, column });
+            };
+            if seen[column] == query || distance < previous {
+                return Err(DenseGraphTransformError::InvalidRank { query, column });
+            }
+            seen[column] = query;
+            previous = distance;
+        }
+    }
+    Ok(())
+}
+
+fn build_transform_graph(
+    n_training_rows: usize,
+    n_query_rows: usize,
+    k: usize,
+    cutoff: f32,
+    options: GraphOptions,
+    mut fill_candidates: impl FnMut(usize, &mut Vec<Neighbor>),
+) -> Result<CooGraph, DenseGraphTransformError> {
     if !(1..=n_training_rows).contains(&k) {
         return Err(DenseGraphTransformError::Training(KnnError::InvalidK {
             k,
@@ -689,16 +890,11 @@ pub fn transform_dense_graph_with_cutoff(
         return Ok(graph);
     }
 
-    let mut candidates = Vec::with_capacity(n_training_rows);
-    for (query_index, query) in queries.chunks_exact(n_features).enumerate() {
+    let mut candidates = Vec::new();
+    for query_index in 0..n_query_rows {
         candidates.clear();
-        candidates.extend(training.chunks_exact(n_features).enumerate().map(
-            |(index, candidate)| Neighbor {
-                index,
-                distance: metric.distance(query, candidate),
-            },
-        ));
-        for neighbor in sort_closest_neighbors(&mut candidates, k) {
+        fill_candidates(query_index, &mut candidates);
+        for neighbor in &candidates[..k] {
             if !neighbor.distance.is_finite() {
                 return Err(DenseGraphTransformError::NonFiniteDistance {
                     query: query_index,

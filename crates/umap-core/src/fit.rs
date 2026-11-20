@@ -321,6 +321,39 @@ pub fn fit_precomputed_graph_with_options(
     Ok(build_fitted_graph(&neighbors, options)?)
 }
 
+/// Fit from precomputed distances with an inclusive disconnection cutoff.
+///
+/// Ranking uses the finite square input before masking. The graph retains the
+/// requested neighbor count as the scale target even when candidates are cut.
+/// Returns the graph and the number of cut positions in the input matrix.
+pub fn fit_precomputed_graph_with_cutoff(
+    distances: &[f32],
+    n_rows: usize,
+    k: usize,
+    cutoff: f32,
+    options: GraphOptions,
+) -> Result<(CsrGraph, usize), DenseGraphFitError> {
+    let neighbors = precomputed_knn(distances, n_rows, k)?;
+    let selected = neighbors
+        .iter()
+        .flatten()
+        .map(|neighbor| {
+            if neighbor.distance >= cutoff {
+                f32::INFINITY
+            } else {
+                neighbor.distance
+            }
+        })
+        .collect::<Vec<_>>();
+    let indices = neighbors.iter().flatten().map(|neighbor| neighbor.index);
+    let graph = build_ranked_graph(indices, &selected, n_rows, k, k, options);
+    let removed = distances
+        .iter()
+        .filter(|&&distance| distance >= cutoff)
+        .count();
+    Ok((graph, removed))
+}
+
 pub(crate) fn build_fitted_graph(
     neighbors: &[Vec<Neighbor>],
     options: Option<GraphOptions>,

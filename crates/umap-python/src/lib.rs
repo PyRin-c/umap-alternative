@@ -14,7 +14,8 @@ use umap_core::embedding::{
 };
 use umap_core::fit::{
     fit_dense_categorical_graph_with_options, fit_dense_graph_with_cutoff,
-    fit_dense_graph_with_options, fit_precomputed_graph_with_options, fit_supplied_neighbors_graph,
+    fit_dense_graph_with_options, fit_precomputed_graph_with_cutoff,
+    fit_precomputed_graph_with_options, fit_supplied_neighbors_graph,
 };
 use umap_core::fuzzy_graph::{CsrGraph, GraphOptions};
 use umap_core::inverse::{
@@ -26,7 +27,8 @@ use umap_core::rng::Mt19937;
 use umap_core::sparse::fit_sparse_graph_with_options;
 use umap_core::transform::{
     CooGraph, DenseEmbeddingTransformConfig, transform_dense_embedding_with_options,
-    transform_dense_graph_with_cutoff,
+    transform_dense_graph_with_cutoff, transform_embedding_from_graph,
+    transform_ranked_neighbors_graph,
 };
 use umap_core::update::{DenseUpdateConfig, update_dense_embedding};
 
@@ -472,6 +474,22 @@ fn _fit_precomputed_graph(
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+#[pyfunction]
+#[pyo3(signature = (distances, n_rows, k, cutoff, *, graph_options=None))]
+fn _fit_precomputed_graph_with_cutoff(
+    py: Python<'_>,
+    distances: Vec<f32>,
+    n_rows: usize,
+    k: usize,
+    cutoff: f32,
+    graph_options: Option<(f64, f64)>,
+) -> PyResult<(CsrComponents, usize)> {
+    let options = parse_graph_options(graph_options)?.unwrap_or_default();
+    py.detach(|| fit_precomputed_graph_with_cutoff(&distances, n_rows, k, cutoff, options))
+        .map(|(graph, removed)| (csr_components(graph), removed))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// Fit a fuzzy graph from row-major indices and distances after estimator masking.
 #[pyfunction]
 #[pyo3(signature = (indices, distances, shape, k, *, graph_options=None))]
@@ -502,9 +520,13 @@ fn _fit_supplied_neighbors_graph(
 
 /// Return the shape, row indices, column indices, and memberships in COO order.
 #[pyfunction]
-#[pyo3(signature = (training, n_training_rows, queries, n_query_rows, n_features, k, metric, *, local_connectivity=1.0, disconnection_distance=None))]
+#[pyo3(signature = (
+    training, n_training_rows, queries, n_query_rows, n_features, k, metric, *,
+    local_connectivity=1.0, disconnection_distance=None, ranked_columns=None
+))]
 #[allow(clippy::too_many_arguments)]
 fn _transform_dense_graph(
+    py: Python<'_>,
     training: Vec<f32>,
     n_training_rows: usize,
     queries: Vec<f32>,
@@ -514,8 +536,8 @@ fn _transform_dense_graph(
     metric: &str,
     local_connectivity: f64,
     disconnection_distance: Option<f32>,
+    ranked_columns: Option<Vec<i32>>,
 ) -> PyResult<CooComponents> {
-    let metric = parse_metric(metric)?;
     let options = GraphOptions::new(local_connectivity, 1.0)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     let CooGraph {
@@ -524,21 +546,55 @@ fn _transform_dense_graph(
         row,
         col,
         data,
-    } = transform_dense_graph_with_cutoff(
-        &training,
-        n_training_rows,
-        &queries,
-        n_query_rows,
-        n_features,
-        k,
-        metric,
-        disconnection_distance
-            .or_else(|| metric.default_disconnection_distance())
-            .unwrap_or(f32::INFINITY),
-        options,
-    )
-    .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    } = if metric == "precomputed" {
+        precomputed_query_graph(
+            py,
+            ranked_columns.as_deref(),
+            &queries,
+            (n_query_rows, n_training_rows),
+            k,
+            disconnection_distance.unwrap_or(f32::INFINITY),
+            options,
+        )?
+    } else {
+        let metric = parse_metric(metric)?;
+        py.detach(|| {
+            transform_dense_graph_with_cutoff(
+                &training,
+                n_training_rows,
+                &queries,
+                n_query_rows,
+                n_features,
+                k,
+                metric,
+                disconnection_distance
+                    .or_else(|| metric.default_disconnection_distance())
+                    .unwrap_or(f32::INFINITY),
+                options,
+            )
+        })
+        .map_err(|error| PyValueError::new_err(error.to_string()))?
+    };
     Ok(((n_rows, n_cols), row, col, data))
+}
+
+fn precomputed_query_graph(
+    py: Python<'_>,
+    columns: Option<&[i32]>,
+    distances: &[f32],
+    shape: (usize, usize),
+    k: usize,
+    cutoff: f32,
+    options: GraphOptions,
+) -> PyResult<CooGraph> {
+    let columns =
+        columns.ok_or_else(|| PyValueError::new_err("expected ranked precomputed columns"))?;
+    py.detach(|| {
+        transform_ranked_neighbors_graph(
+            columns, distances, shape.0, shape.1, k, k, cutoff, options,
+        )
+    })
+    .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
 /// Transform held-out features while keeping the fitted coordinates fixed.
@@ -546,7 +602,8 @@ fn _transform_dense_graph(
 #[pyo3(signature = (
     training, n_training_rows, queries, n_query_rows, n_features, fitted_embedding,
     *, k, metric, n_components, a, b, learning_rate, fit_epochs, repulsion_strength,
-    negative_sample_rate, transform_seed, disconnection_distance=None, local_connectivity=1.0
+    negative_sample_rate, transform_seed, disconnection_distance=None, local_connectivity=1.0,
+    ranked_columns=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn _transform_dense_embedding(
@@ -569,12 +626,18 @@ fn _transform_dense_embedding(
     transform_seed: u32,
     disconnection_distance: Option<f32>,
     local_connectivity: f64,
+    ranked_columns: Option<Vec<i32>>,
 ) -> PyResult<Vec<f32>> {
     let options = GraphOptions::new(local_connectivity, 1.0)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let precomputed = metric == "precomputed";
     let config = DenseEmbeddingTransformConfig {
         n_neighbors: k,
-        metric: parse_metric(metric)?,
+        metric: if precomputed {
+            DistanceMetric::Euclidean
+        } else {
+            parse_metric(metric)?
+        },
         n_components,
         a,
         b,
@@ -585,6 +648,20 @@ fn _transform_dense_embedding(
         transform_seed,
         disconnection_distance,
     };
+    if precomputed {
+        let graph = precomputed_query_graph(
+            py,
+            ranked_columns.as_deref(),
+            &queries,
+            (n_query_rows, n_training_rows),
+            k,
+            disconnection_distance.unwrap_or(f32::INFINITY),
+            options,
+        )?;
+        return py
+            .detach(|| transform_embedding_from_graph(&graph, &fitted_embedding, &config))
+            .map_err(|error| PyValueError::new_err(error.to_string()));
+    }
     py.detach(|| {
         transform_dense_embedding_with_options(
             &training,
@@ -679,6 +756,10 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_fit_graph_embedding_with_rng, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_categorical_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_precomputed_graph, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        _fit_precomputed_graph_with_cutoff,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(_fit_supplied_neighbors_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_transform_dense_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_transform_dense_embedding, module)?)?;

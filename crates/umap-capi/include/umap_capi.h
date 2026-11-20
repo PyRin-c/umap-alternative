@@ -301,6 +301,22 @@ typedef struct umap_capi_dense_transform_input {
     const float *queries;
 } umap_capi_dense_transform_input_t;
 
+/*
+ * Borrow a row-major n_query_rows x n_training_rows distance matrix with
+ * finite nonnegative values. A supplied ranking has n_query_rows * k
+ * distinct in-range columns, ordered by nondecreasing distance in each row.
+ * NULL ranked_columns with zero length selects native ranking, which orders
+ * equal distances by increasing column index.
+ */
+typedef struct umap_capi_precomputed_transform_input {
+    size_t n_training_rows;
+    size_t n_query_rows;
+    size_t distances_len;
+    const float *distances;
+    size_t ranked_columns_len;
+    const size_t *ranked_columns;
+} umap_capi_precomputed_transform_input_t;
+
 typedef uint32_t umap_capi_fit_epochs_mode_t;
 enum {
     UMAP_CAPI_FIT_EPOCHS_DEFAULT = 0u,
@@ -357,8 +373,9 @@ typedef struct umap_capi_dense_transform_view {
 /*
  * Read-only arrays borrowed from a graph handle. Each array has nnz entries
  * (including any zero weights), and all three pointers are NULL if nnz is 0.
- * Rows index queries and columns index training rows. Entries are grouped by
- * query index, then ordered by distance with ties broken by training index.
+ * Rows index queries and columns index training rows. The storage order
+ * follows query index and the neighbor ranking for that query. Positions cut
+ * by a disconnection distance store zero at coordinate (0, 0).
  */
 typedef struct umap_capi_coo_view {
     size_t n_rows;
@@ -406,6 +423,26 @@ umap_capi_status_t umap_capi_transform_dense_graph(
     size_t n_neighbors,
     umap_capi_metric_t metric,
     double local_connectivity,
+    umap_capi_coo_graph_t **out_graph);
+
+/*
+ * Precomputed variants use the same output handles, borrowing rules and
+ * error behavior. The embedding transform uses config's layout settings and
+ * disconnection distance. The graph transform uses the explicit inclusive
+ * cutoff, with positive infinity retaining every selected distance.
+ */
+umap_capi_status_t umap_capi_transform_precomputed_embedding(
+    const umap_capi_precomputed_transform_input_t *input,
+    const float *fitted_coordinates,
+    size_t fitted_len,
+    const umap_capi_dense_transform_config_t *config,
+    umap_capi_dense_transform_t **out_transform);
+
+umap_capi_status_t umap_capi_transform_precomputed_graph(
+    const umap_capi_precomputed_transform_input_t *input,
+    size_t n_neighbors,
+    double local_connectivity,
+    float disconnection_distance,
     umap_capi_coo_graph_t **out_graph);
 
 /*

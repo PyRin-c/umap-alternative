@@ -37,6 +37,12 @@ _TRUNCATION_WARNING = (
     "n_neighbors is larger than the dataset size; truncating to X.shape[0] - 1"
 )
 _PRECOMPUTED_WARNING = "using precomputed metric; inverse_transform will be unavailable"
+_PRECOMPUTED_TRANSFORM_WARNING = (
+    "Transforming new data with precomputed metric. We are assuming the input data is a matrix "
+    "of distances from the new points to the points in the training set. If the input matrix is "
+    "sparse, it should contain distances from the new points to their nearest neighbours or "
+    "approximate nearest neighbours in the training set."
+)
 _DENSITY_NEIGHBOR_WARNING = (
     "Failed to correctly find n_neighbors for some samples. Results may be less than "
     "ideal. Try re-running with different parameters."
@@ -278,7 +284,7 @@ class UMAP(BaseEstimator, TransformerMixin):
     Dense graph fits also accept cosine and correlation. For these two metrics
     the ranked neighbors may omit self, and the default distance cutoff is 2.
     A singleton graph fit has no ``graph_``.
-    Graph ``transform`` requires dense features for both training and queries.
+    Graph ``transform`` accepts dense features or precomputed distances.
     It returns a float32 SciPy COO matrix with query rows and training columns
     for held-out data, and returns ``graph_`` itself for the fitted data.
 
@@ -292,6 +298,8 @@ class UMAP(BaseEstimator, TransformerMixin):
     diagonal must be zero. The rows are ranked independently, so asymmetric
     distances are accepted. Each row's selected neighbors must include its
     diagonal entry, which can be excluded when there are ties at zero distance.
+    Held-out distances have one column per fitted sample. A finite distance
+    cutoff writes infinity into cut elements of the normalized fitting matrix.
 
     ``precomputed_knn=(indices, distances, search_index)`` supplies neighbor
     arrays for an unsupervised fit. All columns of matching two-dimensional
@@ -430,13 +438,12 @@ class UMAP(BaseEstimator, TransformerMixin):
                 ensure_min_features=1,
             )
         n_rows, n_features = X_checked.shape
-        transform_fit = None if precomputed else (X_checked, metric)
+        transform_fit = (X_checked, metric)
         if precomputed:
             if n_rows != n_features:
                 raise ValueError("precomputed distances must be a square matrix")
             warnings.warn(_PRECOMPUTED_WARNING, UserWarning, stacklevel=2)
-            if embedding_mode:
-                transform_fit = (X_checked.copy(), metric)
+            transform_fit = (X_checked.copy(), metric)
         spectral = False
         checkpoint_epochs = None
         if embedding_mode:
@@ -506,19 +513,28 @@ class UMAP(BaseEstimator, TransformerMixin):
                 X_checked.ravel().tolist(), n_rows, n_features, n_neighbors, metric, cutoff,
                 graph_options=graph_options,
             )
+        elif precomputed:
+            if cutoff < np.inf:
+                components, removed = _native._fit_precomputed_graph_with_cutoff(
+                    X_checked.ravel().tolist(), n_rows, n_neighbors, cutoff,
+                    graph_options=graph_options,
+                )
+                X_checked[X_checked >= cutoff] = np.inf
+                transform_fit = (X_checked.copy(), metric)
+                transform_cutoff = cutoff
+            else:
+                components = _native._fit_precomputed_graph(
+                    X_checked.ravel().tolist(), n_rows, n_neighbors,
+                    graph_options=(graph_options or (1.0, 1.0)) if embedding_mode else graph_options,
+                )
         elif not angular and cutoff < np.inf:
-            if sparse or precomputed or y is not None:
+            if sparse or y is not None:
                 raise NotImplementedError(
                     "disconnection_distance with computed neighbors requires unsupervised dense features"
                 )
             transform_cutoff = cutoff
             components, removed = _fit_dense_graph_with_cutoff(
                 X_checked, metric, n_neighbors, cutoff, graph_options
-            )
-        elif precomputed:
-            components = _native._fit_precomputed_graph(
-                X_checked.ravel(order="C").tolist(), n_rows, n_neighbors,
-                graph_options=(graph_options or (1.0, 1.0)) if embedding_mode else graph_options,
             )
         elif sparse:
             components = _native._fit_sparse_graph(
@@ -635,21 +651,28 @@ class UMAP(BaseEstimator, TransformerMixin):
             return self.embedding_ if self.transform_mode == "embedding" else self.graph_
         if getattr(self, "densmap", False):
             raise NotImplementedError("Transforming data into an existing embedding not supported for densMAP.")
-        if metric == "precomputed":
-            raise NotImplementedError("transform with metric='precomputed' is not implemented")
         transform_error = getattr(self, "_supplied_transform_error", None)
         if transform_error is not None:
             raise NotImplementedError(transform_error)
-        if n_query_features != n_features:
+        ranked_columns = None
+        if metric == "precomputed":
+            warnings.warn(_PRECOMPUTED_TRANSFORM_WARNING, UserWarning, stacklevel=2)
+            if n_query_features != n_training_rows or queries.min() < 0.0:
+                raise AssertionError
+            # The reference's tie order follows the platform's NumPy argsort.
+            order = np.argsort(queries, axis=1)[:, :self.n_neighbors_]
+            queries = np.take_along_axis(queries, order, axis=1)
+            ranked_columns = order.ravel().tolist()
+        elif n_query_features != n_features:
             raise ValueError(
                 f"X has {n_query_features} features, but UMAP is expecting "
                 f"{n_features} features as input."
             )
         if self.transform_mode == "embedding":
-            return self._transform_embedding(training, queries, metric)
+            return self._transform_embedding(training, queries, metric, ranked_columns)
 
         shape, row, col, data = _native._transform_dense_graph(
-            training.ravel().tolist(),
+            [] if metric == "precomputed" else training.ravel().tolist(),
             n_training_rows,
             queries.ravel().tolist(),
             n_query_rows,
@@ -658,6 +681,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             metric,
             local_connectivity=self.local_connectivity,
             disconnection_distance=getattr(self, "_transform_cutoff", None),
+            ranked_columns=ranked_columns,
         )
         return coo_matrix(
             (
@@ -667,14 +691,19 @@ class UMAP(BaseEstimator, TransformerMixin):
             shape=shape,
         )
 
-    def _transform_embedding(self, training, queries, metric):
+    def _transform_embedding(self, training, queries, metric, ranked_columns):
         fitted = self.embedding_
         seed = self._embedding_transform_seed()
         fit_epochs = None if self.n_epochs is None else _validate_epochs(self.n_epochs)
         repulsion, negative_rate = self._sampling_options()
         n_components = fitted.shape[1]
+        cutoff = getattr(self, "_transform_cutoff", None)
+        if metric == "precomputed" and fit_epochs is not None and fit_epochs < 3:
+            # The reference computes its pruning threshold even at zero epochs.
+            has_weight = cutoff is None or np.any(queries < cutoff)
+            np.float32(has_weight) / np.float32(0)
         coordinates = _native._transform_dense_embedding(
-            training.ravel().tolist(),
+            [] if metric == "precomputed" else training.ravel().tolist(),
             training.shape[0],
             queries.ravel().tolist(),
             queries.shape[0],
@@ -688,7 +717,8 @@ class UMAP(BaseEstimator, TransformerMixin):
             negative_sample_rate=negative_rate,
             transform_seed=seed,
             local_connectivity=self.local_connectivity,
-            disconnection_distance=getattr(self, "_transform_cutoff", None),
+            disconnection_distance=cutoff,
+            ranked_columns=ranked_columns,
             **self._embedding_transform_options,
         )
         return np.asarray(coordinates, dtype=np.float32).reshape(queries.shape[0], n_components)
@@ -767,7 +797,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         if getattr(self, "densmap", False):
             raise ValueError("Inverse transform not available for densMAP.")
         transform_fit = self._graph_transform_fit
-        if transform_fit is None:
+        if transform_fit is None or transform_fit[1] == "precomputed":
             raise ValueError("Inverse transform not available for given metric.")
         training, metric = transform_fit
         if issparse(training):

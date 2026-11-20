@@ -210,18 +210,10 @@ def test_singleton_refit_replaces_the_previous_transform_state():
             model.transform(queries)
 
 
-def test_transform_rejects_sparse_and_precomputed_inputs():
+def test_transform_rejects_sparse_feature_queries():
     model = graph_model().fit(TRAINING)
     with pytest.raises(TypeError, match="sparse input is not supported"):
         model.transform(csr_matrix(QUERIES))
-
-    distances = np.array([[0, 1, 9], [2, 0, 1], [3, 9, 0]], dtype=np.float32)
-    model.set_params(metric="precomputed", n_neighbors=2)
-    with pytest.warns(UserWarning, match="using precomputed metric"):
-        model.fit(distances)
-    with pytest.raises(NotImplementedError, match="metric='precomputed'"):
-        model.transform(QUERIES)
-
 
 def test_native_transform_translates_core_shape_errors():
     with pytest.raises(ValueError, match="invalid query input: matrix shape 1x2 does not match"):

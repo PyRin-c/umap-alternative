@@ -2,9 +2,20 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
+use umap_core::fit::{fit_dense_graph, fit_precomputed_graph};
+use umap_core::fuzzy_graph::CsrGraph;
 use umap_core::neighbors::DistanceMetric;
 
 type CsrComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
+
+fn csr_components(graph: CsrGraph) -> CsrComponents {
+    (
+        (graph.n_rows, graph.n_cols),
+        graph.indptr,
+        graph.indices,
+        graph.data,
+    )
+}
 
 /// Parse the metric names supported by the dense graph compatibility path.
 ///
@@ -23,10 +34,6 @@ fn parse_metric(metric: &str) -> PyResult<DistanceMetric> {
 }
 
 /// Fit a fuzzy graph from a flat row-major f32 matrix and return its CSR data.
-///
-/// This is an internal bridge for the eventual Python UMAP wrapper. It
-/// intentionally exposes only the graph-stage primitive, not a Python
-/// estimator or any downstream layout behavior.
 #[pyfunction]
 #[pyo3(signature = (data, n_rows, n_features, k, metric))]
 fn _fit_dense_graph(
@@ -37,19 +44,22 @@ fn _fit_dense_graph(
     metric: &str,
 ) -> PyResult<CsrComponents> {
     let metric = parse_metric(metric)?;
-    let graph = umap_core::fit::fit_dense_graph(&data, n_rows, n_features, k, metric)
-        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    fit_dense_graph(&data, n_rows, n_features, k, metric)
+        .map(csr_components)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
 
-    Ok((
-        (graph.n_rows, graph.n_cols),
-        graph.indptr,
-        graph.indices,
-        graph.data,
-    ))
+/// Fit a fuzzy graph from a flat row-major square f32 distance matrix.
+#[pyfunction]
+fn _fit_precomputed_graph(distances: Vec<f32>, n_rows: usize, k: usize) -> PyResult<CsrComponents> {
+    fit_precomputed_graph(&distances, n_rows, k)
+        .map(csr_components)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", umap_core::VERSION)?;
-    module.add_function(wrap_pyfunction!(_fit_dense_graph, module)?)
+    module.add_function(wrap_pyfunction!(_fit_dense_graph, module)?)?;
+    module.add_function(wrap_pyfunction!(_fit_precomputed_graph, module)?)
 }

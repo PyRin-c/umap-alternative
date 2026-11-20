@@ -1,9 +1,4 @@
-"""Small public estimator wrapper for the implemented graph path.
-
-The native extension deliberately exposes only the dense graph primitive.  This
-module provides the narrow sklearn-shaped surface that can safely be built on
-that primitive today.  It is intentionally not an embedding implementation.
-"""
+"""Public estimator for the dense graph primitives in the native extension."""
 
 from __future__ import annotations
 
@@ -34,6 +29,7 @@ _METRIC_ALIASES = {
 _TRUNCATION_WARNING = (
     "n_neighbors is larger than the dataset size; truncating to X.shape[0] - 1"
 )
+_PRECOMPUTED_WARNING = "using precomputed metric; inverse_transform will be unavailable"
 _DISCONNECTION_WARNING = (
     "A large number of your vertices were disconnected from the manifold.\n"
     "Disconnection_distance = inf has removed 0 edges.\n"
@@ -51,6 +47,12 @@ class UMAP(BaseEstimator, TransformerMixin):
     fuzzy simplicial-set graph as a SciPy CSR matrix.  Layout/embedding,
     supervised fitting, sparse input, callable metrics, and out-of-sample
     transforms are intentionally not implemented yet and fail explicitly.
+
+    With ``metric="precomputed"``, provide a square distance matrix. After
+    conversion to float32, its entries must be finite and non-negative and its
+    diagonal must be zero. The rows are ranked independently, so asymmetric
+    distances are accepted. Each row's selected neighbors must include its
+    diagonal entry, which can be excluded when there are ties at zero distance.
 
     The constructor keeps the commonly used public UMAP parameters needed by
     the graph contract.  Parameters related only to a future embedding stage
@@ -127,12 +129,19 @@ class UMAP(BaseEstimator, TransformerMixin):
         )
         X_checked = np.ascontiguousarray(X_checked, dtype=np.float32)
         n_rows, n_features = X_checked.shape
-        self.n_features_in_ = n_features
+        precomputed = self.metric == "precomputed"
+        if precomputed:
+            if n_rows != n_features:
+                raise ValueError("precomputed distances must be a square matrix")
+            warnings.warn(_PRECOMPUTED_WARNING, UserWarning, stacklevel=2)
 
         # A singleton is accepted by fit but has no graph in the public
         # behavior captured for this project.  Remove a stale graph when a
         # fitted estimator is reused so this branch remains truthful.
         if n_rows == 1:
+            if precomputed:
+                _native._fit_precomputed_graph([X_checked.item()], 1, 1)
+            self.n_features_in_ = n_features
             if hasattr(self, "graph_"):
                 del self.graph_
             if hasattr(self, "n_neighbors_"):
@@ -143,13 +152,15 @@ class UMAP(BaseEstimator, TransformerMixin):
             warnings.warn(_TRUNCATION_WARNING, UserWarning, stacklevel=2)
             n_neighbors = n_rows - 1
 
-        shape, indptr, indices, data = _native._fit_dense_graph(
-            X_checked.ravel(order="C").tolist(),
-            n_rows,
-            n_features,
-            n_neighbors,
-            _METRIC_ALIASES[self.metric.lower()],
-        )
+        values = X_checked.ravel(order="C").tolist()
+        if precomputed:
+            shape, indptr, indices, data = _native._fit_precomputed_graph(
+                values, n_rows, n_neighbors
+            )
+        else:
+            shape, indptr, indices, data = _native._fit_dense_graph(
+                values, n_rows, n_features, n_neighbors, _METRIC_ALIASES[self.metric.lower()]
+            )
         graph = csr_matrix(
             (
                 np.asarray(data, dtype=np.float32),
@@ -159,6 +170,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             shape=tuple(shape),
             dtype=np.float32,
         )
+        self.n_features_in_ = n_features
         self.graph_ = graph
         self.n_neighbors_ = n_neighbors
 
@@ -209,7 +221,9 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise NotImplementedError(
                 "callable metrics are not implemented by the dense graph path"
             )
-        if not isinstance(self.metric, str) or self.metric.lower() not in _METRIC_ALIASES:
+        if not isinstance(self.metric, str) or (
+            self.metric != "precomputed" and self.metric.lower() not in _METRIC_ALIASES
+        ):
             raise ValueError("metric is neither callable nor a recognised string")
 
 

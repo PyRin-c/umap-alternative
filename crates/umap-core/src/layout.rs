@@ -911,19 +911,7 @@ pub(crate) fn validate_csr_inputs(
             data: graph.data.len(),
         });
     }
-    let expected_indptr = graph.n_rows.checked_add(1);
-    if expected_indptr != Some(graph.indptr.len())
-        || graph.indptr.first().copied() != Some(0)
-        || graph.indices.len() != graph.data.len()
-    {
-        return Err(LayoutError::InvalidGraphShape {
-            n_rows: graph.n_rows,
-            n_cols: graph.n_cols,
-            indptr: graph.indptr.len(),
-            indices: graph.indices.len(),
-            data: graph.data.len(),
-        });
-    }
+    validate_csr_shape(graph)?;
 
     validate_parameters(a.into(), b.into(), learning_rate.into())?;
     if let Some((index, value)) = embedding
@@ -939,6 +927,28 @@ pub(crate) fn validate_csr_inputs(
         });
     }
 
+    validate_csr_rows(graph)
+}
+
+pub(crate) fn validate_csr_shape(graph: &CsrGraph) -> Result<(), LayoutError> {
+    let expected_indptr = graph.n_rows.checked_add(1);
+    if expected_indptr != Some(graph.indptr.len())
+        || graph.indptr.first().copied() != Some(0)
+        || graph.indices.len() != graph.data.len()
+    {
+        return Err(LayoutError::InvalidGraphShape {
+            n_rows: graph.n_rows,
+            n_cols: graph.n_cols,
+            indptr: graph.indptr.len(),
+            indices: graph.indices.len(),
+            data: graph.data.len(),
+        });
+    }
+
+    Ok(())
+}
+
+pub(crate) fn validate_csr_rows(graph: &CsrGraph) -> Result<(), LayoutError> {
     for row in 0..graph.n_rows {
         let start = graph.indptr[row];
         let end = graph.indptr[row + 1];

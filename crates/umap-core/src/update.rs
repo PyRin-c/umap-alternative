@@ -3,13 +3,14 @@
 use crate::embedding::{DenseEmbedding, EmbeddingLayoutConfig, zero_weak_memberships};
 use crate::fit::{DenseGraphFitError, build_fitted_graph};
 use crate::fuzzy_graph::GraphOptions;
-use crate::initialization::{InitializationError, normalize_columns};
+use crate::initialization::{
+    InitializationError, coincident_layout_noise_scale, has_coincident_rows, normalize_columns,
+    validate_finite, write_mean,
+};
 use crate::neighbors::{DistanceMetric, Neighbor, exhaustive_knn_with_metric};
-use crate::numeric::pairwise_sum;
 use crate::optimize::OptimizeError;
 use crate::rng::Mt19937;
 use crate::update_layout::{begin_update_layout_rng, optimize_update_layout};
-use std::cmp::Ordering;
 use std::fmt;
 
 /// Fitted settings and transform seed used to prepare a dense update.
@@ -211,18 +212,6 @@ fn prepare_with_rng(
     })
 }
 
-fn validate_finite(layout: &[f32]) -> Result<(), InitializationError> {
-    if let Some((index, &value)) = layout
-        .iter()
-        .enumerate()
-        .find(|(_, value)| !value.is_finite())
-    {
-        Err(InitializationError::NonFiniteValue { index, value })
-    } else {
-        Ok(())
-    }
-}
-
 fn append_centroids(
     appended: &mut [f32],
     fitted: &[f32],
@@ -258,57 +247,8 @@ fn append_centroids(
     }
 }
 
-fn write_mean<'a>(output: &mut [f32], rows: impl Iterator<Item = &'a [f32]>) {
-    let mut count = 0;
-    for row in rows {
-        for (coordinate, &value) in output.iter_mut().zip(row) {
-            *coordinate += value;
-        }
-        count += 1;
-    }
-    for coordinate in output {
-        *coordinate /= count as f32;
-    }
-}
-
-fn has_coincident_rows(layout: &[f32], width: usize) -> bool {
-    let mut rows: Vec<_> = layout.chunks_exact(width).collect();
-    rows.sort_unstable_by(|left, right| {
-        left.iter()
-            .zip(*right)
-            .map(|(left, right)| {
-                if left == right {
-                    Ordering::Equal
-                } else {
-                    left.total_cmp(right)
-                }
-            })
-            .find(|&order| order != Ordering::Equal)
-            .unwrap_or(Ordering::Equal)
-    });
-    rows.windows(2).any(|pair| pair[0] == pair[1])
-}
-
 fn perturb_coincident_layout(layout: &mut [f32], width: usize, rng: &mut Mt19937) {
-    let count = layout.len() / width;
-    let mut nearest = vec![f64::INFINITY; count];
-    let mut squared_components = Vec::with_capacity(width);
-    for (left_index, left) in layout.chunks_exact(width).enumerate() {
-        for (right_index, right) in layout.chunks_exact(width).enumerate().skip(left_index + 1) {
-            squared_components.clear();
-            squared_components.extend(left.iter().zip(right).map(|(&left, &right)| {
-                let difference = f64::from(left) - f64::from(right);
-                difference * difference
-            }));
-            let squared_distance = pairwise_sum(&squared_components);
-            nearest[left_index] = nearest[left_index].min(squared_distance);
-            nearest[right_index] = nearest[right_index].min(squared_distance);
-        }
-    }
-    for value in &mut nearest {
-        *value = value.sqrt();
-    }
-    let scale = 0.001 * (pairwise_sum(&nearest) / count as f64);
+    let scale = coincident_layout_noise_scale(layout, width);
     let mut spare = None;
     for coordinate in layout {
         let noise = (scale * rng.next_standard_normal(&mut spare)) as f32;

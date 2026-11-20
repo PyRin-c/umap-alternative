@@ -3,10 +3,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 use umap_core::fit::{fit_dense_graph_with_options, fit_precomputed_graph_with_options};
 use umap_core::fuzzy_graph::GraphOptions;
+use umap_core::modern_initialization::{
+    ModernInit, ModernInitConfig, ModernInitRescale, initialize_modern_layout,
+};
 use umap_core::modern_layout::{
     ModernLayout, ModernLayoutConfig, ModernLayoutError, ModernOptimizer,
 };
 use umap_core::neighbors::DistanceMetric;
+use umap_core::rng::Mt19937;
 use umap_core::sampling::EdgeSamplingCursor;
 
 const WHEEL: &str =
@@ -39,6 +43,7 @@ struct Case {
 #[derive(Deserialize)]
 struct Parameters {
     optimizer: Option<String>,
+    init_scale_factor: Option<f64>,
     metric: Option<String>,
     n_epochs: Epochs,
     n_neighbors: Option<usize>,
@@ -122,9 +127,27 @@ fn public_modern_dense_epoch_replay() {
             .iter()
             .map(|&weight| EdgeSamplingCursor::from_graph_weights(1.0, weight, 1.0).unwrap())
             .collect();
-        let initial = case.checkpoint_bits.first().unwrap_or(initial_pair);
+        let explicit: Vec<_> = input.init.iter().flatten().copied().collect();
+        let initial = initialize_modern_layout(
+            &graph,
+            ModernInit::Explicit(&explicit),
+            ModernInitConfig {
+                n_components: input.init[0].len(),
+                rescale: ModernInitRescale::GraphEdge,
+                scale_factor: p.init_scale_factor.unwrap_or(2.0),
+            },
+            &mut Mt19937::new(42),
+            &mut None,
+        )
+        .unwrap();
+        assert_eq!(
+            &bits(&initial),
+            case.checkpoint_bits.first().unwrap_or(initial_pair),
+            "{}: initial layout",
+            case.name,
+        );
         let mut layout = ModernLayout::new(
-            initial.iter().map(|&value| f32::from_bits(value)).collect(),
+            initial,
             ModernLayoutConfig {
                 optimizer,
                 n_components: input.init[0].len(),

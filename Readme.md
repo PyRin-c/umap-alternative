@@ -53,7 +53,9 @@ Wheel は `target/wheels/` に生成されます。Python パッケージ名は 
 
 密な特徴量では `fit(X, y)` と `fit_transform(X, y)` で教師あり埋め込みを作れます。`target_metric="categorical"` では `-1` が未ラベルを表します。連続値の `y` には `target_metric="euclidean"`、`"manhattan"`、`"chebyshev"` を指定できます。[教師あり埋め込みの参照記録](reference/supervised_embedding_reference.md)
 
-疎行列の埋め込み、および Adam と momentum による学習は未実装です。固定シードの検証条件と適用範囲は [スペクトル初期化を使った学習の参照記録](reference/spectral_fit_reference.md) と [ランダム初期化と初期座標を指定した学習の参照記録](reference/seeded_fit_reference.md) を参照してください。
+密な入力の現代レイアウトは、`n_epochs=0` で `init="random"` または NumPy の初期座標を使えます。`compatibility_layout=False` か `optimizer="adam"` または `"momentum"` で選択し、`init_rescale` と `init_scale_factor` で初期座標を調整できます。[現代レイアウト初期化の比較記録](reference/modern_initialization_reference.md)
+
+疎行列の埋め込み、および Adam と momentum による正のエポック数の学習は未実装です。固定シードの検証条件と適用範囲は [スペクトル初期化を使った学習の参照記録](reference/spectral_fit_reference.md) と [ランダム初期化と初期座標を指定した学習の参照記録](reference/seeded_fit_reference.md) を参照してください。
 
 `UMAP(transform_mode="graph").fit(X)` と `fit_transform(X)` は、Euclidean、Manhattan、Chebyshev、cosine の教師なし学習で SciPy の CSR、CSC、COO 形式の疎な特徴量を受け取ります。入力を変更せずに CSR に変換し、`float32` の CSR グラフを作ります。Cosine は圧縮形式の行に格納された重複要素を保持して距離を計算します。距離ゼロの同順位により自分自身が近傍から外れる場合は `ValueError` になります。疎行列での事前計算済み距離と変換は未実装です。形式ごとの検証結果は [疎グラフの参照記録](reference/sparse_graph_reference.md) を参照してください。
 

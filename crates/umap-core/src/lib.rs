@@ -9,6 +9,7 @@ pub mod fuzzy_graph;
 pub mod initialization;
 pub mod inverse;
 pub mod layout;
+pub mod modern_initialization;
 pub mod modern_layout;
 pub mod neighbors;
 mod numeric;

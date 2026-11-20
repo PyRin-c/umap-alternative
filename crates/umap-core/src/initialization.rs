@@ -5,8 +5,9 @@
 //! `f32`, and per-column rescaling to `[0, 10]`.  Optimization and any later
 //! layout processing belong to callers.
 
-use std::fmt;
+use std::{cmp::Ordering, fmt};
 
+use crate::numeric::pairwise_sum;
 use crate::rng::Mt19937;
 
 /// Input or normalization failures for seeded layout initialization.
@@ -104,12 +105,7 @@ pub fn random_initialization_with_rng(
     n_components: usize,
 ) -> Result<Vec<f32>, InitializationError> {
     let length = checked_length(n_rows, n_components)?;
-    let mut values = Vec::with_capacity(length);
-    for _ in 0..length {
-        // Keep the f64 operation order used by the public uniform interval:
-        // low + (high - low) * draw, before the f32 conversion.
-        values.push((-10.0 + 20.0 * generator.next_f64()) as f32);
-    }
+    let mut values = uniform_layout(generator, length);
 
     normalize_columns(&mut values, n_rows, n_components)?;
     Ok(values)
@@ -137,14 +133,7 @@ pub fn normalize_columns(
         });
     }
 
-    if let Some((index, value)) = data
-        .iter()
-        .copied()
-        .enumerate()
-        .find(|(_, value)| !value.is_finite())
-    {
-        return Err(InitializationError::NonFiniteValue { index, value });
-    }
+    validate_finite(data)?;
 
     // Validate every span before mutating any column so an error leaves the
     // caller's input untouched.
@@ -182,13 +171,86 @@ pub fn normalize_columns(
     Ok(())
 }
 
-fn checked_length(n_rows: usize, n_components: usize) -> Result<usize, InitializationError> {
+pub(crate) fn checked_length(
+    n_rows: usize,
+    n_components: usize,
+) -> Result<usize, InitializationError> {
     n_rows
         .checked_mul(n_components)
         .ok_or(InitializationError::ShapeOverflow {
             n_rows,
             n_components,
         })
+}
+
+pub(crate) fn uniform_layout(generator: &mut Mt19937, length: usize) -> Vec<f32> {
+    (0..length)
+        .map(|_| (-10.0 + 20.0 * generator.next_f64()) as f32)
+        .collect()
+}
+
+pub(crate) fn validate_finite(layout: &[f32]) -> Result<(), InitializationError> {
+    if let Some((index, &value)) = layout
+        .iter()
+        .enumerate()
+        .find(|(_, value)| !value.is_finite())
+    {
+        return Err(InitializationError::NonFiniteValue { index, value });
+    }
+    Ok(())
+}
+
+pub(crate) fn write_mean<'a>(output: &mut [f32], rows: impl Iterator<Item = &'a [f32]>) {
+    let mut count = 0;
+    for row in rows {
+        for (coordinate, &value) in output.iter_mut().zip(row) {
+            *coordinate += value;
+        }
+        count += 1;
+    }
+    for coordinate in output {
+        *coordinate /= count as f32;
+    }
+}
+
+pub(crate) fn has_coincident_rows(layout: &[f32], width: usize) -> bool {
+    let mut rows: Vec<_> = layout.chunks_exact(width).collect();
+    rows.sort_unstable_by(|left, right| {
+        left.iter()
+            .zip(*right)
+            .map(|(left, right)| {
+                if left == right {
+                    Ordering::Equal
+                } else {
+                    left.total_cmp(right)
+                }
+            })
+            .find(|&order| order != Ordering::Equal)
+            .unwrap_or(Ordering::Equal)
+    });
+    rows.windows(2).any(|pair| pair[0] == pair[1])
+}
+
+pub(crate) fn coincident_layout_noise_scale(layout: &[f32], width: usize) -> f64 {
+    let count = layout.len() / width;
+    let mut nearest = vec![f64::INFINITY; count];
+    let mut squared_components = Vec::with_capacity(width);
+    for (left_index, left) in layout.chunks_exact(width).enumerate() {
+        for (right_index, right) in layout.chunks_exact(width).enumerate().skip(left_index + 1) {
+            squared_components.clear();
+            squared_components.extend(left.iter().zip(right).map(|(&left, &right)| {
+                let difference = f64::from(left) - f64::from(right);
+                difference * difference
+            }));
+            let squared_distance = pairwise_sum(&squared_components);
+            nearest[left_index] = nearest[left_index].min(squared_distance);
+            nearest[right_index] = nearest[right_index].min(squared_distance);
+        }
+    }
+    for value in &mut nearest {
+        *value = value.sqrt();
+    }
+    0.001 * (pairwise_sum(&nearest) / count as f64)
 }
 
 #[cfg(test)]

@@ -15,12 +15,16 @@ use umap_core::embedding::{
 use umap_core::fit::{
     DenseContinuousTarget, fit_dense_categorical_graph_with_diagnostics,
     fit_dense_continuous_graph, fit_dense_graph_with_cutoff, fit_dense_graph_with_options,
-    fit_precomputed_graph_with_cutoff, fit_precomputed_graph_with_options, fit_supplied_neighbors_graph,
+    fit_precomputed_graph_with_cutoff, fit_precomputed_graph_with_options,
+    fit_supplied_neighbors_graph,
 };
 use umap_core::fuzzy_graph::{CsrGraph, GraphOptions};
 use umap_core::inverse::{
     DenseInverseInput, DenseInverseLayout, InverseTriangulation, dense_inverse_epochs,
     fit_dense_inverse_scales_with_options, inverse_transform_dense,
+};
+use umap_core::modern_initialization::{
+    ModernInit, ModernInitConfig, ModernInitRescale, initialize_modern_layout,
 };
 use umap_core::neighbors::DistanceMetric;
 use umap_core::parametric::prepare_parametric_edges;
@@ -37,6 +41,7 @@ type CsrComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
 type CooComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
 type EmbeddingComponents = (CsrComponents, (usize, usize), Vec<f32>);
 type RngState = (Vec<u32>, usize);
+type GaussianRngState = (Vec<u32>, usize, Option<f64>);
 type GraphEmbeddingComponents = ((usize, usize), Vec<f32>, RngState, Vec<Vec<f32>>);
 type RadiusInput = (Vec<f32>, usize, String);
 type DensityInput = ((f64, f64, f64), RadiusInput);
@@ -458,6 +463,61 @@ fn _fit_graph_embedding_with_rng(
     Ok((shape, coordinates, (words.to_vec(), cursor), history))
 }
 
+/// Prepare modern coordinates on a fitted CSR graph and return the advanced RNG.
+#[pyfunction]
+#[pyo3(signature = (components, rng_state, *, n_components, init, init_rescale, init_scale_factor, coordinates=None))]
+#[allow(clippy::too_many_arguments)]
+fn _initialize_modern_layout(
+    py: Python<'_>,
+    components: CsrComponents,
+    rng_state: GaussianRngState,
+    n_components: usize,
+    init: &str,
+    init_rescale: &str,
+    init_scale_factor: f64,
+    coordinates: Option<Vec<f32>>,
+) -> PyResult<(Vec<f32>, GaussianRngState)> {
+    let ((n_rows, n_cols), indptr, indices, data) = components;
+    let graph = CsrGraph {
+        n_rows,
+        n_cols,
+        indptr,
+        indices,
+        data,
+    };
+    let init = match (init, coordinates.as_deref()) {
+        ("explicit", Some(values)) => ModernInit::Explicit(values),
+        ("random", None) => ModernInit::Random,
+        ("spectral", Some(values)) => ModernInit::Spectral(values),
+        ("prepared", Some(values)) => ModernInit::Prepared(values),
+        _ => {
+            return Err(PyValueError::new_err(
+                "invalid layout initializer or coordinate input",
+            ));
+        }
+    };
+    let rescale = match init_rescale {
+        "unscaled" => ModernInitRescale::Unscaled,
+        "graph_edge" => ModernInitRescale::GraphEdge,
+        "per_axis" => ModernInitRescale::PerAxis,
+        "isotropic" => ModernInitRescale::Isotropic,
+        _ => return Err(PyValueError::new_err("invalid init_rescale")),
+    };
+    let config = ModernInitConfig {
+        n_components,
+        rescale,
+        scale_factor: init_scale_factor,
+    };
+    let (words, cursor, mut gaussian) = rng_state;
+    let mut rng = Mt19937::from_state(&words, cursor)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let coordinates = py
+        .detach(|| initialize_modern_layout(&graph, init, config, &mut rng, &mut gaussian))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let (words, cursor) = rng.state();
+    Ok((coordinates, (words.to_vec(), cursor, gaussian)))
+}
+
 /// Fit a fuzzy graph from dense features and one categorical label per row.
 #[pyfunction]
 #[pyo3(signature = (data, n_rows, n_features, k, metric, labels, target_weight, *, graph_options=None))]
@@ -817,6 +877,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_update_dense_embedding, module)?)?;
     module.add_function(wrap_pyfunction!(_density_radius_log_inputs, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_graph_embedding_with_rng, module)?)?;
+    module.add_function(wrap_pyfunction!(_initialize_modern_layout, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_categorical_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_continuous_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_precomputed_graph, module)?)?;

@@ -192,6 +192,39 @@ def _fit_spectral_embedding(graph, features, metric, rng, **layout_options):
     return _fit_graph_embedding(graph, features, metric, rng, None, spectral=True, **layout_options)
 
 
+def _fit_modern_initialization(components, rng, initial, n_components, rescale, scale_factor):
+    if not isinstance(rng, np.random.RandomState):
+        rng = np.random.RandomState(rng)
+    algorithm, words, cursor, has_gaussian, gaussian = rng.get_state()
+    coordinates, (words, cursor, gaussian) = _native._initialize_modern_layout(
+        components,
+        (words.tolist(), cursor, gaussian if has_gaussian else None),
+        n_components=n_components,
+        init="random" if initial is None else "explicit",
+        init_rescale="unscaled" if rescale == "isotropic" else rescale,
+        init_scale_factor=scale_factor,
+        coordinates=initial,
+    )
+    has_gaussian = gaussian is not None
+    rng.set_state(
+        (algorithm, np.asarray(words, dtype=np.uint32), cursor, has_gaussian,
+         gaussian if has_gaussian else 0.0)
+    )
+    # The wheel draws its optimizer seed even when the epoch budget is zero.
+    rng.randint(-2**31 + 1, 2**31 - 1, size=3)
+    n_rows = components[0][0]
+    coordinates = np.asarray(coordinates, dtype=np.float32).reshape(n_rows, n_components)
+    if rescale == "isotropic":
+        # NumPy's float32 log and exp can round differently from scalar libm.
+        lower, upper = np.percentile(coordinates, (5, 95), axis=0).astype(np.float32)
+        spans = upper - lower
+        spans[spans == 0] = 1.0
+        mean_span = np.exp(np.log(spans).mean())
+        target_span = 3.0 * np.log10(n_rows) * scale_factor
+        coordinates *= np.float32(target_span / mean_span)
+    return coordinates
+
+
 def _fit_neighbor_arrays(indices, distances, k, graph_options):
     if indices.dtype.kind == "f":
         if not np.all(np.isfinite(indices) & (indices == np.trunc(indices))):
@@ -326,7 +359,7 @@ class UMAP(BaseEstimator, TransformerMixin):
     training layout fixed. ``transform_seed`` (default 42) is an integer in
     ``[0, 2**32 - 1]``, independent of ``random_state``. The normalized fitted
     input returns ``embedding_`` itself. A singleton has a zero embedding and
-    no graph. Modern optimizers raise explicit errors.
+    no graph. Modern layouts support random or explicit initialization at zero epochs.
     For a fitted dense Euclidean embedding, ``inverse_transform`` reconstructs
     the original features as a new float32 array. It warns when any query
     requires extrapolation outside the convex hull of the fitted layout.
@@ -366,6 +399,8 @@ class UMAP(BaseEstimator, TransformerMixin):
         dens_frac=0.3,
         dens_var_shift=0.1,
         target_n_neighbors=-1,
+        init_rescale="isotropic",
+        init_scale_factor=1.0,
     ):
         self.n_components = n_components
         self.n_neighbors = n_neighbors
@@ -397,6 +432,8 @@ class UMAP(BaseEstimator, TransformerMixin):
         self.dens_frac = dens_frac
         self.dens_var_shift = dens_var_shift
         self.target_n_neighbors = target_n_neighbors
+        self.init_rescale = init_rescale
+        self.init_scale_factor = init_scale_factor
 
     def fit(self, X, y=None):
         """Fit the fuzzy graph and, in embedding mode, the training layout."""
@@ -452,11 +489,25 @@ class UMAP(BaseEstimator, TransformerMixin):
             warnings.warn(_PRECOMPUTED_WARNING, UserWarning, stacklevel=2)
             transform_fit = (X_checked.copy(), metric)
         spectral = False
+        modern = False
         checkpoint_epochs = None
         if embedding_mode:
+            modern = self._uses_modern_layout()
             checkpoint_epochs = _epoch_checkpoints(self.n_epochs)
-            embedding_options = self._embedding_options(n_rows, densmap is not None, checkpoint_epochs)
-            initial_coordinates = self._embedding_init(n_rows, embedding_options["n_components"])
+            embedding_options = self._embedding_options(
+                n_rows, densmap is not None, checkpoint_epochs, modern=modern
+            )
+            if modern:
+                if densmap is not None or self.output_dens:
+                    raise NotImplementedError("modern density fitting is not implemented")
+                if self.init_rescale not in ("isotropic", "per_axis", "graph_edge"):
+                    raise ValueError("invalid init_rescale")
+                scale_factor = _finite_float(self.init_scale_factor, "init_scale_factor")
+                if scale_factor <= 0:
+                    raise ValueError("init_scale_factor must be positive")
+            initial_coordinates = self._embedding_init(
+                n_rows, embedding_options["n_components"], modern=modern
+            )
             spectral = isinstance(self.init, str) and self.init == "spectral"
         supplied_requested = self.precomputed_knn is not _DEFAULT_PRECOMPUTED_KNN
         if supplied_requested and hasattr(self, "_graph_transform_fit"):
@@ -559,7 +610,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             dense_args = (values, n_rows, n_features, n_neighbors, metric)
             if y is not None:
                 components, feature_isolated = self._fit_supervised_graph(dense_args, y, graph_options)
-            elif embedding_mode and not spectral and densmap is None and checkpoint_epochs is None:
+            elif embedding_mode and not (spectral or modern) and densmap is None and checkpoint_epochs is None:
                 components, embedding_shape, coordinates = _native._fit_dense_embedding(
                     *dense_args,
                     initial_coordinates=initial_coordinates,
@@ -597,7 +648,17 @@ class UMAP(BaseEstimator, TransformerMixin):
             )
         if graph.nnz == 0 and (embedding_mode or empty_continuous_graph):
             raise ValueError("zero-size array to reduction operation maximum which has no identity")
-        if spectral:
+        if modern:
+            if embedding_options["negative_sample_rate"] == 0:
+                warnings.warn("divide by zero encountered in divide", RuntimeWarning, stacklevel=2)
+            embedding = _fit_modern_initialization(
+                components, embedding_options["seed"], initial_coordinates,
+                embedding_options["n_components"], self.init_rescale, scale_factor,
+            )
+            if checkpoint_epochs is not None:
+                history = [embedding.copy()]
+            embedding[np.diff(graph.indptr) == 0] = np.nan
+        elif spectral:
             rng = np.random.RandomState(embedding_options.pop("seed"))
             embedding, history = _fit_spectral_embedding(
                 graph, X_checked, metric, rng, checkpoint_epochs=checkpoint_epochs,
@@ -947,7 +1008,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             }
         return self
 
-    def _validate_embedding_optimizer(self):
+    def _uses_modern_layout(self):
         optimizer = self.optimizer
         compatibility = self.compatibility_layout
         if compatibility is not None and not isinstance(compatibility, (bool, np.bool_)):
@@ -960,7 +1021,7 @@ class UMAP(BaseEstimator, TransformerMixin):
                     f"optimizer={optimizer!r} requires compatibility_layout=False; "
                     "compatibility_layout=True always uses the legacy optimizer."
                 )
-            raise NotImplementedError(f"optimizer={optimizer!r} is not implemented")
+            return True
         if compatibility is None:
             warnings.warn(_COMPATIBILITY_WARNING, FutureWarning, stacklevel=4)
         if optimizer not in (None, "compatibility"):
@@ -968,11 +1029,9 @@ class UMAP(BaseEstimator, TransformerMixin):
                 f"Unknown optimizer {optimizer!r}. Must be one of "
                 "'adam', 'momentum', 'compatibility'."
             )
-        if compatibility is not None and not compatibility:
-            raise NotImplementedError("embedding with compatibility_layout=False is not implemented")
+        return compatibility is not None and not compatibility
 
-    def _embedding_options(self, n_rows, densmap, checkpoint_epochs):
-        self._validate_embedding_optimizer()
+    def _embedding_options(self, n_rows, densmap, checkpoint_epochs, *, modern):
         n_components = self.n_components
         if isinstance(n_components, (bool, np.bool_)):
             raise TypeError("an integer is required for n_components")
@@ -988,14 +1047,19 @@ class UMAP(BaseEstimator, TransformerMixin):
             n_epochs = _default_epochs(n_rows, densmap)
         else:
             n_epochs = checkpoint_epochs[-1] if checkpoint_epochs else _validate_epochs(self.n_epochs)
+        if modern and n_epochs > 0:
+            setting = f"optimizer={self.optimizer!r}" if self.optimizer else "compatibility_layout=False"
+            raise NotImplementedError(f"positive epochs with {setting} are not implemented")
 
         seed = self.random_state
         if seed is None and n_rows == 1:
             seed = 0  # The singleton layout uses no random draws.
-        if isinstance(seed, bool) or not isinstance(seed, numbers.Integral):
-            raise ValueError("embedding requires random_state to be an integer seed")
-        if not 0 <= seed <= 2**32 - 1:
-            raise ValueError("Seed must be between 0 and 2**32 - 1")
+        if not (modern and isinstance(seed, np.random.RandomState)):
+            if isinstance(seed, bool) or not isinstance(seed, numbers.Integral):
+                raise ValueError("embedding requires random_state to be an integer seed")
+            if not 0 <= seed <= 2**32 - 1:
+                raise ValueError("Seed must be between 0 and 2**32 - 1")
+            seed = int(seed)
 
         if not isinstance(self.n_jobs, numbers.Integral) or self.n_jobs < -1 or self.n_jobs == 0:
             raise ValueError("n_jobs must be a positive integer or -1")
@@ -1011,12 +1075,12 @@ class UMAP(BaseEstimator, TransformerMixin):
         learning_rate = _finite_float(self.learning_rate, "learning_rate")
         if learning_rate < 0:
             raise ValueError("learning_rate must be nonnegative")
-        repulsion_strength, negative_sample_rate = self._sampling_options()
+        repulsion_strength, negative_sample_rate = self._sampling_options(allow_zero=modern)
 
         return dict(
             n_components=n_components,
             n_epochs=n_epochs,
-            seed=int(seed),
+            seed=seed,
             a=a,
             b=b,
             learning_rate=learning_rate,
@@ -1024,12 +1088,12 @@ class UMAP(BaseEstimator, TransformerMixin):
             negative_sample_rate=negative_sample_rate,
         )
 
-    def _sampling_options(self):
+    def _sampling_options(self, *, allow_zero=False):
         repulsion_strength = _finite_float(self.repulsion_strength, "repulsion_strength")
         negative_sample_rate = _finite_float(self.negative_sample_rate, "negative_sample_rate")
         if repulsion_strength < 0:
             raise ValueError("repulsion_strength must be nonnegative")
-        if negative_sample_rate <= 0:
+        if negative_sample_rate < 0 or (negative_sample_rate == 0 and not allow_zero):
             raise ValueError("negative_sample_rate must be positive")
         return repulsion_strength, negative_sample_rate
 
@@ -1058,11 +1122,13 @@ class UMAP(BaseEstimator, TransformerMixin):
         self.rad_orig_ = np.log(np.asarray(original, dtype=np.float32))
         self.rad_emb_ = np.log(np.asarray(embedded, dtype=np.float32))
 
-    def _embedding_init(self, n_rows, n_components):
+    def _embedding_init(self, n_rows, n_components, *, modern):
         if isinstance(self.init, str):
-            if self.init in ("random", "spectral") or (n_rows == 1 and self.init == "auto"):
+            if self.init == "random" or (n_rows == 1 and self.init == "auto"):
                 return None
-            if self.init in ("auto", "pca", "tswspectral", "recursive"):
+            if self.init == "spectral" and not modern:
+                return None
+            if self.init in ("auto", "pca", "tswspectral", "recursive", "spectral"):
                 raise NotImplementedError(f"init={self.init!r} is not implemented for embedding")
             raise ValueError(f"Unknown embedding init {self.init!r}")
         if not isinstance(self.init, np.ndarray):
@@ -1072,7 +1138,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise ValueError("init ndarray must match n_components value")
         if initial.shape[0] != n_rows:
             raise ValueError("init ndarray must have the same number of rows as X")
-        if np.unique(initial, axis=0).shape[0] != n_rows:
+        if not modern and np.unique(initial, axis=0).shape[0] != n_rows:
             raise NotImplementedError("explicit init with repeated rows is not implemented")
         return initial.ravel().tolist()
 

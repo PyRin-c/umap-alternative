@@ -150,7 +150,9 @@ These observations use one Numba thread.
 
 A full modern fit still needs a verified general negative selection
 stream, weighted-interval rounding and weak-edge handling across graphs
-and epoch budgets, and modern initialization rescaling and recursion.
+and epoch budgets, and recursive initialization.
+The estimator can already produce random or explicit initial coordinates
+at zero epochs. [Initialization checkpoints](modern_initialization_reference.md)
 The learning-rate schedules here cover explicit initialization and
 small dense Euclidean layouts. Hard-negative sampling, high component
 counts, and the schedule with other initialization methods need separate

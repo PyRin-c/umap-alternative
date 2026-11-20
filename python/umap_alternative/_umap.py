@@ -1356,10 +1356,16 @@ class UMAP(BaseEstimator, TransformerMixin):
     def _transform_embedding(self, training, queries, metric, ranked_columns):
         fitted = self.embedding_
         seed = self._embedding_transform_seed()
-        partial_fit = metric in _BOOLEAN_METRICS and fitted.shape[0] < training.shape[0]
+        packed_metric = metric in _PACKED_METRICS
+        partial_fit = (packed_metric or metric in _BOOLEAN_METRICS) and fitted.shape[0] < training.shape[0]
+        epochs = self.n_epochs
+        if (partial_fit and packed_metric and isinstance(epochs, numbers.Real)
+                and not isinstance(epochs, numbers.Integral) and np.isfinite(epochs) and epochs >= 0):
+            # A failed update can leave a floating budget that transform floors.
+            epochs = int(epochs)
         invalid_epochs = False
         try:
-            fit_epochs = None if self.n_epochs is None else _validate_epochs(self.n_epochs)
+            fit_epochs = None if epochs is None else _validate_epochs(epochs)
         except ValueError:
             if not partial_fit:
                 raise
@@ -1412,6 +1418,16 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise NotImplementedError("update requires dense features with computed neighbors")
         if sparse:
             return self._update_sparse_features(X, training, metric, ensure_all_finite)
+        if metric in _PACKED_METRICS:
+            batch = check_array(X, dtype=np.uint8, order="C", ensure_all_finite=ensure_all_finite)
+            combined = np.concatenate((training, batch), axis=0)
+            seed = self._embedding_transform_seed()
+            n_existing = training.shape[0]
+            components, ranks = _native._fit_packed_update_graph(
+                (combined.tobytes(), combined.shape), n_existing, self.n_neighbors_, metric,
+                graph_options=self._graph_options(),
+            )
+            return self._update_ranked_features(combined, metric, n_existing, components, ranks, seed)
         boolean_metric = metric in _BOOLEAN_METRICS
         if boolean_metric and issparse(X):
             raise ValueError("Sparse batches cannot be appended to a dense fit.")
@@ -1519,15 +1535,20 @@ class UMAP(BaseEstimator, TransformerMixin):
         self._graph_transform_fit = (combined, metric)
         fitted = self.embedding_
         epochs = self.n_epochs
-        if epochs is not None and not isinstance(epochs, (numbers.Integral, list, tuple, np.ndarray)):
-            raise TypeError(_EPOCHS_ERROR)
-        if (metric != "euclidean" and isinstance(epochs, numbers.Integral)
-                and epochs < 0 and fitted.shape[0] == n_existing):
+        negative_epochs = metric != "euclidean" and isinstance(epochs, numbers.Integral) and epochs < 0
+        floating_packed_epochs = (
+            metric in _PACKED_METRICS and isinstance(epochs, numbers.Real)
+            and not isinstance(epochs, numbers.Integral)
+        )
+        if fitted.shape[0] == n_existing and (negative_epochs or floating_packed_epochs):
             # The public update zeros weak memberships before the schedule fails.
             weights = self.graph_.data
             if weights.size:
-                cutoff = np.float32(weights.max() / _default_epochs(combined.shape[0]))
+                sampling_epochs = epochs if epochs > 10 else _default_epochs(combined.shape[0])
+                cutoff = np.float32(weights.max() / sampling_epochs)
                 weights[weights < cutoff] = 0
+        if epochs is not None and not isinstance(epochs, (numbers.Integral, list, tuple, np.ndarray)):
+            raise TypeError(_EPOCHS_ERROR)
         n_epochs = 0 if epochs is None else _validate_epochs(epochs)
         repulsion, negative_rate = self._sampling_options()
         components, shape, coordinates = _native._update_ranked_embedding(

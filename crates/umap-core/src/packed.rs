@@ -4,6 +4,7 @@ use crate::fit::{DenseGraphFitError, build_graph_with_cutoff};
 use crate::fuzzy_graph::{CsrGraph, GraphOptions};
 use crate::neighbors::{KnnError, Neighbor, collect_neighbors};
 use crate::transform::{DenseGraphTransformError, QueryTieRanking};
+use crate::update::DenseUpdateError;
 
 /// A distance over the individual bits in a packed byte row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,10 +71,60 @@ pub fn fit_packed_graph(
     cutoff: f64,
     options: GraphOptions,
 ) -> Result<(CsrGraph, usize), DenseGraphFitError> {
+    let (neighbors, removed) = packed_neighbors(training, k, metric, cutoff)?;
+    Ok((
+        build_graph_with_cutoff(&neighbors, k, f32::INFINITY, options)?,
+        removed,
+    ))
+}
+
+/// Rebuild the packed update graph and return appended rows' ranked columns.
+/// Update omits the fitted disconnection cutoff. Infinite ranks use an
+/// appended column as a placeholder so they cannot supply retained coordinates.
+pub fn fit_packed_update_graph(
+    training: PackedRows<'_>,
+    n_existing: usize,
+    k: usize,
+    metric: PackedBitMetric,
+    options: GraphOptions,
+) -> Result<(CsrGraph, Vec<usize>), DenseUpdateError> {
+    let (n_rows, n_features) = training.shape;
+    if n_existing == 0 || n_existing >= n_rows || n_features == 0 {
+        return Err(DenseUpdateError::InvalidDataShape {
+            n_existing,
+            n_rows,
+            n_features,
+        });
+    }
+    let (neighbors, _) = packed_neighbors(training, k, metric, f64::INFINITY)
+        .map_err(|error| DenseUpdateError::Graph(error.into()))?;
+    let graph = build_graph_with_cutoff(&neighbors, k, f32::INFINITY, options)
+        .map_err(|error| DenseUpdateError::Graph(error.into()))?;
+    let appended = neighbors
+        .into_iter()
+        .skip(n_existing)
+        .flatten()
+        .map(|neighbor| {
+            if neighbor.distance.is_finite() {
+                neighbor.index
+            } else {
+                n_existing
+            }
+        })
+        .collect();
+    Ok((graph, appended))
+}
+
+fn packed_neighbors(
+    training: PackedRows<'_>,
+    k: usize,
+    metric: PackedBitMetric,
+    cutoff: f64,
+) -> Result<(Vec<Vec<Neighbor>>, usize), KnnError> {
     training.validate()?;
     let (n_rows, width) = training.shape;
     if !(1..=n_rows).contains(&k) {
-        return Err(KnnError::InvalidK { k, n_rows }.into());
+        return Err(KnnError::InvalidK { k, n_rows });
     }
     let mut removed = 0;
     let neighbors = collect_neighbors(n_rows, k, |row, candidates| {
@@ -86,10 +137,7 @@ pub fn fit_packed_graph(
             candidates.push(Neighbor { index, distance });
         }
     });
-    Ok((
-        build_graph_with_cutoff(&neighbors, k, f32::INFINITY, options)?,
-        removed,
-    ))
+    Ok((neighbors, removed))
 }
 
 /// Select compact held-out ranks against dense packed features.

@@ -36,7 +36,9 @@ use umap_core::modern_initialization::{
 };
 use umap_core::modern_layout::{ModernLayoutConfig, ModernOptimizer};
 use umap_core::neighbors::DistanceMetric;
-use umap_core::packed::{PackedBitMetric, PackedRows, fit_packed_graph, rank_packed_queries};
+use umap_core::packed::{
+    PackedBitMetric, PackedRows, fit_packed_graph, fit_packed_update_graph, rank_packed_queries,
+};
 use umap_core::parametric::prepare_parametric_edges;
 use umap_core::rng::{Mt19937, recursive_part_labels};
 use umap_core::sampling::{ModernSampledLayout, ModernSamplingConfig};
@@ -628,6 +630,27 @@ fn _fit_packed_graph(
     let options = parse_graph_options(graph_options)?.unwrap_or_default();
     py.detach(|| fit_packed_graph(training, k, metric, cutoff, options))
         .map(|(graph, removed)| (csr_components(graph), removed))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+#[pyo3(signature = (data, n_existing, k, metric, *, graph_options=None))]
+fn _fit_packed_update_graph(
+    py: Python<'_>,
+    data: PackedComponents<'_>,
+    n_existing: usize,
+    k: usize,
+    metric: &str,
+    graph_options: Option<(f64, f64)>,
+) -> PyResult<(CsrComponents, Vec<usize>)> {
+    let training = PackedRows {
+        data: data.0.as_bytes(),
+        shape: data.1,
+    };
+    let metric = parse_packed_metric(metric)?;
+    let options = parse_graph_options(graph_options)?.unwrap_or_default();
+    py.detach(|| fit_packed_update_graph(training, n_existing, k, metric, options))
+        .map(|(graph, ranks)| (csr_components(graph), ranks))
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
@@ -1853,6 +1876,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_fit_dense_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_graph_with_cutoff, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_packed_graph, module)?)?;
+    module.add_function(wrap_pyfunction!(_fit_packed_update_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_rank_packed_queries, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_sparse_graph, module)?)?;
     module.add_function(wrap_pyfunction!(

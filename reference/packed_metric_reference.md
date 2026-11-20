@@ -89,10 +89,12 @@ from `[9, 0, 2, 1]` to `[0, 1, 2, 3]`. For Jaccard, transform
 to `[4, 0, 0, 0]`. The Rust path raises `ValueError` for a wider
 query and bounds every read to the fitted matrix.
 
-The pinned public wheel also accepted supervised fit, density outputs,
-and update on the ordinary byte sample. On that sample the port raises
-`NotImplementedError` for supervision and density and `ValueError`
-for update. The disconnected Jaccard spectral probe on `axis` raised
+The pinned public wheel also accepted supervised fit and density outputs
+on the ordinary byte sample. The port raises `NotImplementedError` for
+those options. Packed updates have their own public fixtures.
+[Packed update reference](packed_update_reference.md)
+
+The disconnected Jaccard spectral probe on `axis` raised
 `TypingError` in the public wheel and `InvalidParameterError` in the
 port. The fixtures cover connected spectral initialization and
 exhaustive search. Approximate packed neighbor search remains unverified.

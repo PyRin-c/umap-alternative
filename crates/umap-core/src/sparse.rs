@@ -642,7 +642,7 @@ impl<'a> SparseFeatureRanking<'a> {
     ) -> Result<(), DenseGraphTransformError> {
         let wide = &self.wide_distances;
         self.tie_ranking
-            .select(query, &mut self.candidates, k, |distances, count| {
+            .select(query, &mut self.candidates, k, false, |distances, count| {
                 // Increasing float64 distances remain ordered after rounding.
                 // The full-precision row is needed only if that rounding produces a tie.
                 let distances = if wide.is_empty() {

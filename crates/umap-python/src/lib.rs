@@ -2,6 +2,7 @@ use pyo3::exceptions::{
     PyIndexError, PyNotImplementedError, PyRuntimeWarning, PyValueError, PyZeroDivisionError,
 };
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use pyo3::wrap_pyfunction;
 
 use umap_core::aligned::{AlignedLayoutConfig, optimize_aligned_layout};
@@ -35,6 +36,7 @@ use umap_core::modern_initialization::{
 };
 use umap_core::modern_layout::{ModernLayoutConfig, ModernOptimizer};
 use umap_core::neighbors::DistanceMetric;
+use umap_core::packed::{PackedBitMetric, PackedRows, fit_packed_graph, rank_packed_queries};
 use umap_core::parametric::prepare_parametric_edges;
 use umap_core::rng::{Mt19937, recursive_part_labels};
 use umap_core::sampling::{ModernSampledLayout, ModernSamplingConfig};
@@ -59,6 +61,7 @@ use umap_core::validation::{
 };
 
 type CsrComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
+type PackedComponents<'py> = (Bound<'py, PyBytes>, (usize, usize));
 type FloatBuffer = (Vec<f64>, bool);
 type MembershipBuffers = (Vec<usize>, Vec<usize>, Vec<f64>);
 type NeighborMembershipComponents = (Vec<i32>, Vec<i32>, Vec<f32>, Option<Vec<f32>>);
@@ -516,6 +519,82 @@ fn _fit_dense_graph_with_cutoff(
     py.detach(|| fit_dense_graph_with_cutoff(&data, n_rows, n_features, k, metric, cutoff, options))
         .map(|(graph, removed)| (csr_components(graph), removed))
         .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+fn parse_packed_metric(metric: &str) -> PyResult<PackedBitMetric> {
+    match metric {
+        "bit_hamming" => Ok(PackedBitMetric::Hamming),
+        "bit_jaccard" => Ok(PackedBitMetric::Jaccard),
+        _ => Err(PyValueError::new_err(format!(
+            "unsupported packed metric {metric:?}"
+        ))),
+    }
+}
+
+fn is_packed_metric(metric: &str) -> bool {
+    matches!(metric, "bit_hamming" | "bit_jaccard")
+}
+
+#[pyfunction]
+#[pyo3(signature = (data, shape, k, metric, cutoff, *, graph_options=None))]
+fn _fit_packed_graph(
+    py: Python<'_>,
+    data: Bound<'_, PyBytes>,
+    shape: (usize, usize),
+    k: usize,
+    metric: &str,
+    cutoff: f64,
+    graph_options: Option<(f64, f64)>,
+) -> PyResult<(CsrComponents, usize)> {
+    let training = PackedRows {
+        data: data.as_bytes(),
+        shape,
+    };
+    let metric = parse_packed_metric(metric)?;
+    let options = parse_graph_options(graph_options)?.unwrap_or_default();
+    py.detach(|| fit_packed_graph(training, k, metric, cutoff, options))
+        .map(|(graph, removed)| (csr_components(graph), removed))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+fn _rank_packed_queries(
+    py: Python<'_>,
+    training: PackedComponents<'_>,
+    queries: PackedComponents<'_>,
+    k: usize,
+    metric: &str,
+    rank_ties: Py<PyAny>,
+) -> PyResult<(Vec<i32>, Vec<f32>)> {
+    let training = PackedRows {
+        data: training.0.as_bytes(),
+        shape: training.1,
+    };
+    let queries = PackedRows {
+        data: queries.0.as_bytes(),
+        shape: queries.1,
+    };
+    let metric = parse_packed_metric(metric)?;
+    py.detach(|| {
+        let mut callback_error = None;
+        let result = rank_packed_queries(training, queries, k, metric, |distances, width| {
+            python_rank_ties(&rank_ties, distances, width, &mut callback_error)
+        });
+        if let Some(error) = callback_error {
+            return Err(error);
+        }
+        let ranks = result.map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let mut columns = Vec::with_capacity(ranks.len());
+        let mut distances = Vec::with_capacity(ranks.len());
+        for rank in ranks {
+            columns.push(
+                i32::try_from(rank.index)
+                    .map_err(|_| PyValueError::new_err("packed query index exceeds i32"))?,
+            );
+            distances.push(rank.distance);
+        }
+        Ok((columns, distances))
+    })
 }
 
 /// Fit a fuzzy graph from sorted CSR features and return its CSR data.
@@ -1231,10 +1310,10 @@ fn _transform_dense_graph(
             py,
             ranked_columns.as_deref(),
             &queries,
-            (n_query_rows, n_training_rows),
-            k,
+            (n_query_rows, n_training_rows, k),
             disconnection_distance.unwrap_or(f32::INFINITY),
             options,
+            is_packed_metric(metric),
         )?
     } else {
         feature_query_graph(
@@ -1404,16 +1483,55 @@ fn ranked_query_graph(
     py: Python<'_>,
     columns: Option<&[i32]>,
     distances: &[f32],
-    shape: (usize, usize),
-    k: usize,
+    (n_query_rows, n_training_rows, k): (usize, usize, usize),
     cutoff: f32,
     options: GraphOptions,
+    packed: bool,
 ) -> PyResult<CooGraph> {
     let columns = columns.ok_or_else(|| PyValueError::new_err("expected ranked query columns"))?;
     py.detach(|| {
-        transform_ranked_neighbors_graph(
-            columns, distances, shape.0, shape.1, k, k, cutoff, options,
-        )
+        let packed_columns = (packed && distances.contains(&f32::INFINITY)).then(|| {
+            columns
+                .iter()
+                .enumerate()
+                .map(|(i, &column)| {
+                    if distances.get(i) == Some(&f32::INFINITY) {
+                        -1
+                    } else {
+                        column
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
+        let preserve_infinite = packed && cutoff.is_nan();
+        let mut graph = transform_ranked_neighbors_graph(
+            packed_columns.as_deref().unwrap_or(columns),
+            distances,
+            n_query_rows,
+            n_training_rows,
+            k,
+            k,
+            if preserve_infinite {
+                f32::INFINITY
+            } else {
+                cutoff
+            },
+            options,
+        )?;
+        if preserve_infinite {
+            // A NaN threshold leaves disjoint ranks stored at their original
+            // coordinates with zero membership.
+            for (rank, (&column, &distance)) in columns.iter().zip(distances).enumerate() {
+                if distance == f32::INFINITY
+                    && let Ok(column) = usize::try_from(column)
+                    && column < n_training_rows
+                {
+                    graph.row[rank] = rank / k;
+                    graph.col[rank] = column;
+                }
+            }
+        }
+        Ok::<_, umap_core::transform::RankedQueryGraphError>(graph)
     })
     .map_err(|error| PyValueError::new_err(error.to_string()))
 }
@@ -1457,7 +1575,7 @@ fn _transform_dense_embedding(
     let precomputed = metric == "precomputed";
     let config = DenseEmbeddingTransformConfig {
         n_neighbors: k,
-        metric: if precomputed {
+        metric: if precomputed || (ranked_columns.is_some() && is_packed_metric(metric)) {
             DistanceMetric::Euclidean
         } else {
             parse_metric(metric)?
@@ -1477,10 +1595,10 @@ fn _transform_dense_embedding(
             py,
             ranked_columns.as_deref(),
             &queries,
-            (n_query_rows, n_training_rows),
-            k,
+            (n_query_rows, n_training_rows, k),
             disconnection_distance.unwrap_or(f32::INFINITY),
             options,
+            is_packed_metric(metric),
         )?;
         Some(graph)
     } else if let Some(rank_ties) = rank_ties.as_ref() {
@@ -1658,6 +1776,8 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_prepare_parametric_edges, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_graph_with_cutoff, module)?)?;
+    module.add_function(wrap_pyfunction!(_fit_packed_graph, module)?)?;
+    module.add_function(wrap_pyfunction!(_rank_packed_queries, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_sparse_graph, module)?)?;
     module.add_function(wrap_pyfunction!(
         _fit_sparse_feature_graph_with_cutoff,

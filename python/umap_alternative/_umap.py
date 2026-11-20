@@ -46,6 +46,7 @@ _SPARSE_BOOLEAN_METRICS = (
     "sokalmichener", "sokalsneath", "kulsinski",
 )
 _BOOLEAN_METRICS = _SPARSE_BOOLEAN_METRICS + ("yule",)
+_PACKED_METRICS = ("bit_hamming", "bit_jaccard")
 _TIE_RANKED_METRICS = _ANGULAR_METRICS + _RATIO_METRICS + _BOOLEAN_METRICS
 _SPARSE_LAYOUT_METRICS = (
     ("euclidean", "manhattan", "chebyshev", "cosine") + _RATIO_METRICS + _SPARSE_BOOLEAN_METRICS
@@ -510,12 +511,18 @@ def _same_transform_input(queries, fitted):
             and np.array_equal(queries.data.view(np.uint32), fitted.data.view(np.uint32))
         )
     if not issparse(queries) and not issparse(fitted):
+        if queries.dtype == fitted.dtype == np.dtype(np.uint8):
+            return np.array_equal(queries, fitted)
         return np.array_equal(queries.view(np.uint32), fitted.view(np.uint32))
     return False
 
 
-def _feature_embedding_output(embedding, X):
-    dtype = np.float64 if getattr(X, "dtype", None) == np.dtype(np.float64) else np.float32
+def _feature_embedding_output(embedding, X, *, preserve_float_dtype=False):
+    dtype = getattr(X, "dtype", None)
+    if dtype != np.dtype(np.float64) and not (
+        preserve_float_dtype and getattr(dtype, "kind", None) == "f"
+    ):
+        dtype = np.float32
     return embedding.astype(dtype, copy=False)
 
 
@@ -732,7 +739,10 @@ class UMAP(BaseEstimator, TransformerMixin):
         sparse = issparse(X)
         metric = self._validate_metric(sparse=sparse)
         boolean_metric = metric in _BOOLEAN_METRICS
-        if boolean_metric:
+        packed_metric = metric in _PACKED_METRICS
+        if packed_metric:
+            X_checked = check_array(X, dtype=np.uint8, order="C", copy=True)
+        if boolean_metric or packed_metric:
             warnings.warn(
                 f"gradient function is not yet implemented for {metric} distance metric; "
                 "inverse_transform will be unavailable",
@@ -751,7 +761,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         sparse_feature_layout = sparse and metric in _SPARSE_LAYOUT_METRICS
         sparse_embedding = sparse and not precomputed and embedding_mode
         angular = not sparse and metric in _ANGULAR_METRICS
-        ranked_non_angular = not sparse and (boolean_metric or metric in _RATIO_METRICS)
+        ranked_non_angular = not sparse and (boolean_metric or packed_metric or metric in _RATIO_METRICS)
         if sparse and not precomputed:
             if sparse_embedding and not sparse_feature_layout:
                 raise TypeError(
@@ -769,7 +779,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             X_checked.sort_indices()
         elif sparse:
             X_checked = _sparse_features(X, preserve_duplicates=metric == "cosine")
-        else:
+        elif not packed_metric:
             X_checked = check_array(
                 X,
                 dtype=np.float32,
@@ -852,6 +862,8 @@ class UMAP(BaseEstimator, TransformerMixin):
         if cutoff is None:
             if angular or metric == "cosine":
                 cutoff = 2.0
+            elif metric == "bit_jaccard":
+                cutoff = 1
             else:
                 cutoff = 1.0 if metric in ("jaccard", "dice") else np.inf
         elif not isinstance(cutoff, (int, float)):
@@ -874,6 +886,8 @@ class UMAP(BaseEstimator, TransformerMixin):
                 fitted_input.sort_indices()
         if embedding_mode and angular and (densmap is not None or self.output_dens):
             raise NotImplementedError("density fitting with angular distances is not implemented")
+        if embedding_mode and packed_metric and (densmap is not None or self.output_dens):
+            raise NotImplementedError("density fitting with packed byte distances is not implemented")
         if sparse_embedding and (densmap is not None or self.output_dens):
             raise NotImplementedError("density fitting with sparse features is not implemented")
         if embedding_mode and sparse and precomputed and (
@@ -940,6 +954,14 @@ class UMAP(BaseEstimator, TransformerMixin):
                 )
             if precomputed:
                 transform_fit = (X_checked.copy(), metric)
+        elif packed_metric:
+            if y is not None:
+                raise NotImplementedError("supervised fitting with packed byte distances is not implemented")
+            transform_cutoff = cutoff
+            components, removed = _native._fit_packed_graph(
+                X_checked.tobytes(), X_checked.shape, n_neighbors, metric, cutoff,
+                graph_options=graph_options,
+            )
         elif (angular or ranked_non_angular or cutoff < np.inf) and not (precomputed or sparse) and y is None:
             transform_cutoff = cutoff
             components, removed = _native._fit_dense_graph_with_cutoff(
@@ -1038,7 +1060,7 @@ class UMAP(BaseEstimator, TransformerMixin):
                 stacklevel=2,
             )
         if graph.nnz == 0 and (embedding_mode or empty_continuous_graph):
-            if (boolean_metric or (sparse_feature_layout and metric == "euclidean")) and not hasattr(
+            if (boolean_metric or packed_metric or (sparse_feature_layout and metric == "euclidean")) and not hasattr(
                 self, "_graph_transform_fit"
             ):
                 # A cold fit can publish the empty graph before layout fails.
@@ -1196,8 +1218,9 @@ class UMAP(BaseEstimator, TransformerMixin):
             if getattr(self, "output_dens", False):
                 return self.embedding_, self.rad_orig_, self.rad_emb_
             metric = self._graph_transform_fit[1]
-            if metric in _BOOLEAN_METRICS or (issparse(X) and metric in _SPARSE_LAYOUT_METRICS):
-                return _feature_embedding_output(self.embedding_, X)
+            packed_metric = metric in _PACKED_METRICS
+            if packed_metric or metric in _BOOLEAN_METRICS or (issparse(X) and metric in _SPARSE_LAYOUT_METRICS):
+                return _feature_embedding_output(self.embedding_, X, preserve_float_dtype=packed_metric)
             return self.embedding_.astype(np.float32, copy=False)
         return self.graph_
 
@@ -1221,8 +1244,11 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise NotImplementedError("transform after fitting sparse features is not implemented")
         sparse = issparse(X)
         boolean_metric = metric in _BOOLEAN_METRICS
+        packed_metric = metric in _PACKED_METRICS
         sparse_features = sparse_fitted or (sparse and boolean_metric)
-        if sparse:
+        if packed_metric:
+            queries = check_array(X, dtype=np.uint8, order="C")
+        elif sparse:
             if sparse_features:
                 queries = csr_matrix(_check_sparse_input(X, input_name="sparse features"))
             elif metric == "precomputed":
@@ -1240,15 +1266,15 @@ class UMAP(BaseEstimator, TransformerMixin):
         if _same_transform_input(queries, fitted_input):
             if self.transform_mode == "graph":
                 return self.graph_
-            if sparse_features or boolean_metric:
-                return _feature_embedding_output(self.embedding_, X)
+            if sparse_features or boolean_metric or packed_metric:
+                return _feature_embedding_output(self.embedding_, X, preserve_float_dtype=packed_metric)
             return self.embedding_
         if getattr(self, "densmap", False):
             raise NotImplementedError("Transforming data into an existing embedding not supported for densMAP.")
         transform_error = getattr(self, "_supplied_transform_error", None)
         if transform_error is not None:
             raise NotImplementedError(transform_error)
-        if boolean_metric and self.transform_mode == "graph":
+        if (boolean_metric or packed_metric) and self.transform_mode == "graph":
             check_random_state(self.transform_seed)
         ranked_columns = None
         if metric == "precomputed":
@@ -1264,6 +1290,12 @@ class UMAP(BaseEstimator, TransformerMixin):
             if queries.min() < 0.0:
                 raise AssertionError
             ranked_columns = order.ravel().tolist()
+        elif packed_metric:
+            ranked_columns, distances = _native._rank_packed_queries(
+                (training.tobytes(), training.shape), (queries.tobytes(), queries.shape),
+                self.n_neighbors_, metric, _rank_tied_dense_distances,
+            )
+            queries = np.asarray(distances, dtype=np.float32).reshape(n_query_rows, self.n_neighbors_)
         elif sparse_features:
             if n_query_features > n_features or (boolean_metric and n_query_features != n_features):
                 raise ValueError(
@@ -1296,7 +1328,9 @@ class UMAP(BaseEstimator, TransformerMixin):
             )
         if self.transform_mode == "embedding":
             coordinates = self._transform_embedding(training, queries, metric, ranked_columns)
-            return _feature_embedding_output(coordinates, X) if sparse_features or boolean_metric else coordinates
+            if sparse_features or boolean_metric or packed_metric:
+                return _feature_embedding_output(coordinates, X, preserve_float_dtype=packed_metric)
+            return coordinates
 
         shape, row, col, data = _native._transform_dense_graph(
             [] if ranked_columns is not None else training.ravel().tolist(),
@@ -1523,7 +1557,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         training, metric = transform_fit
         if issparse(training):
             raise ValueError("Inverse transform not available for sparse input.")
-        if metric in _BOOLEAN_METRICS:
+        if metric in _BOOLEAN_METRICS + _PACKED_METRICS:
             raise ValueError("Inverse transform not available for given metric.")
         if self.transform_mode == "graph":
             raise ValueError("Inverse transform not available for transform_mode = 'graph'")
@@ -1817,6 +1851,8 @@ class UMAP(BaseEstimator, TransformerMixin):
         if not isinstance(self.metric, str):
             raise ValueError("metric is neither callable nor a recognised string")
         if self.metric == "precomputed":
+            return self.metric
+        if self.metric in _PACKED_METRICS:
             return self.metric
         name = self.metric.lower()
         if name == "cosine" or (name == "correlation" and not sparse):

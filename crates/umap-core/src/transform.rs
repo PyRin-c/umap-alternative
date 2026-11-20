@@ -861,7 +861,7 @@ pub fn transform_dense_graph_with_tie_ranking(
         metric,
         cutoff,
         options,
-        |query, candidates| tie_ranking.select(query, candidates, k, &mut rank_ties),
+        |query, candidates| tie_ranking.select(query, candidates, k, false, &mut rank_ties),
     )
 }
 
@@ -877,6 +877,7 @@ impl QueryTieRanking {
         query: usize,
         candidates: &mut [Neighbor],
         k: usize,
+        allow_missing: bool,
         rank_ties: impl FnOnce(&[f32], usize) -> Vec<usize>,
     ) -> Result<(), DenseGraphTransformError> {
         let selected = sort_closest_neighbors(candidates, k);
@@ -915,7 +916,7 @@ impl QueryTieRanking {
                 return Err(DenseGraphTransformError::InvalidRank { query, column });
             }
             let distance = self.distances[column];
-            if !distance.is_finite() {
+            if !(distance.is_finite() || (allow_missing && distance == f32::INFINITY)) {
                 return Err(DenseGraphTransformError::NonFiniteDistance {
                     query,
                     training: column,

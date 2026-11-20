@@ -22,6 +22,7 @@ pub mod sparse;
 pub mod transform;
 pub mod update;
 pub mod update_layout;
+pub mod validation;
 
 /// Version of the Rust implementation.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

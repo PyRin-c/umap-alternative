@@ -1,4 +1,6 @@
-use pyo3::exceptions::{PyNotImplementedError, PyRuntimeWarning, PyValueError};
+use pyo3::exceptions::{
+    PyNotImplementedError, PyRuntimeWarning, PyValueError, PyZeroDivisionError,
+};
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
@@ -48,6 +50,9 @@ use umap_core::transform::{
 use umap_core::update::{
     DenseUpdateConfig, DenseUpdateError, update_dense_embedding, update_embedding_from_ranked_graph,
 };
+use umap_core::validation::{
+    Trustworthiness, TrustworthinessError, TrustworthinessMetric, trustworthiness_from_dense,
+};
 
 type CsrComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
 type FloatBuffer = (Vec<f64>, bool);
@@ -63,6 +68,93 @@ type RadiusInput = (Vec<f32>, usize, String);
 type DensityInput = ((f64, f64, f64), RadiusInput);
 type AlignedEmbeddingComponents = (Vec<Vec<f32>>, Option<RngState>);
 type ParametricEdgeComponents = (Vec<(usize, usize, usize)>, usize);
+
+fn trustworthiness_error(error: TrustworthinessError) -> PyErr {
+    match error {
+        TrustworthinessError::ZeroDenominator => PyZeroDivisionError::new_err(error.to_string()),
+        _ => PyValueError::new_err(error.to_string()),
+    }
+}
+
+#[pyfunction]
+fn _trustworthiness_ranked(
+    py: Python<'_>,
+    source: Vec<Vec<i64>>,
+    embedded: Vec<Vec<i64>>,
+    max_k: usize,
+) -> PyResult<Vec<f64>> {
+    py.detach(|| {
+        if source.len() != embedded.len() {
+            return Err(TrustworthinessError::Shape);
+        }
+        let mut scores = Trustworthiness::new(source.len(), max_k)?;
+        for (source_row, embedded_row) in source.iter().zip(&embedded) {
+            scores.add_ranked_row(source_row, embedded_row)?;
+        }
+        scores.finish(0.0)
+    })
+    .map_err(trustworthiness_error)
+}
+
+#[pyfunction]
+fn _trustworthiness_distances(
+    source_rows: &Bound<'_, PyAny>,
+    embedded: Vec<Vec<usize>>,
+    max_k: usize,
+) -> PyResult<Vec<f64>> {
+    let mut scores = Trustworthiness::new(embedded.len(), max_k).map_err(trustworthiness_error)?;
+    for (source, neighbors) in source_rows.try_iter()?.zip(&embedded) {
+        let source: Vec<f64> = source?.extract()?;
+        scores
+            .add_distance_row(&source, neighbors)
+            .map_err(trustworthiness_error)?;
+    }
+    scores.finish(1.0).map_err(trustworthiness_error)
+}
+
+#[pyfunction]
+fn _trustworthiness_dense(
+    py: Python<'_>,
+    source: &Bound<'_, PyAny>,
+    n_features: usize,
+    embedded: Vec<Vec<usize>>,
+    max_k: usize,
+    metric: &str,
+    dtype: &str,
+) -> PyResult<Vec<f64>> {
+    let metric = match metric {
+        "euclidean" => TrustworthinessMetric::Euclidean,
+        "manhattan" => TrustworthinessMetric::Manhattan,
+        "chebyshev" => TrustworthinessMetric::Chebyshev,
+        _ => {
+            return Err(PyValueError::new_err(
+                "unknown trustworthiness source metric",
+            ));
+        }
+    };
+    macro_rules! evaluate {
+        ($dtype:ty, $distance:ident) => {{
+            let source = source.extract::<Vec<$dtype>>()?;
+            py.detach(|| {
+                trustworthiness_from_dense(&source, n_features, &embedded, max_k, |a, b| {
+                    metric.$distance(a, b)
+                })
+            })
+        }};
+    }
+    match dtype {
+        "f32" => evaluate!(f32, distance_f32),
+        "f64" => evaluate!(f64, distance_f64),
+        "i64" => evaluate!(i64, distance_i64),
+        "u64" => evaluate!(u64, distance_u64),
+        _ => {
+            return Err(PyValueError::new_err(
+                "unknown trustworthiness source dtype",
+            ));
+        }
+    }
+    .map_err(trustworthiness_error)
+}
 
 #[pyfunction]
 fn _prepare_parametric_edges(
@@ -1440,6 +1532,9 @@ fn _inverse_transform_dense_embedding(
 
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(_trustworthiness_ranked, module)?)?;
+    module.add_function(wrap_pyfunction!(_trustworthiness_distances, module)?)?;
+    module.add_function(wrap_pyfunction!(_trustworthiness_dense, module)?)?;
     module.add("__version__", umap_core::VERSION)?;
     module.add_function(wrap_pyfunction!(_smooth_knn_distances, module)?)?;
     module.add_function(wrap_pyfunction!(_compute_knn_memberships, module)?)?;

@@ -191,8 +191,8 @@ impl From<OptimizeError> for DenseEmbeddingFitError {
 /// Fit a fuzzy graph and row-major dense embedding.
 ///
 /// `data` is a finite row-major matrix with shape `n_rows` by `n_features`.
-/// The graph is built by [`fit_dense_graph`]. The fit generates or copies the
-/// initial coordinates into a private buffer, normalizes the columns, and
+/// The graph is built by [`fit_dense_graph_with_options`]. The fit generates
+/// or copies the initial coordinates into a private buffer, normalizes the columns, and
 /// passes the result to [`crate::optimize::optimize_csr`]. At zero epochs, the
 /// fit returns the normalized coordinates after validation. Each scheduled
 /// negative sample passes its source row to the sampler, which returns a

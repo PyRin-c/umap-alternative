@@ -12,6 +12,8 @@
 
 use std::fmt;
 
+use crate::fuzzy_graph::CsrGraph;
+
 /// Input or arithmetic failures while applying one attractive edge update.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LayoutError {
@@ -36,6 +38,63 @@ pub enum LayoutError {
         row: usize,
         /// Number of rows in the embedding.
         n_rows: usize,
+    },
+    /// The CSR graph shape or backing-array lengths are inconsistent with one
+    /// another, or the graph is not square.
+    InvalidGraphShape {
+        /// Number of graph rows.
+        n_rows: usize,
+        /// Number of graph columns.
+        n_cols: usize,
+        /// Length of the row-offset array.
+        indptr: usize,
+        /// Length of the column-index array.
+        indices: usize,
+        /// Length of the membership array.
+        data: usize,
+    },
+    /// A CSR row has an invalid or non-monotonic pair of offsets.
+    InvalidGraphOffsets {
+        /// Row whose `[start, end)` range is invalid.
+        row: usize,
+        /// Start offset observed for that row.
+        start: usize,
+        /// End offset observed for that row.
+        end: usize,
+        /// Number of available edge entries.
+        entries: usize,
+    },
+    /// A CSR column index is outside the square graph.
+    InvalidGraphIndex {
+        /// Source row of the invalid edge.
+        row: usize,
+        /// Position within that row's CSR range.
+        position: usize,
+        /// Invalid destination row.
+        index: usize,
+        /// Number of graph rows and columns.
+        n_rows: usize,
+    },
+    /// CSR columns must be strictly ascending so sweep order is explicit and
+    /// duplicate edges cannot silently apply their force twice.
+    InvalidGraphOrder {
+        /// Source row of the out-of-order edge.
+        row: usize,
+        /// Position within that row's CSR range.
+        position: usize,
+        /// Previous column index in the row.
+        previous: usize,
+        /// Current column index in the row.
+        current: usize,
+    },
+    /// A CSR membership weight is not a finite fuzzy-set value in `[0, 1]`.
+    InvalidGraphWeight {
+        /// Source row of the invalid edge.
+        row: usize,
+        /// Position within that row's CSR range.
+        position: usize,
+        /// Invalid membership weight.
+        weight: f32,
     },
     /// A parameter is non-finite or outside the domain of the attractive
     /// objective (`a > 0`, `b > 0`, and `learning_rate >= 0`).
@@ -90,6 +149,51 @@ impl fmt::Display for LayoutError {
             Self::InvalidRow { row, n_rows } => {
                 write!(formatter, "layout row {row} is outside 0..{n_rows}")
             }
+            Self::InvalidGraphShape {
+                n_rows,
+                n_cols,
+                indptr,
+                indices,
+                data,
+            } => write!(
+                formatter,
+                "CSR graph shape {n_rows}x{n_cols} has lengths indptr={indptr}, indices={indices}, data={data}"
+            ),
+            Self::InvalidGraphOffsets {
+                row,
+                start,
+                end,
+                entries,
+            } => write!(
+                formatter,
+                "CSR graph row {row} has invalid offsets {start}..{end} for {entries} entries"
+            ),
+            Self::InvalidGraphIndex {
+                row,
+                position,
+                index,
+                n_rows,
+            } => write!(
+                formatter,
+                "CSR graph row {row}, position {position} has index {index}, outside 0..{n_rows}"
+            ),
+            Self::InvalidGraphOrder {
+                row,
+                position,
+                previous,
+                current,
+            } => write!(
+                formatter,
+                "CSR graph row {row}, position {position} is not strictly ascending: {previous} then {current}"
+            ),
+            Self::InvalidGraphWeight {
+                row,
+                position,
+                weight,
+            } => write!(
+                formatter,
+                "CSR graph row {row}, position {position} has invalid weight {weight}"
+            ),
             Self::InvalidParameter { parameter, value } => {
                 write!(
                     formatter,
@@ -301,6 +405,138 @@ pub fn attractive_update(
     }
 }
 
+/// Apply one ascending CSR sweep of symmetric attractive updates.
+///
+/// The graph is traversed in row order and then in the stored ascending
+/// column order.  Each CSR membership is one directed edge entry and is
+/// applied once; if a graph stores both directions of an undirected edge,
+/// both entries therefore contribute to the sweep.  A nonzero membership
+/// selects an edge, but the supplied learning rate is fixed for every
+/// selected edge; the membership is not multiplied into the force.  In a
+/// scheduled optimizer, membership values belong in edge due-time/sample
+/// scheduling, which is intentionally outside this static sweep.
+///
+/// The graph is validated completely before the first coordinate is changed:
+/// it must be square, have consistent CSR arrays, contain in-range strictly
+/// ascending columns, and contain finite weights in `[0, 1]`.  The embedding
+/// must have exactly `graph.n_rows * n_components` finite values.
+pub fn attractive_update_csr(
+    embedding: &mut [f32],
+    n_components: usize,
+    graph: &CsrGraph,
+    a: f32,
+    b: f32,
+    learning_rate: f32,
+) -> Result<(), LayoutError> {
+    if n_components == 0 {
+        return Err(LayoutError::InvalidShape {
+            n_components,
+            values: embedding.len(),
+        });
+    }
+    let expected_values = graph.n_rows.checked_mul(n_components);
+    if graph.n_cols != graph.n_rows || expected_values != Some(embedding.len()) {
+        return Err(LayoutError::InvalidGraphShape {
+            n_rows: graph.n_rows,
+            n_cols: graph.n_cols,
+            indptr: graph.indptr.len(),
+            indices: graph.indices.len(),
+            data: graph.data.len(),
+        });
+    }
+    let expected_indptr = graph.n_rows.checked_add(1);
+    if expected_indptr != Some(graph.indptr.len())
+        || graph.indptr.first().copied() != Some(0)
+        || graph.indices.len() != graph.data.len()
+    {
+        return Err(LayoutError::InvalidGraphShape {
+            n_rows: graph.n_rows,
+            n_cols: graph.n_cols,
+            indptr: graph.indptr.len(),
+            indices: graph.indices.len(),
+            data: graph.data.len(),
+        });
+    }
+
+    validate_parameters(a, b, learning_rate)?;
+    if let Some((index, value)) = embedding
+        .iter()
+        .copied()
+        .enumerate()
+        .find(|(_, value)| !value.is_finite())
+    {
+        return Err(LayoutError::NonFiniteValue {
+            endpoint: "embedding",
+            component: index,
+            value,
+        });
+    }
+
+    for row in 0..graph.n_rows {
+        let start = graph.indptr[row];
+        let end = graph.indptr[row + 1];
+        if start > end || end > graph.indices.len() {
+            return Err(LayoutError::InvalidGraphOffsets {
+                row,
+                start,
+                end,
+                entries: graph.indices.len(),
+            });
+        }
+
+        let mut previous = None;
+        for position in start..end {
+            let index = graph.indices[position];
+            if index >= graph.n_rows {
+                return Err(LayoutError::InvalidGraphIndex {
+                    row,
+                    position,
+                    index,
+                    n_rows: graph.n_rows,
+                });
+            }
+            if let Some(previous) = previous
+                && index <= previous
+            {
+                return Err(LayoutError::InvalidGraphOrder {
+                    row,
+                    position,
+                    previous,
+                    current: index,
+                });
+            }
+            previous = Some(index);
+
+            let weight = graph.data[position];
+            if !weight.is_finite() || !(0.0..=1.0).contains(&weight) {
+                return Err(LayoutError::InvalidGraphWeight {
+                    row,
+                    position,
+                    weight,
+                });
+            }
+        }
+    }
+
+    for row in 0..graph.n_rows {
+        for position in graph.indptr[row]..graph.indptr[row + 1] {
+            if graph.data[position] > 0.0 {
+                attractive_update(
+                    embedding,
+                    n_components,
+                    row,
+                    graph.indices[position],
+                    a,
+                    b,
+                    learning_rate,
+                )?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_parameters(a: f32, b: f32, learning_rate: f32) -> Result<(), LayoutError> {
     if !a.is_finite() || a <= 0.0 {
         return Err(LayoutError::InvalidParameter {
@@ -342,6 +578,7 @@ fn validate_endpoint(endpoint: &[f32], name: &'static str) -> Result<(), LayoutE
 #[cfg(test)]
 mod tests {
     use super::{LayoutError, attractive_update, attractive_update_pair};
+    use crate::fuzzy_graph::CsrGraph;
 
     #[test]
     fn analytic_two_dimensional_update_is_symmetric() {
@@ -397,5 +634,62 @@ mod tests {
         ));
         assert_eq!(head, original_head);
         assert_eq!(tail, original_tail);
+    }
+
+    #[test]
+    fn csr_sweep_uses_each_stored_entry_in_row_order() {
+        let graph = CsrGraph {
+            n_rows: 2,
+            n_cols: 2,
+            indptr: vec![0, 1, 2],
+            indices: vec![1, 0],
+            data: vec![0.25, 0.75],
+        };
+        let mut embedding = [0.0_f32, 2.0];
+
+        super::attractive_update_csr(&mut embedding, 1, &graph, 1.0, 1.0, 0.1).unwrap();
+
+        // The second directed entry sees the result of the first one; a CSR
+        // sweep is deliberately in-place rather than a batch update.
+        assert!((embedding[0] - 0.16391098).abs() < 1.0e-6);
+        assert!((embedding[1] - 1.836089).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn csr_sweep_rejects_bad_edges_before_modifying_embedding() {
+        let graph = CsrGraph {
+            n_rows: 2,
+            n_cols: 2,
+            indptr: vec![0, 2, 2],
+            indices: vec![1, 1],
+            data: vec![1.0, 1.0],
+        };
+        let mut embedding = [0.0_f32, 2.0];
+        let original = embedding;
+
+        let error =
+            super::attractive_update_csr(&mut embedding, 1, &graph, 1.0, 1.0, 0.1).unwrap_err();
+
+        assert!(matches!(error, LayoutError::InvalidGraphOrder { .. }));
+        assert_eq!(embedding, original);
+    }
+
+    #[test]
+    fn csr_zero_membership_skips_an_edge_without_scaling_nonzero_edges() {
+        let graph = CsrGraph {
+            n_rows: 2,
+            n_cols: 2,
+            indptr: vec![0, 1, 2],
+            indices: vec![1, 0],
+            data: vec![0.0, 0.25],
+        };
+        let mut embedding = [0.0_f32, 2.0];
+
+        super::attractive_update_csr(&mut embedding, 1, &graph, 1.0, 1.0, 0.1).unwrap();
+
+        // Only the second entry is selected, and its 0.25 membership does not
+        // reduce the fixed direct-sweep learning rate.
+        assert!((embedding[0] - 0.08).abs() < 1.0e-6);
+        assert!((embedding[1] - 1.92).abs() < 1.0e-6);
     }
 }

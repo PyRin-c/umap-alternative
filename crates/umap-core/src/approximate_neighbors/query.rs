@@ -4,6 +4,7 @@ use std::num::NonZeroUsize;
 
 use super::{
     ApproximateSearchError, DenseRows, RankedNeighbors, Tree, approximate_squared_euclidean,
+    reduce_4_lanes, reduce_32_lanes,
 };
 use crate::neighbors::{DistanceMetric, Neighbor};
 use crate::rng::{Mt19937, draw_negative_seed, sample_absolute_vertex};
@@ -108,11 +109,14 @@ impl<'a> DenseApproximateQueryIndex<'a> {
     /// `2 * i + 1` and `2 * i + 2`. A leaf at capacity or the depth limit
     /// leaves its slot unused and preserves the sibling's position.
     ///
-    /// Equal distances follow the left branch. A degenerate split becomes
-    /// a leaf. Supply the words for the desired tree, since training and
-    /// prepared-query pivots can differ. The split direction sets the
-    /// prepared graph order: visit left leaves first, with original row
-    /// order within each leaf.
+    /// A degenerate split becomes a leaf. Supply the words for the desired
+    /// tree, since training and prepared-query pivots can differ. The split
+    /// direction sets the prepared graph order: visit left leaves first,
+    /// with original row order within each leaf.
+    ///
+    /// Each query batch restarts its tie stream. When it reaches a split
+    /// with a float32 projection margin of magnitude at most 1e-8, it
+    /// uses the low bit of the next draw to choose the branch.
     pub fn with_projection_words(
         mut self,
         words: &[[u64; 2]],
@@ -221,7 +225,11 @@ impl<'a> DenseApproximateQueryIndex<'a> {
                 Ok(Some(Neighbor { index, distance }))
             };
             if let Some(tree) = &self.tree {
-                let leaf = tree.leaf(self.data, DistanceMetric::Euclidean, query);
+                let leaf = if positions.is_some() {
+                    prepared_leaf(tree, self.data, query, &mut rng)
+                } else {
+                    tree.leaf(self.data, DistanceMetric::Euclidean, query)
+                };
                 for &index in leaf {
                     if let Some(point) = visit(index)? {
                         if point.distance < result_heap[0].distance {
@@ -368,6 +376,59 @@ fn pack_leaves(tree: &mut Tree, positions: &mut [usize], next: &mut usize) {
     }
 }
 
+fn prepared_leaf<'a>(
+    tree: &'a Tree,
+    data: DenseRows<'_>,
+    query: &[f32],
+    rng: &mut [i64; 3],
+) -> &'a [usize] {
+    let Tree::Split { a, b, left, right } = tree else {
+        return tree.leaf(data, DistanceMetric::Euclidean, query);
+    };
+    let margin = projection_margin(data.row(*a), data.row(*b), query);
+    let go_left = if !margin.is_finite() {
+        return tree.leaf(data, DistanceMetric::Euclidean, query);
+    } else if margin.abs() <= 1.0e-8 {
+        sample_absolute_vertex(rng, 2) == 0
+    } else {
+        margin > 0.0
+    };
+    prepared_leaf(if go_left { left } else { right }, data, query, rng)
+}
+
+fn projection_margin(left: &[f32], right: &[f32], query: &[f32]) -> f32 {
+    // Round each centered product before accumulating the intercept in f64.
+    let offset = left.iter().zip(right).fold(0.0_f64, |offset, (&a, &b)| {
+        offset - f64::from((a - b) * ((a + b) * 0.5))
+    });
+
+    let add = |index: usize, accum| (left[index] - right[index]).mul_add(query[index], accum);
+    let wide_end = query.len() / 32 * 32;
+    let mut margin = offset as f32;
+    if wide_end != 0 {
+        let mut wide = [0.0; 32];
+        wide[0] = margin;
+        for start in (0..wide_end).step_by(32) {
+            for (lane, accum) in wide.iter_mut().enumerate() {
+                *accum = add(start + lane, *accum);
+            }
+        }
+        margin = reduce_32_lanes(&wide);
+    }
+    let block_end = query.len() / 4 * 4;
+    let mut lanes = [margin, 0.0, 0.0, 0.0];
+    for start in (wide_end..block_end).step_by(4) {
+        for (lane, accum) in lanes.iter_mut().enumerate() {
+            *accum = add(start + lane, *accum);
+        }
+    }
+    margin = reduce_4_lanes(&lanes);
+    for i in block_end..query.len() {
+        margin = add(i, margin);
+    }
+    margin
+}
+
 fn build_word_tree(
     data: DenseRows<'_>,
     mut rows: Vec<usize>,
@@ -449,3 +510,7 @@ fn sift_down(heap: &mut [Neighbor], replacement: Neighbor) {
 #[cfg(test)]
 #[path = "projection_words_tests.rs"]
 mod projection_words_tests;
+
+#[cfg(test)]
+#[path = "projection_ties_tests.rs"]
+mod projection_ties_tests;

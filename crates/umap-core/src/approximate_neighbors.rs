@@ -427,9 +427,7 @@ fn approximate_squared_euclidean_portable(left: &[f32], right: &[f32]) -> f32 {
                 *lane = delta.mul_add(delta, *lane);
             }
         }
-        let pair = |i| (wide[i] + wide[i + 8]) + (wide[i + 16] + wide[i + 24]);
-        let cross = |i| pair(i) + pair(i + 4);
-        sum = (cross(0) + cross(2)) + (cross(1) + cross(3));
+        sum = reduce_32_lanes(&wide);
     }
     let (blocks_left, left) = left.as_chunks::<4>();
     let (blocks_right, right) = right.as_chunks::<4>();
@@ -440,12 +438,24 @@ fn approximate_squared_euclidean_portable(left: &[f32], right: &[f32]) -> f32 {
             *lane = delta.mul_add(delta, *lane);
         }
     }
-    sum = (lanes[0] + lanes[2]) + (lanes[1] + lanes[3]);
+    sum = reduce_4_lanes(&lanes);
     for (left, right) in left.iter().zip(right) {
         let delta = left - right;
         sum = delta.mul_add(delta, sum);
     }
     sum
+}
+
+#[inline]
+fn reduce_32_lanes(lanes: &[f32; 32]) -> f32 {
+    let pair = |i| (lanes[i] + lanes[i + 8]) + (lanes[i + 16] + lanes[i + 24]);
+    let cross = |i| pair(i) + pair(i + 4);
+    (cross(0) + cross(2)) + (cross(1) + cross(3))
+}
+
+#[inline]
+fn reduce_4_lanes(lanes: &[f32; 4]) -> f32 {
+    (lanes[0] + lanes[2]) + (lanes[1] + lanes[3])
 }
 
 #[cfg(test)]

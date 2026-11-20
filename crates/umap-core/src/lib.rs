@@ -1,5 +1,6 @@
 //! Core crate for the independent Rust implementation of UMAP.
 
+pub mod fuzzy_graph;
 pub mod neighbors;
 
 /// Version of the Rust implementation.

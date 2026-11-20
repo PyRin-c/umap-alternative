@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::hint::black_box;
+use std::time::Instant;
 
 use serde::Deserialize;
 use umap_core::approximate_neighbors::{
@@ -7,7 +9,7 @@ use umap_core::approximate_neighbors::{
 };
 use umap_core::fit::{fit_dense_graph_with_cutoff, fit_supplied_neighbors_graph};
 use umap_core::fuzzy_graph::{CsrGraph, GraphOptions};
-use umap_core::neighbors::DistanceMetric;
+use umap_core::neighbors::{DistanceMetric, exhaustive_knn_with_metric};
 use umap_core::transform::{
     CooGraph, transform_dense_graph_with_cutoff, transform_ranked_neighbors_graph,
 };
@@ -72,6 +74,22 @@ fn reverse_co_candidates_can_change_a_later_round() {
 }
 
 #[test]
+fn supplied_seed_excluded_from_output_remains_available_for_offers() {
+    let data = [0.0, 10.0, 11.0, -51.0, -29.0, 100.0, 138.0, 155.0];
+    let live = [1, 2, 1, 3, 2, 4, 3, 5, 4, 5, 5, 6, 6, 7, 7, 6];
+    let mut frozen = live;
+    frozen[..2].copy_from_slice(&[0, 1]);
+    let run = |seeds, rounds| {
+        refine_training_neighbors(&data, 8, 1, 2, DistanceMetric::Euclidean, seeds, rounds).unwrap()
+    };
+    assert_eq!(run(&live, 0), run(&frozen, 0));
+    let refined = run(&live, 1);
+    assert_eq!(&refined.indices[..6], &[0, 1, 1, 2, 2, 1]);
+    assert_eq!(&refined.distances[..6], &[0.0, 10.0, 0.0, 1.0, 0.0, 1.0]);
+    assert_eq!(&run(&frozen, 1).indices[..6], &[0, 1, 1, 3, 2, 4]);
+}
+
+#[test]
 fn keeps_small_data_routing_and_wide_rank_scales_separate() {
     assert!(!use_approximate_search(1, true));
     assert!(!use_approximate_search(4095, false));
@@ -125,6 +143,8 @@ fn keeps_small_data_routing_and_wide_rank_scales_separate() {
 #[derive(Deserialize)]
 struct Observations {
     cases: BTreeMap<String, Case>,
+    #[serde(default)]
+    scheduling: BTreeMap<String, Scheduling>,
 }
 
 #[derive(Deserialize)]
@@ -135,6 +155,7 @@ struct Case {
     n_features: usize,
     width: usize,
     fitted_k: usize,
+    seed: Option<u32>,
     n_query_rows: usize,
     iterations: usize,
     training_bits: Vec<u32>,
@@ -144,6 +165,13 @@ struct Case {
     forced: Graphs,
     automatic: Option<Graphs>,
     query_epsilon_sweep: BTreeMap<String, Snapshot>,
+}
+
+#[derive(Deserialize)]
+struct Scheduling {
+    hidden_indices: Vec<i32>,
+    hidden_first: Snapshot,
+    hidden_final: Snapshot,
 }
 
 #[derive(Deserialize)]
@@ -259,6 +287,34 @@ fn report_rank_match(label: &str, native: &RankedNeighbors, wheel: &Snapshot) {
     );
 }
 
+fn measure_perf<'a>(
+    build: impl Fn() -> DenseApproximateIndex<'a>,
+    queries: &[f32],
+    n_query_rows: usize,
+) {
+    const REPEATS: usize = 9;
+    const QUERY_BATCHES: u128 = 128;
+    let mut build_times = [0; REPEATS];
+    let mut query_times = [0; REPEATS];
+    for (build_time, query_time) in build_times.iter_mut().zip(&mut query_times) {
+        let start = Instant::now();
+        let index = black_box(build());
+        *build_time = start.elapsed().as_micros();
+        let start = Instant::now();
+        for _ in 0..QUERY_BATCHES {
+            black_box(index.query(black_box(queries), n_query_rows).unwrap());
+        }
+        *query_time = start.elapsed().as_nanos() / QUERY_BATCHES;
+    }
+    build_times.sort_unstable();
+    query_times.sort_unstable();
+    println!(
+        "  median performance: build {} us, query batch {} ns",
+        build_times[REPEATS / 2],
+        query_times[REPEATS / 2]
+    );
+}
+
 #[test]
 #[ignore = "requires the public-wheel capture from reference/probe_approximate_search.py"]
 fn compare_checked_cases_with_public_wheel() {
@@ -293,15 +349,18 @@ fn compare_checked_cases_with_public_wheel() {
                 .unwrap(),
             )
         };
-        let index = DenseApproximateIndex::build(
-            &training,
-            case.n_rows,
-            case.n_features,
-            case.width,
-            metric,
-            42,
-        )
-        .unwrap();
+        let build = || {
+            DenseApproximateIndex::build(
+                &training,
+                case.n_rows,
+                case.n_features,
+                case.width,
+                metric,
+                case.seed.unwrap_or(42),
+            )
+            .unwrap()
+        };
+        let index = build();
         let native_fit = graph_fit(index.training_ranks());
         let query_ranks = index.query(&queries, case.n_query_rows).unwrap();
         let native_query = Graph::coo(
@@ -318,6 +377,35 @@ fn compare_checked_cases_with_public_wheel() {
             .unwrap(),
         );
         println!("{name}");
+        if std::env::var_os("APPROXIMATE_SEARCH_TIMINGS").is_some() {
+            measure_perf(build, &queries, case.n_query_rows);
+        }
+        if case.n_rows >= 4095 {
+            let wheel = &case.snapshots[&case.iterations];
+            report_rank_match("native final ranks", index.training_ranks(), wheel);
+            let exact = exhaustive_knn_with_metric(
+                &training,
+                case.n_rows,
+                case.n_features,
+                case.fitted_k,
+                metric,
+            )
+            .unwrap();
+            let native = index.training_ranks().indices.chunks_exact(case.width);
+            let wheel = wheel.indices.chunks_exact(case.width);
+            let (mut native_hits, mut wheel_hits) = (0, 0);
+            for (row, (exact, (native, wheel))) in exact.iter().zip(native.zip(wheel)).enumerate() {
+                for neighbor in exact.iter().filter(|neighbor| neighbor.index != row) {
+                    let index = neighbor.index as i32;
+                    native_hits += usize::from(native.contains(&index));
+                    wheel_hits += usize::from(wheel.contains(&index));
+                }
+            }
+            println!(
+                "  training recall: native {native_hits}, wheel {wheel_hits} of {} non-self ranks",
+                case.n_rows * (case.width - 1)
+            );
+        }
         compare("  native approximate CSR", &native_fit, &case.forced.fit);
         compare(
             "  native approximate COO",
@@ -330,6 +418,7 @@ fn compare_checked_cases_with_public_wheel() {
             "0.24"
         };
         if let Some(wheel) = case.query_epsilon_sweep.get(epsilon) {
+            report_rank_match("native query ranks", &query_ranks, wheel);
             let query = Graph::coo(
                 transform_ranked_neighbors_graph(
                     &wheel.indices,
@@ -344,6 +433,31 @@ fn compare_checked_cases_with_public_wheel() {
                 .unwrap(),
             );
             compare("  wheel ranks replay COO", &query, &case.forced.query);
+        }
+        if let Some(schedule) = observations.scheduling.get(&name) {
+            for (rounds, expected) in [
+                (1, &schedule.hidden_first),
+                (case.iterations, &schedule.hidden_final),
+            ] {
+                let refined = refine_training_neighbors(
+                    &training,
+                    case.n_rows,
+                    case.n_features,
+                    case.fitted_k,
+                    metric,
+                    &schedule.hidden_indices,
+                    rounds,
+                )
+                .unwrap();
+                report_rank_match(&format!("hidden seeds round {rounds}"), &refined, expected);
+                if rounds == 1 {
+                    report_rank_match(
+                        "hidden seeds against normal first round",
+                        &refined,
+                        &case.snapshots[&1],
+                    );
+                }
+            }
         }
 
         let zero = &case.snapshots[&0];

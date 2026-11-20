@@ -1,5 +1,9 @@
 # Native dense approximate neighbors
 
+The measurements and native choices on this page describe `e29f1c6`.
+The boundary follow-up records the new construction behavior and measured
+deltas. [Dense approximate construction](approximate_construction_reference.md)
+
 `DenseApproximateIndex` returns training ranks for `fit_supplied_neighbors_graph`
 and held-out ranks for `transform_ranked_neighbors_graph`. The caller chooses
 the search route. In the public dense controls, automatic search is exhaustive

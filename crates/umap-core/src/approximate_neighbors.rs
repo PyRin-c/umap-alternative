@@ -9,10 +9,11 @@ use std::collections::BinaryHeap;
 use std::fmt;
 
 use crate::neighbors::{DistanceMetric, KnnError, Neighbor};
-use crate::rng::Mt19937;
+use crate::rng::{Mt19937, draw_negative_seed, sample_absolute_vertex};
 
 const SMALL_DATA_LIMIT: usize = 4096;
 const MAX_CANDIDATES: usize = 60;
+const MIN_LEAF_SIZE: usize = 60;
 
 /// Observed dense feature routing after any deduplication.
 ///
@@ -91,9 +92,9 @@ pub struct DenseApproximateIndex<'a> {
 impl<'a> DenseApproximateIndex<'a> {
     /// Build using a caller-selected seed for the projection pivots and random fill.
     ///
-    /// Training retains at most `min(width, n_rows - 1)` ranks, including self
-    /// as a candidate. The public training handoff uses the requested width as
-    /// its scale target. The same width is available for held-out ranks.
+    /// The output has up to `min(width, n_rows - 1)` finite ranks per row,
+    /// including self. Before that output is formed, refinement can use one
+    /// more non-self candidate. The ranked buffers use the requested width.
     pub fn build(
         data: &'a [f32],
         n_rows: usize,
@@ -110,38 +111,31 @@ impl<'a> DenseApproximateIndex<'a> {
         let k = width.min(n_rows - 1);
         let tree_count = 5 + ((n_rows as f64).sqrt() / 20.0).round() as usize;
         let rounds = (((n_rows as f64).log2()).round() as usize).max(5);
-        let leaf_size = 10.max(k);
+        let leaf_size = MIN_LEAF_SIZE.max(k);
+        let mut fill_seed = Mt19937::new(seed);
+        let mut fill_rng = draw_negative_seed(|| fill_seed.next_u32());
         let mut rng = Mt19937::new(seed);
-        let mut ranks: Vec<_> = (0..n_rows)
-            .map(|index| {
-                vec![Neighbor {
-                    index,
-                    distance: 0.0,
-                }]
-            })
-            .collect();
-        let mut trees = (0..tree_count.min(64))
-            .map(|_| Tree::build(data, metric, (0..n_rows).collect(), leaf_size, &mut rng));
+        let mut ranks = vec![Vec::new(); n_rows];
+        let projection_metric = projection_metric(metric);
+        let mut trees = (0..tree_count.min(64)).map(|_| {
+            Tree::build(
+                data,
+                projection_metric,
+                (0..n_rows).collect(),
+                leaf_size,
+                &mut rng,
+            )
+        });
         let tree = trees.next().expect("positive tree count");
         tree.seed(data, metric, &mut ranks, k)?;
         for other in trees {
             other.seed(data, metric, &mut ranks, k)?;
         }
-        for (row, retained) in ranks.iter_mut().enumerate() {
-            if retained.len() < k {
-                for candidate in sample_rows(n_rows, &mut rng) {
-                    let distance = data.distance(metric, row, candidate)?;
-                    offer(retained, candidate, distance, k);
-                    if retained.len() == k {
-                        break;
-                    }
-                }
-            }
-        }
+        fill_missing(data, metric, &mut ranks, k, &mut fill_rng)?;
         refine(data, metric, &mut ranks, k, rounds)?;
         let edges = incident(&ranks);
-        for rank in ranks {
-            fit_ranks.extend(&rank);
+        for (row, rank) in ranks.iter().enumerate() {
+            fit_ranks.extend_training(row, rank, k);
         }
         Ok(Self {
             data,
@@ -194,7 +188,10 @@ impl<'a> DenseApproximateIndex<'a> {
                     }
                     Ok(())
                 };
-            for &index in self.tree.leaf(self.data, self.metric, query) {
+            for &index in self
+                .tree
+                .leaf(self.data, projection_metric(self.metric), query)
+            {
                 visit(index, &mut best, &mut frontier)?;
             }
             // Small leaves can need additional entry points.
@@ -223,10 +220,11 @@ impl<'a> DenseApproximateIndex<'a> {
 
 /// Isolate refinement from seed generation using supplied row-major indices.
 ///
-/// Duplicate seeds coalesce. `-1` marks an empty rank. Self is considered
-/// during seeding, and distinct co-candidates around a row offer new edges to
-/// each other. A round joins fresh incident neighbors against one another and
-/// against the candidates from the previous round, including evicted neighbors.
+/// Duplicate seeds coalesce and `-1` marks an empty rank. A supplied self
+/// index occupies a seed slot. Self is added to the output after refinement,
+/// so a row supplied without self can use all seed slots to discover edges.
+/// A round joins fresh incident neighbors against one another and against the
+/// previous round's candidates, including evicted neighbors.
 pub fn refine_training_neighbors(
     data: &[f32],
     n_rows: usize,
@@ -242,7 +240,6 @@ pub fn refine_training_neighbors(
     }
     let mut ranks = vec![Vec::new(); n_rows];
     for (row, seeds) in seed_indices.chunks_exact(width).enumerate() {
-        offer(&mut ranks[row], row, 0.0, width);
         for (offset, &index) in seeds.iter().enumerate() {
             if index == -1 {
                 continue;
@@ -264,8 +261,8 @@ pub fn refine_training_neighbors(
     }
     refine(data, metric, &mut ranks, width, rounds)?;
     let mut result = RankedNeighbors::with_capacity(n_rows, width)?;
-    for row in ranks {
-        result.extend(&row);
+    for (row, rank) in ranks.iter().enumerate() {
+        result.extend_training(row, rank, width);
     }
     Ok(result)
 }
@@ -380,6 +377,22 @@ impl RankedNeighbors {
         self.distances
             .extend(std::iter::repeat_n(f32::INFINITY, self.width - row.len()));
     }
+
+    fn extend_training(&mut self, row: usize, rank: &[Neighbor], k: usize) {
+        let start = self.indices.len();
+        self.indices.push(row as i32);
+        self.distances.push(0.0);
+        for neighbor in rank
+            .iter()
+            .filter(|neighbor| neighbor.index != row)
+            .take(k - 1)
+        {
+            self.indices.push(neighbor.index as i32);
+            self.distances.push(neighbor.distance);
+        }
+        self.indices.resize(start + self.width, -1);
+        self.distances.resize(start + self.width, f32::INFINITY);
+    }
 }
 
 fn bound(best: &[Neighbor], k: usize, factor: f32) -> f32 {
@@ -402,6 +415,32 @@ fn offer(row: &mut Vec<Neighbor>, index: usize, distance: f32, k: usize) -> bool
     }
     row.insert(position, Neighbor { index, distance });
     true
+}
+
+fn fill_missing(
+    data: DenseRows<'_>,
+    metric: DistanceMetric,
+    ranks: &mut [Vec<Neighbor>],
+    k: usize,
+    rng: &mut [i64; 3],
+) -> Result<(), ApproximateSearchError> {
+    for (row, neighbors) in ranks.iter_mut().enumerate() {
+        let mut missing = k - neighbors.len();
+        // Only self-draws retry. Bound them even if the RNG has a degenerate state.
+        let attempts = missing.saturating_mul(2).saturating_add(32);
+        for _ in 0..attempts {
+            if missing == 0 {
+                break;
+            }
+            let candidate = sample_absolute_vertex(rng, data.n_rows);
+            if candidate != row {
+                let distance = data.distance(metric, row, candidate)?;
+                offer(neighbors, candidate, distance, k);
+                missing -= 1;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn incident(ranks: &[Vec<Neighbor>]) -> Vec<Vec<usize>> {
@@ -460,6 +499,15 @@ fn refine(
 
 fn draw(rng: &mut Mt19937, upper: usize) -> usize {
     ((u64::from(rng.next_u32()) * upper as u64) >> 32) as usize
+}
+
+fn projection_metric(metric: DistanceMetric) -> DistanceMetric {
+    // Both angular modes split on uncentered directions. Candidate ranking
+    // still uses the selected metric, including centering for correlation.
+    match metric {
+        DistanceMetric::Correlation => DistanceMetric::Cosine,
+        _ => metric,
+    }
 }
 
 // Partial Fisher-Yates sampling visits each index at most once.
@@ -538,7 +586,7 @@ impl Tree {
         match self {
             Self::Leaf(rows) => {
                 for (position, &left) in rows.iter().enumerate() {
-                    for &right in &rows[position..] {
+                    for &right in &rows[position + 1..] {
                         let distance = data.distance(metric, left, right)?;
                         offer(&mut ranks[left], right, distance, k);
                         offer(&mut ranks[right], left, distance, k);
@@ -563,5 +611,146 @@ impl Tree {
                 if da <= db { left } else { right }.leaf(data, metric, query)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use serde::Deserialize;
+
+    use super::*;
+
+    #[test]
+    fn random_fill_caps_self_retries() {
+        let data = DenseRows::training(&[0.0, 1.0], 2, 1).unwrap();
+        let mut rows = vec![Vec::new(); 2];
+        fill_missing(data, DistanceMetric::Euclidean, &mut rows, 1, &mut [0; 3]).unwrap();
+        assert!(rows[0].is_empty());
+        assert_eq!(
+            rows[1],
+            [Neighbor {
+                index: 0,
+                distance: 1.0
+            }]
+        );
+    }
+
+    #[derive(Deserialize)]
+    struct ConstructionProbes {
+        cases: BTreeMap<String, Inputs>,
+        scheduling: BTreeMap<String, Scheduling>,
+        partial_fill: PartialFill,
+    }
+
+    #[derive(Deserialize)]
+    struct Inputs {
+        n_rows: usize,
+        n_features: usize,
+        width: usize,
+        metric: String,
+        seed: Option<u32>,
+        training_bits: Vec<u32>,
+    }
+
+    #[derive(Deserialize)]
+    struct Scheduling {
+        random_only: [Ranks; 2],
+    }
+
+    #[derive(Deserialize)]
+    struct Ranks {
+        indices: Vec<i32>,
+        bits: Vec<u32>,
+    }
+
+    #[derive(Deserialize)]
+    struct PartialFill {
+        n_rows: usize,
+        n_features: usize,
+        width: usize,
+        seed: u32,
+        training_bits: Vec<u32>,
+        left: Vec<bool>,
+        expected: Ranks,
+    }
+
+    #[test]
+    #[ignore = "requires reference/probe_approximate_construction.py output"]
+    fn replay_initial_offers() {
+        let path = std::env::var_os("APPROXIMATE_SEARCH_OBSERVATIONS").unwrap();
+        let probes: ConstructionProbes =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert!(!probes.scheduling.is_empty());
+        for (name, run) in probes.scheduling {
+            let input = &probes.cases[&name];
+            let values: Vec<_> = input
+                .training_bits
+                .iter()
+                .copied()
+                .map(f32::from_bits)
+                .collect();
+            let data = DenseRows::training(&values, input.n_rows, input.n_features).unwrap();
+            let metric = match input.metric.as_str() {
+                "euclidean" => DistanceMetric::Euclidean,
+                "cosine" => DistanceMetric::Cosine,
+                "correlation" => DistanceMetric::Correlation,
+                metric => panic!("unknown metric: {metric}"),
+            };
+            let k = input.width;
+            let mut rng = Mt19937::new(input.seed.unwrap_or(42));
+            let mut rng = draw_negative_seed(|| rng.next_u32());
+            let mut ranks = vec![Vec::new(); input.n_rows];
+            fill_missing(data, metric, &mut ranks, k, &mut rng).unwrap();
+            for (round, expected) in run.random_only.into_iter().enumerate() {
+                let mut observed = RankedNeighbors::with_capacity(input.n_rows, k).unwrap();
+                for (row, rank) in ranks.iter().enumerate() {
+                    observed.extend_training(row, rank, k);
+                }
+                let mut columns = 0;
+                let mut pairs = 0;
+                for (j, (&actual, &want)) in
+                    observed.indices.iter().zip(&expected.indices).enumerate()
+                {
+                    columns += usize::from(actual == want);
+                    pairs += usize::from(
+                        actual == want && observed.distances[j].to_bits() == expected.bits[j],
+                    );
+                }
+                println!(
+                    "{name} no-tree round {round}: {columns} columns, {pairs} pairs of {}",
+                    observed.indices.len()
+                );
+                if round == 1 || metric != DistanceMetric::Cosine {
+                    assert_eq!(observed.indices, expected.indices, "{name} round {round}");
+                }
+                refine(data, metric, &mut ranks, k, 1).unwrap();
+            }
+        }
+
+        let run = probes.partial_fill;
+        let values: Vec<_> = run.training_bits.into_iter().map(f32::from_bits).collect();
+        let data = DenseRows::training(&values, run.n_rows, run.n_features).unwrap();
+        let (left, right): (Vec<_>, Vec<_>) = (0..run.n_rows).partition(|&row| run.left[row]);
+        let mut ranks = vec![Vec::new(); run.n_rows];
+        let metric = DistanceMetric::Euclidean;
+        for leaf in [left, right] {
+            Tree::Leaf(leaf)
+                .seed(data, metric, &mut ranks, run.width)
+                .unwrap();
+        }
+        let mut rng = Mt19937::new(run.seed);
+        let mut rng = draw_negative_seed(|| rng.next_u32());
+        fill_missing(data, metric, &mut ranks, run.width, &mut rng).unwrap();
+        let mut observed = RankedNeighbors::with_capacity(run.n_rows, run.width).unwrap();
+        for (row, rank) in ranks.iter().enumerate() {
+            observed.extend_training(row, rank, run.width);
+        }
+        assert_eq!(observed.indices, run.expected.indices, "partial tree fill");
+        println!(
+            "partial tree fill: all {} columns match",
+            observed.indices.len()
+        );
     }
 }

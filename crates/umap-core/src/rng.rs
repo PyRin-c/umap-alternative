@@ -331,6 +331,10 @@ pub(crate) fn sample_vertex(lanes: &mut [i64; 3], n_vertices: usize) -> usize {
     i64::from(next_negative_word(lanes)).rem_euclid(n_vertices as i64) as usize
 }
 
+pub(crate) fn sample_absolute_vertex(lanes: &mut [i64; 3], n_vertices: usize) -> usize {
+    next_negative_word(lanes).unsigned_abs() as usize % n_vertices
+}
+
 fn next_negative_word(lanes: &mut [i64; 3]) -> i32 {
     lanes[0] = advance_lane(lanes[0], 0xffff_fffe, 13, 12, 19);
     lanes[1] = advance_lane(lanes[1], 0xffff_fff8, 2, 4, 25);

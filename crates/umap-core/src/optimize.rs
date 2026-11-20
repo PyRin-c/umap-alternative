@@ -9,7 +9,10 @@
 use std::fmt;
 
 use crate::fuzzy_graph::CsrGraph;
-use crate::layout::{LayoutError, attractive_update, negative_example_update, validate_csr_inputs};
+use crate::layout::{
+    LayoutError, attractive_update, negative_example_update, validate_csr_inputs,
+    validate_repulsion_strength,
+};
 use crate::sampling::{EdgeSamplingCursor, SamplingError};
 
 /// Failures while running [`optimize_csr`].
@@ -88,10 +91,8 @@ impl From<SamplingError> for OptimizeError {
 /// negative samples per positive sample and is used to derive each edge's
 /// negative interval.
 ///
-/// The attractive curve and the learning-rate decay use `f64`, including
-/// when the caller supplies `f32` values. Each non-self negative sample
-/// converts the curve and the epoch's learning rate to `f32` for validation
-/// and use by the negative-example kernel.
+/// The attraction and repulsion forces and the learning-rate decay use
+/// `f64`, including when the caller supplies `f32` values.
 ///
 /// The published unit-edge checkpoints establish the timing at the boundary
 /// needed here: rate one has no negative draw at `n_epochs = 2` and its first
@@ -114,7 +115,7 @@ pub fn optimize_csr<F>(
     a: impl Into<f64>,
     b: impl Into<f64>,
     learning_rate: impl Into<f64>,
-    repulsion_strength: f32,
+    repulsion_strength: impl Into<f64>,
     negative_sample_rate: f64,
     n_epochs: usize,
     negative_sampler: F,
@@ -122,7 +123,12 @@ pub fn optimize_csr<F>(
 where
     F: FnMut(usize) -> usize,
 {
-    let (a, b, learning_rate) = (a.into(), b.into(), learning_rate.into());
+    let (a, b, learning_rate, repulsion_strength) = (
+        a.into(),
+        b.into(),
+        learning_rate.into(),
+        repulsion_strength.into(),
+    );
     validate_csr_inputs(embedding, n_components, graph, a, b, learning_rate)?;
     validate_repulsion_strength(repulsion_strength)?;
     // Constructing a harmless unit-interval cursor validates the rate even
@@ -201,10 +207,10 @@ where
                         n_components,
                         row,
                         vertex,
-                        a as f32,
-                        b as f32,
+                        a,
+                        b,
                         repulsion_strength,
-                        alpha as f32,
+                        alpha,
                     )?;
                 }
             }
@@ -224,10 +230,10 @@ fn negative_update_rows(
     n_components: usize,
     source: usize,
     vertex: usize,
-    a: f32,
-    b: f32,
-    repulsion_strength: f32,
-    learning_rate: f32,
+    a: f64,
+    b: f64,
+    repulsion_strength: f64,
+    learning_rate: f64,
 ) -> Result<(), LayoutError> {
     let source_start = source * n_components;
     let vertex_start = vertex * n_components;
@@ -242,16 +248,6 @@ fn negative_update_rows(
         let current = &mut after_source[..n_components];
         negative_example_update(current, other, a, b, repulsion_strength, learning_rate)
     }
-}
-
-fn validate_repulsion_strength(repulsion_strength: f32) -> Result<(), OptimizeError> {
-    if !repulsion_strength.is_finite() || repulsion_strength < 0.0 {
-        return Err(OptimizeError::Layout(LayoutError::InvalidParameter {
-            parameter: "repulsion_strength",
-            value: repulsion_strength,
-        }));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

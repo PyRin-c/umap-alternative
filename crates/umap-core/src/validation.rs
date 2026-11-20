@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::neighbors::{euclidean_distance_wide, manhattan_distance_pairs_wide};
+use crate::numeric::sort_indices;
 
 /// Source pair metrics used with ranked embedded neighbors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -148,7 +149,9 @@ impl Trustworthiness {
         }
         self.order.clear();
         self.order.extend(0..self.n_samples);
-        sort_source_row(source, &mut self.order);
+        sort_indices(&mut self.order, |left, right| {
+            source[left] < source[right] || (!source[left].is_nan() && source[right].is_nan())
+        });
         self.ranks.resize(self.n_samples, 0);
         for (position, &id) in self.order.iter().enumerate() {
             self.ranks[id] = position;
@@ -232,58 +235,6 @@ pub fn trustworthiness_from_dense<T>(
     scores.finish(1.0)
 }
 
-fn sort_source_row(distances: &[f64], mut order: &mut [usize]) {
-    let less = |a: usize, b: usize| {
-        distances[a] < distances[b] || (!distances[a].is_nan() && distances[b].is_nan())
-    };
-    // The reference ranks ties via insertion through size 15 and a median pivot
-    // above it. Keep equal values in the observed partition order.
-    while order.len() > 15 {
-        let last = order.len() - 1;
-        let mid = last / 2;
-        for (left, right) in [(0, mid), (mid, last), (0, mid)] {
-            if less(order[right], order[left]) {
-                order.swap(left, right);
-            }
-        }
-        order.swap(mid, last);
-        let pivot = order[last];
-        let (mut left, mut right) = (0, last);
-        while left < right {
-            while less(order[left], pivot) {
-                left += 1;
-            }
-            while left < right && less(pivot, order[right - 1]) {
-                right -= 1;
-            }
-            if left + 1 >= right {
-                break;
-            }
-            order.swap(left, right - 1);
-            left += 1;
-            right -= 1;
-        }
-        order.swap(left, last);
-        let (prefix, suffix) = order.split_at_mut(left);
-        let suffix = &mut suffix[1..];
-        // Recurse on the smaller side to bound stack depth for uneven partitions.
-        if prefix.len() < suffix.len() {
-            sort_source_row(distances, prefix);
-            order = suffix;
-        } else {
-            sort_source_row(distances, suffix);
-            order = prefix;
-        }
-    }
-    for index in 1..order.len() {
-        let mut position = index;
-        while position > 0 && less(order[position], order[position - 1]) {
-            order.swap(position, position - 1);
-            position -= 1;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,9 +242,9 @@ mod tests {
     #[test]
     fn ties_change_partition_order_at_sixteen_samples() {
         let mut order: Vec<_> = (0..16).collect();
-        sort_source_row(&[0.0; 16], &mut order[..15]);
+        sort_indices(&mut order[..15], |_, _| false);
         assert!(order.iter().copied().eq(0..16));
-        sort_source_row(&[0.0; 16], &mut order);
+        sort_indices(&mut order, |_, _| false);
         assert!(order.iter().copied().eq((0..15).rev().chain([15])));
     }
 

@@ -77,7 +77,7 @@ Euclidean、Manhattan、Chebyshev、cosine の互換レイアウトでは、CSR�
 
 特徴量の距離には `canberra` と `braycurtis` も指定できます。密・CSR の互換レイアウト学習・変換・更新と、密な逆変換を公開版と比較しています。[距離の比較記録](reference/ratio_metrics_reference.md)
 
-`hamming` は特徴量の値を比較します。`matching`、`jaccard`、`dice`、`russellrao`、`rogerstanimoto`、`sokalmichener`、`sokalsneath`、`yule`、`kulsinski` は各特徴量の値が非ゼロかどうかを比較します。これらの距離は密な特徴量のグラフ学習、互換レイアウトの学習、外部変換で使えます。CSR の学習では `yule` が `ValueError` になります。逆変換を呼ぶと `ValueError` になります。[ブール距離の比較記録](reference/boolean_metric_reference.md)
+`hamming` は特徴量の値を比較します。`matching`、`jaccard`、`dice`、`russellrao`、`rogerstanimoto`、`sokalmichener`、`sokalsneath`、`yule`、`kulsinski` は各特徴量の値が非ゼロかどうかを比較します。これらの距離は密な特徴量のグラフ学習、互換レイアウトの学習、外部変換、更新で使えます。CSR の学習では `yule` が `ValueError` になります。逆変換を呼ぶと `ValueError` になります。[ブール距離の比較記録](reference/boolean_metric_reference.md)・[更新の比較記録](reference/boolean_update_reference.md)
 
 `umap_alternative.umap_` で近傍距離の平滑化、メンバーシップ、近傍配列からのグラフ構築を利用できます。孤立した入力行は `umap_alternative.utils.disconnected_vertices` で確認できます。[グラフ補助関数の参照記録](reference/graph_primitives_reference.md)
 

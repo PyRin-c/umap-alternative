@@ -1,5 +1,57 @@
 use std::ops::{Add, AddAssign};
 
+/// Sort indices with the median-pivot order observed in the reference.
+pub(crate) fn sort_indices(mut order: &mut [usize], less: impl Fn(usize, usize) -> bool + Copy) {
+    // The reference uses insertion sort through size 15. Keep equal values
+    // in the observed partition order for larger buffers.
+    while order.len() > 15 {
+        let last = order.len() - 1;
+        let mid = last / 2;
+        for (left, right) in [(0, mid), (mid, last), (0, mid)] {
+            if less(order[right], order[left]) {
+                order.swap(left, right);
+            }
+        }
+        order.swap(mid, last);
+        let pivot = order[last];
+        let (mut left, mut right) = (0, last);
+        while left < right {
+            while less(order[left], pivot) {
+                left += 1;
+            }
+            while left < right && less(pivot, order[right - 1]) {
+                right -= 1;
+            }
+            if left + 1 >= right {
+                break;
+            }
+            order.swap(left, right - 1);
+            left += 1;
+            right -= 1;
+        }
+        order.swap(left, last);
+        let (prefix, suffix) = order.split_at_mut(left);
+        let suffix = &mut suffix[1..];
+        // Recurse on the smaller side to bound stack depth for uneven partitions.
+        if prefix.len() < suffix.len() {
+            sort_indices(prefix, less);
+            order = suffix;
+        } else {
+            sort_indices(suffix, less);
+            order = prefix;
+        }
+    }
+    for index in 1..order.len() {
+        let id = order[index];
+        let mut position = index;
+        while position > 0 && less(id, order[position - 1]) {
+            order[position] = order[position - 1];
+            position -= 1;
+        }
+        order[position] = id;
+    }
+}
+
 // Contiguous reductions combine complete groups of eight before adding any tail.
 pub(crate) fn pairwise_sum<T>(values: &[T]) -> T
 where

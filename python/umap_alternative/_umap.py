@@ -291,7 +291,12 @@ class UMAP(BaseEstimator, TransformerMixin):
     For categorical supervision with dense features, supply one real numeric
     label per row in ``y``. A label of ``-1`` indicates an unlabeled row.
     ``target_weight`` controls the reduction of edges between known classes
-    and must lie in the interval [0, 1].
+    and must lie in the interval [0, 1]. In embedding mode the adjusted graph
+    determines initialization and sampling.
+    For continuous supervision, supply a scalar or vector per row in ``y``
+    and select ``target_metric="euclidean"``, ``"manhattan"``, or
+    ``"chebyshev"``. ``target_n_neighbors=-1`` uses the effective feature
+    neighbor count for the target graph.
 
     With ``metric="precomputed"``, provide a dense square distance matrix. After
     conversion to float32, its entries must be finite and non-negative and its
@@ -321,7 +326,7 @@ class UMAP(BaseEstimator, TransformerMixin):
     training layout fixed. ``transform_seed`` (default 42) is an integer in
     ``[0, 2**32 - 1]``, independent of ``random_state``. The normalized fitted
     input returns ``embedding_`` itself. A singleton has a zero embedding and
-    no graph. Supervised embeddings and modern optimizers raise explicit errors.
+    no graph. Modern optimizers raise explicit errors.
     For a fitted dense Euclidean embedding, ``inverse_transform`` reconstructs
     the original features as a new float32 array. It warns when any query
     requires extrapolation outside the convex hull of the fitted layout.
@@ -360,6 +365,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         dens_lambda=2.0,
         dens_frac=0.3,
         dens_var_shift=0.1,
+        target_n_neighbors=-1,
     ):
         self.n_components = n_components
         self.n_neighbors = n_neighbors
@@ -390,6 +396,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         self.dens_lambda = dens_lambda
         self.dens_frac = dens_frac
         self.dens_var_shift = dens_var_shift
+        self.target_n_neighbors = target_n_neighbors
 
     def fit(self, X, y=None):
         """Fit the fuzzy graph and, in embedding mode, the training layout."""
@@ -420,8 +427,6 @@ class UMAP(BaseEstimator, TransformerMixin):
                 raise TypeError("sparse input is not supported for supervised fitting")
         if embedding_mode and angular:
             raise NotImplementedError(f"metric={metric!r} requires transform_mode='graph'")
-        if embedding_mode and y is not None:
-            raise NotImplementedError("supervised embedding fit is not implemented")
         if precomputed and y is not None:
             raise NotImplementedError(
                 "supervised fitting with metric='precomputed' is not implemented"
@@ -496,6 +501,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         transform_error = None
         transform_cutoff = cutoff if angular else None
         removed = 0
+        feature_isolated = None
         graph_from_neighbors = supplied is not None or cutoff < np.inf
         if supplied is not None:
             if y is not None:
@@ -551,7 +557,9 @@ class UMAP(BaseEstimator, TransformerMixin):
         else:
             values = X_checked.ravel(order="C").tolist()
             dense_args = (values, n_rows, n_features, n_neighbors, metric)
-            if embedding_mode and not spectral and densmap is None and checkpoint_epochs is None:
+            if y is not None:
+                components, feature_isolated = self._fit_supervised_graph(dense_args, y, graph_options)
+            elif embedding_mode and not spectral and densmap is None and checkpoint_epochs is None:
                 components, embedding_shape, coordinates = _native._fit_dense_embedding(
                     *dense_args,
                     initial_coordinates=initial_coordinates,
@@ -559,21 +567,26 @@ class UMAP(BaseEstimator, TransformerMixin):
                     **embedding_options,
                 )
                 embedding = np.asarray(coordinates, dtype=np.float32).reshape(embedding_shape)
-            elif y is None:
-                components = _native._fit_dense_graph(*dense_args, graph_options=graph_options)
             else:
-                labels = self._categorical_labels(y, n_rows)
-                components = _native._fit_dense_categorical_graph(
-                    *dense_args, labels, self.target_weight, graph_options=graph_options
-                )
+                components = _native._fit_dense_graph(*dense_args, graph_options=graph_options)
         graph = _csr_graph(components)
-        if supplied is not None and embedding_mode:
+        empty_continuous_graph = (
+            graph.nnz == 0 and y is not None and self.target_metric != "categorical"
+        )
+        if (supplied is not None and embedding_mode) or (
+            y is not None and (embedding_mode or empty_continuous_graph)
+            and not hasattr(self, "_graph_transform_fit")
+        ):
             # This stage has succeeded even if the subsequent layout fails.
             self.graph_ = graph
             self.n_neighbors_ = n_neighbors
-        isolated = np.count_nonzero(np.diff(graph.indptr) == 0) if graph_from_neighbors else 0
-        if isolated or graph.nnz == 0:
-            isolated = isolated or n_rows
+        if feature_isolated is None:
+            isolated = np.count_nonzero(np.diff(graph.indptr) == 0) if graph_from_neighbors else 0
+            isolated = isolated or (n_rows if graph.nnz == 0 else 0)
+        else:
+            # Report disconnections in the feature graph before target attenuation.
+            isolated = feature_isolated
+        if isolated:
             warning = (
                 _DISCONNECTION_WARNING if isolated * 10 > n_rows else _FEW_DISCONNECTIONS_WARNING
             )
@@ -582,7 +595,7 @@ class UMAP(BaseEstimator, TransformerMixin):
                 UserWarning,
                 stacklevel=2,
             )
-        if embedding_mode and graph.nnz == 0:
+        if graph.nnz == 0 and (embedding_mode or empty_continuous_graph):
             raise ValueError("zero-size array to reduction operation maximum which has no identity")
         if spectral:
             rng = np.random.RandomState(embedding_options.pop("seed"))
@@ -1079,14 +1092,43 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise ValueError("metric is neither callable nor a recognised string")
         return _METRIC_ALIASES[name]
 
-    def _categorical_labels(self, y, n_rows):
-        if not isinstance(self.target_metric, str) or self.target_metric != "categorical":
-            raise NotImplementedError("supervised fitting requires target_metric='categorical'")
+    def _fit_supervised_graph(self, dense_args, y, graph_options):
+        _, n_rows, _, n_neighbors, _ = dense_args
+        metric = self.target_metric
+        if not isinstance(metric, str) or (metric != "categorical" and metric not in _METRIC_ALIASES):
+            raise NotImplementedError(f"target_metric={metric!r} is not implemented")
         label_count = len(y)
         if label_count != n_rows:
             raise ValueError(
                 f"Length of x = {n_rows}, length of y = {label_count}, while it must be equal."
             )
+        if metric == "categorical":
+            return _native._fit_dense_categorical_graph(
+                *dense_args, self._categorical_labels(y), self.target_weight,
+                graph_options=graph_options,
+            )
+
+        if self.transform_mode == "embedding" and (
+            getattr(self, "densmap", False) or getattr(self, "output_dens", False)
+        ):
+            raise NotImplementedError("density fitting with continuous targets is not implemented")
+        labels = check_array(y, dtype=np.float32, ensure_2d=False)
+        if labels.ndim == 1:
+            labels = labels[:, None]
+        target_neighbors = getattr(self, "target_n_neighbors", -1)
+        if not isinstance(target_neighbors, numbers.Integral) or (
+            target_neighbors != -1 and target_neighbors < 2
+        ):
+            raise ValueError("target_n_neighbors must be -1 or an integer greater than 1")
+        if target_neighbors == -1:
+            target_neighbors = n_neighbors
+        target = (
+            labels.ravel().tolist(), labels.shape[1], target_neighbors,
+            _METRIC_ALIASES[metric], self.target_weight,
+        )
+        return _native._fit_dense_continuous_graph(*dense_args, target, graph_options=graph_options)
+
+    def _categorical_labels(self, y):
         labels = check_array(y, dtype="numeric", ensure_2d=False)
         if labels.ndim == 2 and labels.shape[1] == 1:
             labels = labels[:, 0]

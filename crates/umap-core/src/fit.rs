@@ -2,7 +2,7 @@
 //!
 //! This module is intentionally limited to the graph stage: exhaustive or
 //! distance-matrix neighbor search, supplied neighbor arrays, fuzzy
-//! simplicial-set construction, and optional categorical supervision.
+//! simplicial-set construction, and optional supervision.
 //! It does not expose an estimator, layout, optimization, or any other
 //! sklearn behavior.
 //!
@@ -14,8 +14,8 @@ use std::fmt;
 
 use crate::fuzzy_graph::supplied_neighbors::build_ranked_graph;
 use crate::fuzzy_graph::{
-    CsrGraph, GraphError, GraphOptions, categorical_intersection, fuzzy_simplicial_set,
-    fuzzy_simplicial_set_with_options,
+    CsrGraph, GraphError, GraphOptions, categorical_intersection, continuous_intersection,
+    fuzzy_simplicial_set, fuzzy_simplicial_set_with_options,
 };
 use crate::neighbors::{
     DistanceMetric, KnnError, Neighbor, PrecomputedKnnError, dense_knn_counting_cutoff,
@@ -273,6 +273,31 @@ pub fn fit_dense_categorical_graph_with_options(
     target_weight: f64,
     options: Option<GraphOptions>,
 ) -> Result<CsrGraph, DenseCategoricalGraphFitError> {
+    fit_dense_categorical_graph_with_diagnostics(
+        data,
+        n_rows,
+        n_features,
+        k,
+        metric,
+        labels,
+        target_weight,
+        options,
+    )
+    .map(|(graph, _)| graph)
+}
+
+/// Fit a dense categorical graph and count isolated vertices before supervision.
+#[allow(clippy::too_many_arguments)]
+pub fn fit_dense_categorical_graph_with_diagnostics(
+    data: &[f32],
+    n_rows: usize,
+    n_features: usize,
+    k: usize,
+    metric: DistanceMetric,
+    labels: &[i64],
+    target_weight: f64,
+    options: Option<GraphOptions>,
+) -> Result<(CsrGraph, usize), DenseCategoricalGraphFitError> {
     if labels.len() != n_rows {
         return Err(DenseCategoricalGraphFitError::LabelCount {
             n_rows,
@@ -285,7 +310,135 @@ pub fn fit_dense_categorical_graph_with_options(
 
     let graph = fit_dense_graph_with_options(data, n_rows, n_features, k, metric, options)
         .map_err(DenseCategoricalGraphFitError::DenseGraph)?;
-    Ok(categorical_intersection(graph, labels, target_weight))
+    let isolated = count_isolated_rows(&graph);
+    Ok((
+        categorical_intersection(graph, labels, target_weight),
+        isolated,
+    ))
+}
+
+fn count_isolated_rows(graph: &CsrGraph) -> usize {
+    graph
+        .indptr
+        .windows(2)
+        .filter(|row| {
+            graph.data[row[0]..row[1]]
+                .iter()
+                .all(|&weight| weight == 0.0)
+        })
+        .count()
+}
+
+/// Dense scalar or vector targets and their graph settings.
+pub struct DenseContinuousTarget<'a> {
+    /// Row-major target values, one row for each row in the feature matrix.
+    pub values: &'a [f32],
+    /// Number of target values per row.
+    pub n_features: usize,
+    /// Number of neighbors to retain from each target row.
+    pub n_neighbors: usize,
+    /// Metric for target-space neighbors.
+    pub metric: DistanceMetric,
+    /// Relative weight of the directed target graph, in `0..=1`.
+    pub weight: f64,
+}
+
+/// Errors returned while building the feature and continuous target graphs.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DenseContinuousGraphFitError {
+    /// The target weight must be finite and in `0..=1`.
+    InvalidTargetWeight { target_weight: f64 },
+    /// The target metric must be Euclidean, Manhattan, or Chebyshev.
+    UnsupportedTargetMetric { metric: DistanceMetric },
+    /// The feature graph could not be built.
+    FeatureGraph(DenseGraphFitError),
+    /// Target neighbor search or graph construction failed.
+    TargetGraph(DenseGraphFitError),
+}
+
+impl fmt::Display for DenseContinuousGraphFitError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidTargetWeight { target_weight } => {
+                write!(formatter, "target weight {target_weight} must be in 0..=1")
+            }
+            Self::UnsupportedTargetMetric { metric } => {
+                write!(formatter, "unsupported continuous target metric {metric:?}")
+            }
+            Self::FeatureGraph(error) => write!(formatter, "feature graph: {error}"),
+            Self::TargetGraph(error) => write!(formatter, "target graph: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for DenseContinuousGraphFitError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidTargetWeight { .. } | Self::UnsupportedTargetMetric { .. } => None,
+            Self::FeatureGraph(error) | Self::TargetGraph(error) => Some(error),
+        }
+    }
+}
+
+/// Fit dense features with a second fuzzy graph built from continuous targets.
+///
+/// Feature options apply only to the feature graph. The target graph uses
+/// directed memberships with local connectivity one. The two graphs contribute
+/// on the union of directed supports, including at the weight endpoints.
+/// Returns the blended CSR and the number of isolated rows in the feature graph.
+pub fn fit_dense_continuous_graph(
+    data: &[f32],
+    n_rows: usize,
+    n_features: usize,
+    k: usize,
+    metric: DistanceMetric,
+    options: Option<GraphOptions>,
+    target: &DenseContinuousTarget<'_>,
+) -> Result<(CsrGraph, usize), DenseContinuousGraphFitError> {
+    if !matches!(
+        target.metric,
+        DistanceMetric::Euclidean | DistanceMetric::Manhattan | DistanceMetric::Chebyshev
+    ) {
+        return Err(DenseContinuousGraphFitError::UnsupportedTargetMetric {
+            metric: target.metric,
+        });
+    }
+    if !(0.0..=1.0).contains(&target.weight) {
+        return Err(DenseContinuousGraphFitError::InvalidTargetWeight {
+            target_weight: target.weight,
+        });
+    }
+    let graph = fit_dense_graph_with_options(data, n_rows, n_features, k, metric, options)
+        .map_err(DenseContinuousGraphFitError::FeatureGraph)?;
+    let isolated = count_isolated_rows(&graph);
+    let neighbors = exhaustive_knn_with_metric(
+        target.values,
+        n_rows,
+        target.n_features,
+        target.n_neighbors,
+        target.metric,
+    )
+    .map_err(|error| DenseContinuousGraphFitError::TargetGraph(error.into()))?;
+    for (row, candidates) in neighbors.iter().enumerate() {
+        for (position, neighbor) in candidates.iter().enumerate() {
+            if !neighbor.distance.is_finite() || neighbor.distance < 0.0 {
+                let error = GraphError::InvalidDistance {
+                    row,
+                    position,
+                    index: neighbor.index,
+                    distance: neighbor.distance,
+                };
+                return Err(DenseContinuousGraphFitError::TargetGraph(error.into()));
+            }
+        }
+    }
+    if isolated == n_rows {
+        return Ok((graph, isolated));
+    }
+    Ok((
+        continuous_intersection(&graph, &neighbors, target.weight),
+        isolated,
+    ))
 }
 
 /// Fit a fuzzy graph from a precomputed row-major square distance matrix.

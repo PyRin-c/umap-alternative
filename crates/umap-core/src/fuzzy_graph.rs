@@ -1,8 +1,8 @@
 //! First-pass fuzzy graph construction for dense UMAP neighbors.
 //!
 //! The implementation here follows the fuzzy-simplicial-set construction from
-//! the UMAP paper. The result is a deterministic CSR graph. The categorical
-//! path also adjusts and renormalizes memberships before returning the graph.
+//! the UMAP paper. The result is a deterministic CSR graph. Supervised paths
+//! also adjust and renormalize memberships before returning the graph.
 
 use std::fmt;
 
@@ -485,6 +485,88 @@ pub(crate) fn categorical_intersection(
         result.indptr.push(result.indices.len());
     }
     result
+}
+
+// Continuous targets contribute directed memberships. Merge their supports before
+// scaling each row and taking a fuzzy union with the transpose.
+pub(crate) fn continuous_intersection(
+    features: &CsrGraph,
+    neighbors: &[Vec<Neighbor>],
+    target_weight: f64,
+) -> CsrGraph {
+    let distances = sorted_neighbor_distances(neighbors);
+    let batch_floor = batch_scale_floor(&distances);
+    let feature_floor = features
+        .data
+        .iter()
+        .copied()
+        .filter(|&weight| weight > 0.0)
+        .reduce(f32::min)
+        .map_or(1.0e-8, |minimum| (f64::from(minimum) / 2.0).max(1.0e-8));
+    let target_floor = 1.0e-4_f64;
+    let k = neighbors[0].len();
+    let exponent = if target_weight < 0.5 {
+        target_weight / (1.0 - target_weight)
+    } else {
+        (1.0 - target_weight) / target_weight
+    };
+
+    let mut directed = Vec::with_capacity(features.n_rows);
+    for (row, neighbors) in neighbors.iter().enumerate() {
+        let (rho, sigma) = row_parameters(&distances[row * k..(row + 1) * k], 1.0, batch_floor);
+        let mut target = neighbors
+            .iter()
+            .filter(|neighbor| neighbor.index != row)
+            .map(|neighbor| (neighbor.index, membership(neighbor.distance, rho, sigma)))
+            .filter(|&(_, weight)| weight > 0.0)
+            .collect::<Vec<_>>();
+        let entries = features.indptr[row]..features.indptr[row + 1];
+        let columns = &features.indices[entries.clone()];
+        let feature_weights = &features.data[entries];
+        let mut support = columns.to_vec();
+        support.extend(target.iter().map(|&(column, _)| column));
+        support.sort_unstable();
+        support.dedup();
+
+        target.sort_unstable_by_key(|&(column, _)| column);
+        let mut memberships = Vec::with_capacity(support.len());
+        for column in support {
+            let left = columns
+                .binary_search(&column)
+                .map_or(0.0, |i| feature_weights[i]);
+            let right = find_membership(&target, column);
+            if left == 0.0 && right == 0.0 {
+                continue;
+            }
+            let left = if left == 0.0 {
+                feature_floor
+            } else {
+                f64::from(left)
+            };
+            let right = if right == 0.0 {
+                target_floor
+            } else {
+                f64::from(right)
+            };
+            let weight = if target_weight < 0.5 {
+                left * right.powf(exponent)
+            } else {
+                left.powf(exponent) * right
+            };
+            memberships.push((column, weight as f32));
+        }
+        let maximum = memberships
+            .iter()
+            .map(|&(_, weight)| weight)
+            .fold(0.0_f32, f32::max);
+        if maximum > 0.0 {
+            for (_, weight) in &mut memberships {
+                *weight /= maximum;
+            }
+        }
+        directed.push(memberships);
+    }
+    symmetrize(&directed, false, fuzzy_union)
 }
 
 fn fuzzy_union(forward: f32, reverse: f32) -> f32 {

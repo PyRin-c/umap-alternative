@@ -13,9 +13,9 @@ use umap_core::embedding::{
     fit_dense_embedding_seeded_with_graph_options, fit_graph_embedding_with_rng,
 };
 use umap_core::fit::{
-    fit_dense_categorical_graph_with_options, fit_dense_graph_with_cutoff,
-    fit_dense_graph_with_options, fit_precomputed_graph_with_cutoff,
-    fit_precomputed_graph_with_options, fit_supplied_neighbors_graph,
+    DenseContinuousTarget, fit_dense_categorical_graph_with_diagnostics,
+    fit_dense_continuous_graph, fit_dense_graph_with_cutoff, fit_dense_graph_with_options,
+    fit_precomputed_graph_with_cutoff, fit_precomputed_graph_with_options, fit_supplied_neighbors_graph,
 };
 use umap_core::fuzzy_graph::{CsrGraph, GraphOptions};
 use umap_core::inverse::{
@@ -463,6 +463,7 @@ fn _fit_graph_embedding_with_rng(
 #[pyo3(signature = (data, n_rows, n_features, k, metric, labels, target_weight, *, graph_options=None))]
 #[allow(clippy::too_many_arguments)]
 fn _fit_dense_categorical_graph(
+    py: Python<'_>,
     data: Vec<f32>,
     n_rows: usize,
     n_features: usize,
@@ -471,20 +472,54 @@ fn _fit_dense_categorical_graph(
     labels: Vec<i64>,
     target_weight: f64,
     graph_options: Option<(f64, f64)>,
-) -> PyResult<CsrComponents> {
+) -> PyResult<(CsrComponents, usize)> {
     let metric = parse_metric(metric)?;
-    fit_dense_categorical_graph_with_options(
-        &data,
-        n_rows,
-        n_features,
-        k,
-        metric,
-        &labels,
-        target_weight,
-        parse_graph_options(graph_options)?,
-    )
-    .map(csr_components)
+    let options = parse_graph_options(graph_options)?;
+    py.detach(|| {
+        fit_dense_categorical_graph_with_diagnostics(
+            &data,
+            n_rows,
+            n_features,
+            k,
+            metric,
+            &labels,
+            target_weight,
+            options,
+        )
+    })
+    .map(|(graph, isolated)| (csr_components(graph), isolated))
     .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+type ContinuousTargetInput = (Vec<f32>, usize, usize, String, f64);
+
+/// Fit a fuzzy graph from dense features and scalar or vector targets.
+#[pyfunction]
+#[pyo3(signature = (data, n_rows, n_features, k, metric, target, *, graph_options=None))]
+#[allow(clippy::too_many_arguments)]
+fn _fit_dense_continuous_graph(
+    py: Python<'_>,
+    data: Vec<f32>,
+    n_rows: usize,
+    n_features: usize,
+    k: usize,
+    metric: &str,
+    target: ContinuousTargetInput,
+    graph_options: Option<(f64, f64)>,
+) -> PyResult<(CsrComponents, usize)> {
+    let metric = parse_metric(metric)?;
+    let options = parse_graph_options(graph_options)?;
+    let (values, target_width, target_k, target_metric, target_weight) = target;
+    let target = DenseContinuousTarget {
+        values: &values,
+        n_features: target_width,
+        n_neighbors: target_k,
+        metric: parse_metric(&target_metric)?,
+        weight: target_weight,
+    };
+    py.detach(|| fit_dense_continuous_graph(&data, n_rows, n_features, k, metric, options, &target))
+        .map(|(graph, isolated)| (csr_components(graph), isolated))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
 /// Fit a fuzzy graph from a flat row-major square f32 distance matrix.
@@ -783,6 +818,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_density_radius_log_inputs, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_graph_embedding_with_rng, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_categorical_graph, module)?)?;
+    module.add_function(wrap_pyfunction!(_fit_dense_continuous_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_precomputed_graph, module)?)?;
     module.add_function(wrap_pyfunction!(
         _fit_precomputed_graph_with_cutoff,

@@ -283,11 +283,9 @@ def test_unsupported_embedding_features_fail_explicitly(overrides, exception, ma
         embedding_model(**overrides).fit(WEIGHTED)
 
 
-def test_embedding_rejects_sparse_features_and_supervision():
+def test_embedding_rejects_sparse_features():
     with pytest.raises(TypeError, match="sparse input"):
         embedding_model().fit(csr_matrix(WEIGHTED))
-    with pytest.raises(NotImplementedError, match="supervised embedding"):
-        embedding_model().fit(WEIGHTED, y=np.zeros(len(WEIGHTED)))
 
 
 def test_public_embedding_parameters_are_cloneable():

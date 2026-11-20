@@ -30,7 +30,7 @@ def graph_model(**kwargs):
     return UMAP(**(parameters | kwargs))
 
 
-def assert_csr_matches(graph, expected):
+def assert_csr_matches(graph, expected, *, atol=0.0):
     assert isinstance(graph, csr_matrix)
     assert graph.format == expected["format"]
     assert graph.shape == tuple(expected["shape"])
@@ -40,7 +40,11 @@ def assert_csr_matches(graph, expected):
     assert graph.indices.dtype.name == expected["indices_dtype"]
     np.testing.assert_array_equal(graph.indptr, expected["indptr"])
     np.testing.assert_array_equal(graph.indices, expected["indices"])
-    np.testing.assert_array_equal(graph.data.view(np.uint32), expected["data_bits_uint32"])
+    if atol:
+        weights = np.asarray(expected["data_bits_uint32"], dtype=np.uint32).view(np.float32)
+        np.testing.assert_allclose(graph.data, weights, rtol=0.0, atol=atol)
+    else:
+        np.testing.assert_array_equal(graph.data.view(np.uint32), expected["data_bits_uint32"])
 
 
 @pytest.mark.parametrize("case_name", CASES)
@@ -136,8 +140,8 @@ def test_categorical_singleton_clears_a_previous_graph():
 
 
 def test_supervised_fit_rejects_other_target_metrics_and_unsupported_feature_inputs():
-    with pytest.raises(NotImplementedError, match="target_metric='categorical'"):
-        graph_model(target_metric="euclidean").fit(X, y=PARTIAL_LABELS)
+    with pytest.raises(NotImplementedError, match="target_metric='ordinal'"):
+        graph_model(target_metric="ordinal").fit(X, y=PARTIAL_LABELS)
     with pytest.raises(TypeError, match="sparse input is not supported"):
         graph_model().fit(csr_matrix(X), y=PARTIAL_LABELS)
     with pytest.raises(NotImplementedError, match="metric='precomputed'"):

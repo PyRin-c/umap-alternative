@@ -4,8 +4,9 @@
 //! dense input -> metric nearest neighbors -> fuzzy graph -> CSR comparison.
 
 use serde::Deserialize;
-use umap_core::fuzzy_graph::{CsrGraph, fuzzy_simplicial_set};
-use umap_core::neighbors::{DistanceMetric, exhaustive_knn_with_metric};
+use umap_core::fit::fit_dense_graph;
+use umap_core::fuzzy_graph::CsrGraph;
+use umap_core::neighbors::DistanceMetric;
 
 const METRIC_GRAPH_WINDOWS: &str =
     include_str!("../../../reference/fixtures/umap-learn-0.6.0-metric-graph-windows-x86_64.json");
@@ -79,15 +80,14 @@ fn graph_for_case(fixture: &Fixture, case: &Case) -> CsrGraph {
         .flatten()
         .copied()
         .collect::<Vec<_>>();
-    let neighbors = exhaustive_knn_with_metric(
+    fit_dense_graph(
         &data,
         n_rows,
         n_features,
         case.parameters.n_neighbors,
         metric(&case.metric),
     )
-    .expect("fixture input must produce valid metric neighbors");
-    fuzzy_simplicial_set(&neighbors).expect("fixture neighbors must produce a valid graph")
+    .expect("fixture input must produce a valid fitted metric graph")
 }
 
 fn assert_graph_exact(actual: &CsrGraph, expected: &ExpectedGraph, case: &str) {

@@ -13,6 +13,9 @@ FIXTURE = Path(__file__).resolve().parents[1] / "reference" / "fixtures" / (
     "umap-learn-0.6.0-sparse-euclidean-transform-x86_64.json"
 )
 REFERENCE = json.loads(FIXTURE.read_bytes())
+LP_REFERENCE = json.loads(FIXTURE.with_name(
+    "umap-learn-0.6.0-sparse-lp-transform-x86_64.json"
+).read_bytes())
 
 
 def decode(record):
@@ -50,11 +53,10 @@ def warning_records(caught):
     return [[item.category.__name__, str(item.message)] for item in caught]
 
 
-@pytest.mark.parametrize("name", REFERENCE["cases"])
-def test_sparse_euclidean_transform_matches_public_060(name):
-    case = REFERENCE["cases"][name]
-    training = decode(REFERENCE["training"][case["training"]])
-    model = UMAP(**(REFERENCE["options"] | case["options"]), transform_mode=case["fit_mode"])
+def check_transform_case(reference, name):
+    case = reference["cases"][name]
+    training = decode(reference["training"][case["training"]])
+    model = UMAP(**(reference["options"] | case["options"]), transform_mode=case["fit_mode"])
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         model.fit(training)
@@ -62,10 +64,12 @@ def test_sparse_euclidean_transform_matches_public_060(name):
     model.set_params(transform_mode=case["mode"])
     fitted = model.graph_ if case["mode"] == "graph" else model.embedding_
     assert_record(fitted, case["fitted"])
+    if "fitted_graph" in case:
+        assert_record(model.graph_, case["fitted_graph"])
     for expected in case["transforms"].values():
         original = {key: getattr(model, key) for key in expected["parameters"]}
         model.set_params(**expected["parameters"])
-        query = REFERENCE["queries"][expected["query"]]
+        query = reference["queries"][expected["query"]]
         X = decode(query)
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
@@ -83,6 +87,18 @@ def test_sparse_euclidean_transform_matches_public_060(name):
         assert_record(X, query)
         model.set_params(**original)
     assert_record(fitted, case["fitted"])
+    if "fitted_graph" in case:
+        assert_record(model.graph_, case["fitted_graph"])
+
+
+@pytest.mark.parametrize("name", REFERENCE["cases"])
+def test_sparse_euclidean_transform_matches_public_060(name):
+    check_transform_case(REFERENCE, name)
+
+
+@pytest.mark.parametrize("name", LP_REFERENCE["cases"])
+def test_sparse_manhattan_and_chebyshev_match_public_060(name):
+    check_transform_case(LP_REFERENCE, name)
 
 
 @pytest.mark.parametrize("mode", ["graph", "embedding"])
@@ -90,14 +106,15 @@ def test_identical_sparse_features_bypass_neighbor_search(monkeypatch, mode):
     def fail(*args, **kwargs):
         pytest.fail("fitted input must bypass the query search")
 
-    monkeypatch.setattr(_native, "_rank_sparse_euclidean_queries", fail)
+    monkeypatch.setattr(_native, "_rank_sparse_feature_queries", fail)
     X = decode(REFERENCE["training"]["csr"])
     model = UMAP(**REFERENCE["options"], transform_mode=mode).fit(X)
     fitted = model.graph_ if mode == "graph" else model.embedding_
     assert model.transform(X.tocoo()) is fitted
 
 
-def test_wide_sparse_transform_uses_sparse_feature_buffers(monkeypatch):
+@pytest.mark.parametrize("metric", ["euclidean", "manhattan", "chebyshev"])
+def test_wide_sparse_transform_uses_sparse_feature_buffers(monkeypatch, metric):
     def fail(*args, **kwargs):
         pytest.fail("CSR feature buffers must stay sparse")
 
@@ -105,7 +122,7 @@ def test_wide_sparse_transform_uses_sparse_feature_buffers(monkeypatch):
     monkeypatch.setattr(csr_matrix, "todense", fail)
     training = decode(REFERENCE["training"]["wide_features"])
     queries = decode(REFERENCE["queries"]["wide_features"])
-    model = UMAP(**REFERENCE["options"]).fit(training)
+    model = UMAP(**(REFERENCE["options"] | {"metric": metric})).fit(training)
     assert model.transform(queries).shape == (3, 2)
 
 

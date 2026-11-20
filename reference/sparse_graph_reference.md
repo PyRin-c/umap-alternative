@@ -175,10 +175,8 @@ return the fitted coordinates, including 22 that return the same object.
 The other 24 take the public held-out path.
 
 Both implementations raise `ValueError` for inverse transform with sparse
-features. Sparse density embeddings and
-non-Euclidean sparse embeddings remain outside this path. The public base
-input fits densMAP and produces embeddings with Manhattan, Chebyshev, and
-cosine metrics. Public CSR-array training raised `TypingError` in the
+features. Sparse density embeddings remain outside this path. The public base
+input fits densMAP and produces a cosine embedding. Public CSR-array training raised `TypingError` in the
 probe. This estimator continues to normalize SciPy sparse arrays using
 the same CSR matrix path. Approximate neighbor search, large tie sets,
 modern layouts, and supervised sparse embeddings were outside the
@@ -240,6 +238,58 @@ The graph-only tie case also checks 12 held-out COO entries. [Generator](generat
 ```sh
 uv run --project reference --locked python -I reference/generate_sparse_euclidean_transform_fixture.py \
   --output reference/fixtures/umap-learn-0.6.0-sparse-euclidean-transform-x86_64.json --check
+```
+
+## Sparse Manhattan and Chebyshev
+
+The compatibility layout and held-out transform accept sparse Manhattan and
+Chebyshev features. They share the CSR merge, ranked graph construction,
+fitted-input shortcut, and seeded layout with the sparse Euclidean path.
+The fixture compares fitted CSR graphs, graph-mode COO order and weights,
+and embedding coordinates from fresh random and spectral fits. It exercises
+dense and CSR, CSC, and COO queries, split and cancelling duplicates, empty
+and zero rows, ties, and finite disconnection cutoffs.
+
+The precision probes start with sparse float32 buffers. Let `e = 2**-25`.
+
+- Manhattan rounds each coordinate subtraction to float32 and sums the
+  absolute differences in float64. For the `terms` probe against a query
+  of `[-e, 0, 0, 0]`, the first difference rounds to `1` and the remaining
+  terms give `1 + 2*e`. The sparse fit keeps the edge at cutoff
+  `1 + 2.5*e`. Widening the subtraction would give `1 + 3*e`.
+- Manhattan fit selection and its inclusive cutoff use the wide sum. The
+  `summed_fit` probe cuts an edge of distance `1 + 3*e` at equality and
+  keeps it at `1 + 3.5*e`. The same sum rounds to `1 + 4*e` in transform,
+  so the query edge at that cutoff is masked. The `collision` probe checks
+  that matching-width ranks are selected before that rounding. The held-out
+  order starts with columns 1 and 0 even though their membership distances
+  both round to 1. The narrower query ranks in float32 and returns 0 and 1.
+- Chebyshev takes the maximum absolute coordinate difference. In `maxed`,
+  the first feature dominates. A difference of `1 + 3*e` rounds to
+  `1 + 4*e` and is cut there. The half-ULP difference `1 + 2*e` rounds to
+  1 and keeps its COO entry. The fit cutoff also uses the rounded maximum.
+
+Public Manhattan fitting coalesced the float32 CSR with stored duplicates
+in place. The mutated object returned the fitted embedding on transform.
+Ordinary copies of the original or coalesced buffers took the held-out path.
+This implementation preserves the caller's buffers and takes the held-out
+path for those duplicate fits. Chebyshev preserves validated stored
+duplicates for the fitted-input check. Both metrics use canonical CSR
+distance processing for held-out queries.
+Sparse cosine keeps graph-only support and its separate rule for repeated
+compressed entries. Wider queries and approximate sparse search have the
+same scope limits as the sparse Euclidean transform.
+
+The pinned public fixture regenerates byte for byte on Windows and Ubuntu
+WSL x86-64. It checks 37
+fits with 1,132 CSR weights and 420 fitted coordinates, plus 78 transform
+calls with 478 ordered COO entries, 382 returned coordinates, and five
+fitted-input returns.
+[Generator](generate_sparse_lp_transform_fixture.py) · [Fixture](fixtures/umap-learn-0.6.0-sparse-lp-transform-x86_64.json)
+
+```sh
+uv run --project reference --locked python -I reference/generate_sparse_lp_transform_fixture.py \
+  --output reference/fixtures/umap-learn-0.6.0-sparse-lp-transform-x86_64.json --check
 ```
 
 ## Reproducibility

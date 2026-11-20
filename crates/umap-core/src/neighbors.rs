@@ -497,13 +497,17 @@ pub(crate) fn euclidean_distance_pairs(values: impl Iterator<Item = (f32, f32)>)
 
 fn manhattan_distance(left: &[f32], right: &[f32]) -> f32 {
     debug_assert_eq!(left.len(), right.len());
-    let absolute_sum = left
-        .iter()
-        .zip(right)
-        .fold(0.0_f64, |sum, (&left_value, &right_value)| {
-            sum + f64::from((left_value - right_value).abs())
-        });
-    absolute_sum as f32
+    manhattan_distance_pairs(left.iter().copied().zip(right.iter().copied()))
+}
+
+pub(crate) fn manhattan_distance_pairs(values: impl Iterator<Item = (f32, f32)>) -> f32 {
+    manhattan_distance_pairs_wide(values) as f32
+}
+
+pub(crate) fn manhattan_distance_pairs_wide(values: impl Iterator<Item = (f32, f32)>) -> f64 {
+    values.fold(0.0_f64, |sum, (left_value, right_value)| {
+        sum + f64::from((left_value - right_value).abs())
+    })
 }
 
 fn chebyshev_distance(left: &[f32], right: &[f32]) -> f32 {

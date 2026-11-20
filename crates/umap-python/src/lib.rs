@@ -33,8 +33,9 @@ use umap_core::parametric::prepare_parametric_edges;
 use umap_core::rng::Mt19937;
 use umap_core::sampling::{ModernSampledLayout, ModernSamplingConfig};
 use umap_core::sparse::{
-    CsrFeatures, fit_sparse_euclidean_graph_with_cutoff, fit_sparse_graph_with_options,
-    rank_sparse_euclidean_queries,
+    CsrFeatures, SparseTieDistances, fit_sparse_euclidean_graph_with_cutoff,
+    fit_sparse_feature_graph_with_cutoff, fit_sparse_graph_with_options,
+    rank_sparse_feature_queries,
 };
 use umap_core::transform::{
     CooGraph, DenseEmbeddingTransformConfig, transform_dense_embedding_with_options,
@@ -273,24 +274,43 @@ fn _fit_sparse_graph(
 }
 
 #[pyfunction]
-#[pyo3(signature = (indptr, indices, data, shape, k, cutoff, *, graph_options=None))]
-#[allow(clippy::too_many_arguments)]
-fn _fit_sparse_euclidean_graph_with_cutoff(
+#[pyo3(signature = (training, k, metric, cutoff, rank_ties, *, graph_options=None))]
+fn _fit_sparse_feature_graph_with_cutoff(
     py: Python<'_>,
-    indptr: Vec<usize>,
-    indices: Vec<usize>,
-    data: Vec<f32>,
-    shape: (usize, usize),
+    training: CsrComponents,
     k: usize,
-    cutoff: f32,
+    metric: &str,
+    cutoff: f64,
+    rank_ties: Py<PyAny>,
     graph_options: Option<(f64, f64)>,
 ) -> PyResult<(CsrComponents, usize)> {
+    let metric = parse_metric(metric)?;
     let options = parse_graph_options(graph_options)?.unwrap_or_default();
     py.detach(|| {
-        fit_sparse_euclidean_graph_with_cutoff(&indptr, &indices, &data, shape, k, cutoff, options)
+        let input = csr_features(&training);
+        let mut callback_error = None;
+        let result = if metric == DistanceMetric::Euclidean {
+            fit_sparse_euclidean_graph_with_cutoff(
+                input.indptr,
+                input.indices,
+                input.data,
+                input.shape,
+                k,
+                cutoff as f32,
+                options,
+            )
+        } else {
+            fit_sparse_feature_graph_with_cutoff(input, k, metric, cutoff, options, |row, width| {
+                python_sparse_rank_ties(&rank_ties, row, width, &mut callback_error)
+            })
+        };
+        if let Some(error) = callback_error {
+            return Err(error);
+        }
+        result
+            .map(|(graph, removed)| (csr_components(graph), removed))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
     })
-    .map(|(graph, removed)| (csr_components(graph), removed))
-    .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
 /// Fit the serial seeded dense layout and return its CSR graph and coordinates.
@@ -893,12 +913,15 @@ fn feature_query_graph(
     })
 }
 
-fn python_rank_ties(
+fn python_rank_ties<T>(
     rank_ties: &Py<PyAny>,
-    distances: &[f32],
+    distances: &[T],
     k: usize,
     callback_error: &mut Option<PyErr>,
-) -> Vec<usize> {
+) -> Vec<usize>
+where
+    T: Copy + for<'py> IntoPyObject<'py>,
+{
     let ranked = Python::attach(|py| {
         rank_ties
             .call1(py, (distances.to_vec(), k))?
@@ -909,6 +932,22 @@ fn python_rank_ties(
         Err(error) => {
             *callback_error = Some(error);
             Vec::new()
+        }
+    }
+}
+
+fn python_sparse_rank_ties(
+    rank_ties: &Py<PyAny>,
+    distances: SparseTieDistances<'_>,
+    k: usize,
+    callback_error: &mut Option<PyErr>,
+) -> Vec<usize> {
+    match distances {
+        SparseTieDistances::Float32(values) => {
+            python_rank_ties(rank_ties, values, k, callback_error)
+        }
+        SparseTieDistances::Float64(values) => {
+            python_rank_ties(rank_ties, values, k, callback_error)
         }
     }
 }
@@ -924,20 +963,25 @@ fn csr_features((shape, indptr, indices, data): &CsrComponents) -> CsrFeatures<'
 
 /// Return only the selected query columns and distances from canonical CSR.
 #[pyfunction]
-fn _rank_sparse_euclidean_queries(
+fn _rank_sparse_feature_queries(
     py: Python<'_>,
     training: CsrComponents,
     queries: CsrComponents,
     k: usize,
+    metric: &str,
     rank_ties: Py<PyAny>,
 ) -> PyResult<(Vec<i32>, Vec<f32>)> {
+    let metric = parse_metric(metric)?;
     py.detach(|| {
         let mut callback_error = None;
-        let result = rank_sparse_euclidean_queries(
+        let result = rank_sparse_feature_queries(
             csr_features(&training),
             csr_features(&queries),
             k,
-            |distances, width| python_rank_ties(&rank_ties, distances, width, &mut callback_error),
+            metric,
+            |distances, width| {
+                python_sparse_rank_ties(&rank_ties, distances, width, &mut callback_error)
+            },
         );
         if let Some(error) = callback_error {
             return Err(error);
@@ -1166,7 +1210,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_fit_dense_graph_with_cutoff, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_sparse_graph, module)?)?;
     module.add_function(wrap_pyfunction!(
-        _fit_sparse_euclidean_graph_with_cutoff,
+        _fit_sparse_feature_graph_with_cutoff,
         module
     )?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_embedding, module)?)?;
@@ -1184,7 +1228,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     module.add_function(wrap_pyfunction!(_fit_supplied_neighbors_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_transform_dense_graph, module)?)?;
-    module.add_function(wrap_pyfunction!(_rank_sparse_euclidean_queries, module)?)?;
+    module.add_function(wrap_pyfunction!(_rank_sparse_feature_queries, module)?)?;
     module.add_function(wrap_pyfunction!(_transform_dense_embedding, module)?)?;
     module.add_function(wrap_pyfunction!(
         _inverse_transform_dense_embedding,

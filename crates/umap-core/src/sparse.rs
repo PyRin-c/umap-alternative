@@ -5,7 +5,10 @@ use std::fmt;
 
 use crate::fit::{build_fitted_graph, build_graph_with_cutoff};
 use crate::fuzzy_graph::{CsrGraph, GraphError, GraphOptions};
-use crate::neighbors::{DistanceMetric, Neighbor, collect_neighbors, euclidean_distance_pairs};
+use crate::neighbors::{
+    DistanceMetric, Neighbor, collect_neighbors, euclidean_distance_pairs,
+    manhattan_distance_pairs, manhattan_distance_pairs_wide,
+};
 use crate::transform::{DenseGraphTransformError, QueryTieRanking};
 
 /// Borrowed CSR buffers with their declared shape.
@@ -93,6 +96,8 @@ pub enum SparseKnnError {
     NonFiniteValue { position: usize, value: f32 },
     /// Correlation requires mean-centering the implicit coordinates.
     UnsupportedCorrelation,
+    /// This distance requires a separate sparse feature path.
+    UnsupportedFeatureMetric(DistanceMetric),
 }
 
 impl fmt::Display for SparseKnnError {
@@ -156,6 +161,12 @@ impl fmt::Display for SparseKnnError {
             Self::UnsupportedCorrelation => {
                 formatter.write_str("correlation is unsupported for CSR features")
             }
+            Self::UnsupportedFeatureMetric(metric) => {
+                write!(
+                    formatter,
+                    "{metric:?} is unsupported for this CSR feature path"
+                )
+            }
         }
     }
 }
@@ -169,6 +180,8 @@ pub enum SparseGraphFitError {
     Knn(SparseKnnError),
     /// Fuzzy simplicial-set construction rejected the neighbor rows.
     Graph(GraphError),
+    /// The tie-break callback returned invalid ranks.
+    Ranking(DenseGraphTransformError),
 }
 
 impl fmt::Display for SparseGraphFitError {
@@ -178,6 +191,7 @@ impl fmt::Display for SparseGraphFitError {
             Self::Graph(error) => {
                 write!(formatter, "sparse fuzzy graph construction failed: {error}")
             }
+            Self::Ranking(error) => write!(formatter, "sparse neighbor ranking failed: {error}"),
         }
     }
 }
@@ -187,6 +201,7 @@ impl std::error::Error for SparseGraphFitError {
         match self {
             Self::Knn(error) => Some(error),
             Self::Graph(error) => Some(error),
+            Self::Ranking(error) => Some(error),
         }
     }
 }
@@ -235,8 +250,8 @@ impl std::error::Error for SparseQueryRankError {}
 /// Distances use a two-pointer merge in ascending column order, visiting only
 /// stored coordinates. Euclidean distances sum squared `f64` differences,
 /// round the sum to `f32`, and take its square root in `f32`. Manhattan distances
-/// sum absolute `f64` differences, and Chebyshev distances take their maximum.
-/// Both round the final result to `f32`. Computed distances can overflow to
+/// sum absolute `f32` differences in `f64`, and Chebyshev distances take their
+/// maximum. Both round the final result to `f32`. Computed distances can overflow to
 /// positive infinity.
 ///
 /// For cosine distance, each row is normalized once. The norm uses float32
@@ -404,7 +419,42 @@ pub fn rank_sparse_euclidean_queries(
     k: usize,
     mut rank_ties: impl FnMut(&[f32], usize) -> Vec<usize>,
 ) -> Result<Vec<Neighbor>, SparseQueryRankError> {
+    rank_sparse_feature_queries(
+        training,
+        queries,
+        k,
+        DistanceMetric::Euclidean,
+        |distances, k| {
+            let SparseTieDistances::Float32(distances) = distances else {
+                unreachable!("Euclidean CSR ranks use float32")
+            };
+            rank_ties(distances, k)
+        },
+    )
+}
+
+/// A row of candidate distances in its search precision, for resolving ties.
+pub enum SparseTieDistances<'a> {
+    /// Euclidean and Chebyshev rank distances in float32.
+    Float32(&'a [f32]),
+    /// Manhattan ranks the accumulated values before rounding to float32.
+    Float64(&'a [f64]),
+}
+
+/// Return selected Euclidean, Manhattan, or Chebyshev ranks from CSR rows.
+///
+/// Manhattan queries round each difference in float32 and sum the absolute
+/// differences in float64. Narrow queries use the leading training columns
+/// and rank in float32.
+pub fn rank_sparse_feature_queries(
+    training: CsrFeatures<'_>,
+    queries: CsrFeatures<'_>,
+    k: usize,
+    metric: DistanceMetric,
+    mut rank_ties: impl FnMut(SparseTieDistances<'_>, usize) -> Vec<usize>,
+) -> Result<Vec<Neighbor>, SparseQueryRankError> {
     use SparseQueryRankError as Error;
+    validate_feature_metric(metric).map_err(Error::Training)?;
     if queries.shape.1 > training.shape.1 {
         return Err(Error::FeatureCount {
             training: training.shape.1,
@@ -414,26 +464,14 @@ pub fn rank_sparse_euclidean_queries(
     validate_csr_features(training, Some(k), false).map_err(Error::Training)?;
     validate_csr_features(queries, None, false).map_err(Error::Queries)?;
     let mut ranks = Vec::new();
-    let mut candidates = Vec::with_capacity(training.shape.0);
-    let mut tie_ranking = QueryTieRanking::default();
-    let narrower = queries.shape.1 < training.shape.1;
+    let mut ranking = SparseFeatureRanking::new(training, metric);
+    let width = (queries.shape.1 < training.shape.1).then_some(queries.shape.1);
     for query in 0..queries.shape.0 {
-        let row = queries.row(query);
-        candidates.clear();
-        candidates.extend((0..training.shape.0).map(|index| {
-            let candidate = training.row(index);
-            let distance = if narrower {
-                euclidean_distance_pairs(merged_features(row, candidate.prefix(queries.shape.1)))
-                    as f32
-            } else {
-                sparse_distance(row, candidate, DistanceMetric::Euclidean)
-            };
-            Neighbor { index, distance }
-        }));
-        tie_ranking
-            .select(query, &mut candidates, k, &mut rank_ties)
+        ranking.fill(queries.row(query), width);
+        ranking
+            .select(query, k, &mut rank_ties)
             .map_err(Error::Ranking)?;
-        for &neighbor in &candidates[..k] {
+        for &neighbor in &ranking.candidates[..k] {
             if !neighbor.distance.is_finite() {
                 return Err(Error::Ranking(
                     DenseGraphTransformError::NonFiniteDistance {
@@ -447,6 +485,85 @@ pub fn rank_sparse_euclidean_queries(
         }
     }
     Ok(ranks)
+}
+
+struct SparseFeatureRanking<'a> {
+    training: CsrFeatures<'a>,
+    metric: DistanceMetric,
+    candidates: Vec<Neighbor>,
+    wide_distances: Vec<f64>,
+    tie_ranking: QueryTieRanking,
+}
+
+impl<'a> SparseFeatureRanking<'a> {
+    fn new(training: CsrFeatures<'a>, metric: DistanceMetric) -> Self {
+        Self {
+            training,
+            metric,
+            candidates: Vec::with_capacity(training.shape.0),
+            wide_distances: Vec::new(),
+            tie_ranking: QueryTieRanking::default(),
+        }
+    }
+
+    fn fill(&mut self, row: CsrRow<'_>, width: Option<usize>) {
+        self.candidates.clear();
+        self.wide_distances.clear();
+        for index in 0..self.training.shape.0 {
+            let mut candidate = self.training.row(index);
+            if let Some(width) = width {
+                candidate = candidate.prefix(width);
+            }
+            let distance = match self.metric {
+                DistanceMetric::Euclidean if width.is_some() => {
+                    euclidean_distance_pairs(merged_features(row, candidate)) as f32
+                }
+                DistanceMetric::Manhattan if width.is_none() => {
+                    let distance = manhattan_distance_pairs_wide(merged_features(row, candidate));
+                    self.wide_distances.push(distance);
+                    distance as f32
+                }
+                _ => sparse_distance(row, candidate, self.metric),
+            };
+            self.candidates.push(Neighbor { index, distance });
+        }
+    }
+
+    fn select(
+        &mut self,
+        query: usize,
+        k: usize,
+        rank_ties: impl FnOnce(SparseTieDistances<'_>, usize) -> Vec<usize>,
+    ) -> Result<(), DenseGraphTransformError> {
+        let wide = &self.wide_distances;
+        self.tie_ranking
+            .select(query, &mut self.candidates, k, |distances, count| {
+                // Increasing float64 distances remain ordered after rounding.
+                // The full-precision row is needed only if that rounding produces a tie.
+                let distances = if wide.is_empty() {
+                    SparseTieDistances::Float32(distances)
+                } else {
+                    SparseTieDistances::Float64(wide)
+                };
+                rank_ties(distances, count)
+            })
+    }
+
+    fn cut(&self, neighbor: &Neighbor, cutoff: f64) -> bool {
+        if self.metric == DistanceMetric::Manhattan {
+            self.wide_distances[neighbor.index] >= cutoff
+        } else {
+            neighbor.distance >= cutoff as f32
+        }
+    }
+}
+
+fn validate_feature_metric(metric: DistanceMetric) -> Result<(), SparseKnnError> {
+    if metric.is_angular() {
+        Err(SparseKnnError::UnsupportedFeatureMetric(metric))
+    } else {
+        Ok(())
+    }
 }
 
 /// Fit a square fuzzy graph from a sorted CSR feature matrix.
@@ -511,6 +628,51 @@ pub fn fit_sparse_euclidean_graph_with_cutoff(
     .map_err(SparseGraphFitError::Knn)?;
     let graph = build_graph_with_cutoff(&neighbors, k, cutoff, options)
         .map_err(SparseGraphFitError::Graph)?;
+    Ok((graph, removed))
+}
+
+/// Fit from canonical CSR, keeping Manhattan distances wide through selection
+/// and the inclusive fit cutoff. Return the count of cut ordered pairs.
+pub fn fit_sparse_feature_graph_with_cutoff(
+    input: CsrFeatures<'_>,
+    k: usize,
+    metric: DistanceMetric,
+    cutoff: f64,
+    options: GraphOptions,
+    mut rank_ties: impl FnMut(SparseTieDistances<'_>, usize) -> Vec<usize>,
+) -> Result<(CsrGraph, usize), SparseGraphFitError> {
+    use SparseGraphFitError as Error;
+    validate_feature_metric(metric).map_err(Error::Knn)?;
+    validate_csr_features(input, Some(k), false).map_err(Error::Knn)?;
+    let mut ranking = SparseFeatureRanking::new(input, metric);
+    let mut neighbors = Vec::with_capacity(input.shape.0);
+    let mut removed = 0;
+    for row in 0..input.shape.0 {
+        ranking.fill(input.row(row), None);
+        removed += ranking
+            .candidates
+            .iter()
+            .filter(|neighbor| ranking.cut(neighbor, cutoff))
+            .count();
+        ranking
+            .select(row, k, &mut rank_ties)
+            .map_err(Error::Ranking)?;
+        neighbors.push(
+            ranking.candidates[..k]
+                .iter()
+                .map(|&neighbor| Neighbor {
+                    distance: if ranking.cut(&neighbor, cutoff) {
+                        f32::INFINITY
+                    } else {
+                        neighbor.distance
+                    },
+                    ..neighbor
+                })
+                .collect(),
+        );
+    }
+    let graph =
+        build_graph_with_cutoff(&neighbors, k, f32::INFINITY, options).map_err(Error::Graph)?;
     Ok((graph, removed))
 }
 
@@ -615,6 +777,9 @@ fn merged_features<'a>(
 }
 
 fn sparse_distance(left: CsrRow<'_>, right: CsrRow<'_>, metric: DistanceMetric) -> f32 {
+    if metric == DistanceMetric::Manhattan {
+        return manhattan_distance_pairs(merged_features(left, right));
+    }
     let differences = merged_features(left, right)
         .map(|(left_value, right_value)| f64::from(left_value) - f64::from(right_value));
     match metric {
@@ -623,13 +788,10 @@ fn sparse_distance(left: CsrRow<'_>, right: CsrRow<'_>, metric: DistanceMetric) 
                 differences.fold(0.0, |sum, difference| sum + difference * difference);
             (squared_sum as f32).sqrt()
         }
-        DistanceMetric::Manhattan => {
-            differences.fold(0.0, |sum, difference| sum + difference.abs()) as f32
-        }
         DistanceMetric::Chebyshev => {
             differences.fold(0.0_f64, |maximum, difference| maximum.max(difference.abs())) as f32
         }
-        DistanceMetric::Cosine | DistanceMetric::Correlation => {
+        DistanceMetric::Manhattan | DistanceMetric::Cosine | DistanceMetric::Correlation => {
             unreachable!("CSR metric was dispatched before merging coordinates")
         }
     }

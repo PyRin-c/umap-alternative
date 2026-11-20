@@ -13,11 +13,6 @@ from scipy.optimize import OptimizeWarning
 from umap_alternative._curve import _resolve_curve_params
 
 
-REFERENCE_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "reference/fixtures/umap-learn-0.6.0-curve-windows-x86_64.json"
-)
-REFERENCE = json.loads(REFERENCE_PATH.read_text(encoding="utf-8"))
 RUNTIME = {
     "platform": platform.system(),
     "machine": platform.machine(),
@@ -26,6 +21,13 @@ RUNTIME = {
     "numpy": np.__version__,
     "scipy": scipy.__version__,
 }
+REFERENCE_PLATFORM = "ubuntu" if RUNTIME["platform"] == "Linux" else "windows"
+REFERENCE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "reference/fixtures"
+    / f"umap-learn-0.6.0-curve-{REFERENCE_PLATFORM}-x86_64.json"
+)
+REFERENCE = json.loads(REFERENCE_PATH.read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize(

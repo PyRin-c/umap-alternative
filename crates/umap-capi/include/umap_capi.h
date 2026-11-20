@@ -270,6 +270,21 @@ umap_capi_status_t umap_capi_update_dense_embedding(
     umap_capi_dense_embedding_t **out_embedding);
 
 /*
+ * Same storage and ownership rules as umap_capi_update_dense_embedding.
+ * Pass the UMAP_CAPI_METRIC_* tag used to fit the original rows. The updated
+ * graph is rebuilt without a distance cutoff.
+ */
+umap_capi_status_t umap_capi_update_dense_embedding_with_metric(
+    const float *data,
+    size_t data_len,
+    size_t n_rows,
+    size_t n_features,
+    umap_capi_metric_t metric,
+    const umap_capi_dense_embedding_t *fitted,
+    const umap_capi_dense_update_config_t *config,
+    umap_capi_dense_embedding_t **out_embedding);
+
+/*
  * Fill a caller-owned view, leaving it untouched on error. embedding must
  * be a live handle returned by a dense fit or update. out_view must point
  * to one aligned writable view outside the handle's storage.

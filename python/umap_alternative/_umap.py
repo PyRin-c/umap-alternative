@@ -11,7 +11,6 @@ from scipy.sparse import coo_matrix, csc_matrix, csr_matrix, issparse, tril, tri
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial import Delaunay
 from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.metrics import pairwise_distances
 from sklearn.utils.validation import check_array
 
 from . import _native
@@ -243,19 +242,6 @@ def _fit_neighbor_arrays(indices, distances, k, graph_options):
         k,
         graph_options=graph_options,
     )
-
-
-def _fit_dense_graph_with_cutoff(features, metric, k, cutoff, graph_options):
-    distances = pairwise_distances(features, metric=metric).astype(np.float32, copy=False)
-    # Rank the finite distances before masking because all excluded entries
-    # become the same missing marker.
-    indices = np.argsort(distances, axis=1, kind="stable")[:, :k].copy()
-    removed = np.count_nonzero(distances >= cutoff)
-    distances = np.take_along_axis(distances, indices, axis=1)
-    cut = distances >= cutoff
-    indices[cut] = -1
-    distances[cut] = np.inf
-    return _fit_neighbor_arrays(indices, distances, k, graph_options), removed
 
 
 def _check_sparse_indices(indices, n_entries, axis_size):
@@ -698,7 +684,8 @@ class UMAP(BaseEstimator, TransformerMixin):
             components = _fit_neighbor_arrays(indices, distances, requested_neighbors, graph_options)
             if precomputed:
                 transform_fit = (X_checked.copy(), metric)
-        elif angular and y is None:
+        elif (angular or cutoff < np.inf) and not (precomputed or sparse) and y is None:
+            transform_cutoff = cutoff
             components, removed = _native._fit_dense_graph_with_cutoff(
                 X_checked.ravel().tolist(), n_rows, n_features, n_neighbors, metric, cutoff,
                 graph_options=graph_options,
@@ -733,14 +720,9 @@ class UMAP(BaseEstimator, TransformerMixin):
                 cutoff,
                 graph_options=graph_options,
             )
-        elif not angular and cutoff < np.inf:
-            if sparse or y is not None:
-                raise NotImplementedError(
-                    "disconnection_distance with computed neighbors requires unsupervised dense features"
-                )
-            transform_cutoff = cutoff
-            components, removed = _fit_dense_graph_with_cutoff(
-                X_checked, metric, n_neighbors, cutoff, graph_options
+        elif cutoff < np.inf:
+            raise NotImplementedError(
+                "disconnection_distance with computed neighbors requires unsupervised dense features"
             )
         elif sparse:
             components = _native._fit_sparse_graph(
@@ -967,7 +949,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         return np.asarray(coordinates, dtype=np.float32).reshape(queries.shape[0], n_components)
 
     def update(self, X, ensure_all_finite=True):
-        """Append dense Euclidean features and update the fitted embedding in place."""
+        """Append dense features and update the fitted embedding in place."""
         if not hasattr(self, "_graph_transform_fit"):
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '_raw_data'")
         if self._graph_transform_fit is None or self._graph_transform_fit[1] == "precomputed":
@@ -977,15 +959,8 @@ class UMAP(BaseEstimator, TransformerMixin):
         if getattr(self, "_supervised_fit", False):
             raise ValueError("Updating supervised models is not currently supported")
         training, metric = self._graph_transform_fit
-        if (
-            metric != "euclidean"
-            or issparse(training)
-            or self._supplied_transform_error is not None
-            or self._transform_cutoff is not None
-        ):
-            raise NotImplementedError(
-                "update requires dense Euclidean features with computed neighbors and no cutoff"
-            )
+        if issparse(training) or self._supplied_transform_error is not None:
+            raise NotImplementedError("update requires dense features with computed neighbors")
         batch = check_array(
             X, dtype=np.float32, order="C", ensure_all_finite=ensure_all_finite
         )
@@ -995,30 +970,44 @@ class UMAP(BaseEstimator, TransformerMixin):
         graph_options = self._graph_options()
         n_neighbors = self.n_neighbors_
         if self._embedding_transform_options is None:
-            components = _native._fit_dense_graph(
-                data, n_rows, n_features, n_neighbors, metric, graph_options=graph_options
-            )
+            if metric in _ANGULAR_METRICS:
+                components, _ = _native._fit_dense_graph_with_cutoff(
+                    data, n_rows, n_features, n_neighbors, metric, np.inf,
+                    graph_options=graph_options,
+                )
+            else:
+                components = _native._fit_dense_graph(
+                    data, n_rows, n_features, n_neighbors, metric, graph_options=graph_options
+                )
             self.graph_ = _csr_graph(components)
             self._graph_transform_fit = (combined, metric)
             raise AttributeError(f"'{type(self).__name__}' object has no attribute 'embedding_'")
         fitted = self.embedding_
         n_epochs = 0 if self.n_epochs is None else _validate_epochs(self.n_epochs)
         repulsion, negative_rate = self._sampling_options()
-        components, shape, coordinates = _native._update_dense_embedding(
-            data,
-            combined.shape,
-            training.shape[0],
-            fitted.ravel().tolist(),
-            k=n_neighbors,
-            metric=metric,
-            n_components=fitted.shape[1],
-            n_epochs=n_epochs,
-            repulsion_strength=repulsion,
-            negative_sample_rate=negative_rate,
-            transform_seed=self._embedding_transform_seed(),
-            graph_options=graph_options,
-            **self._embedding_transform_options,
-        )
+        try:
+            components, shape, coordinates = _native._update_dense_embedding(
+                data,
+                combined.shape,
+                training.shape[0],
+                fitted.ravel().tolist(),
+                k=n_neighbors,
+                metric=metric,
+                n_components=fitted.shape[1],
+                n_epochs=n_epochs,
+                repulsion_strength=repulsion,
+                negative_sample_rate=negative_rate,
+                transform_seed=self._embedding_transform_seed(),
+                graph_options=graph_options,
+                **self._embedding_transform_options,
+            )
+        except ValueError as error:
+            failed_graph = getattr(error, "_update_graph", None)
+            if failed_graph is not None:
+                # The graph rebuild precedes duplicate-layout jitter.
+                self.graph_ = _csr_graph(failed_graph)
+                self._graph_transform_fit = (combined, metric)
+            raise
         graph = _csr_graph(components)
         embedding = np.asarray(coordinates, dtype=np.float32).reshape(shape)
         if getattr(self, "output_dens", False):
@@ -1030,6 +1019,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             n_neighbors,
             embedding,
             embedding_options=self._embedding_transform_options,
+            transform_cutoff=self._transform_cutoff,
         )
 
     def inverse_transform(self, X):

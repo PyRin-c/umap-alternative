@@ -1,4 +1,5 @@
 import json
+import platform
 import warnings
 from pathlib import Path
 
@@ -21,6 +22,9 @@ def load_reference(name):
 REFERENCE = load_reference("windows-x86_64")
 HOLDOUTS = load_reference("initialization-holdouts-x86_64")
 LAYOUT = load_reference("layout-windows-x86_64")
+METRICS = load_reference(
+    "metrics-linux-x86_64" if platform.system() == "Linux" else "metrics-windows-x86_64"
+)
 INPUT_FIXTURES = (REFERENCE, HOLDOUTS)
 
 
@@ -96,6 +100,44 @@ def test_update_replays_public_optimizer_with_fitted_curve_and_live_schedule(cas
     assert model.update(feature_input(REFERENCE, case["update_input"]), True) is None
     assert_embedding(model.embedding_, trial["embedding"])
     assert_graph(model.graph_, case["updated_graph"])
+
+
+@pytest.mark.parametrize("name", METRICS)
+def test_dense_metric_updates_match_public_fit_layout_and_state(name):
+    case = METRICS[name]
+    training = np.asarray(case["training"], dtype=np.float32)
+    with warnings.catch_warnings(record=True) as observed:
+        warnings.simplefilter("always")
+        model = UMAP(**case["settings"]).fit(training)
+    assert [warning.category.__name__ for warning in observed] == case["fit_warnings"]
+    assert_embedding(model.embedding_, case["fit"]["embedding"])
+    assert_graph(model.graph_, case["fit"]["graph"])
+    neighbors = model.n_neighbors_
+
+    for step in case["updates"]:
+        model.set_params(**step["options"])
+        batch = np.asarray(step["batch"], dtype=np.float32)
+        old_layout = model.embedding_
+        old_bits = old_layout.view(np.uint32).copy()
+        with warnings.catch_warnings(record=True) as observed:
+            warnings.simplefilter("always")
+            if step["status"] == "coincident_nan":
+                with pytest.raises(ValueError, match=r"^Input contains NaN\.$"):
+                    model.update(batch)
+                assert model.embedding_ is old_layout
+            else:
+                assert model.update(batch) is None
+                training = np.concatenate((training, batch))
+
+        assert model.transform(training.copy()) is model.embedding_
+        assert model.n_neighbors_ == neighbors
+        assert [warning.category.__name__ for warning in observed] == step["warnings"]
+        assert_embedding(model.embedding_, step["state"]["embedding"])
+        assert_graph(model.graph_, step["state"]["graph"])
+        np.testing.assert_array_equal(old_layout.view(np.uint32), old_bits)
+        np.testing.assert_array_equal(batch, np.asarray(step["batch"], dtype=np.float32))
+        if "query" in step:
+            assert_embedding(model.transform(step["query"]), step["transform"])
 
 
 @pytest.mark.parametrize(

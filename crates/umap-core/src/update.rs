@@ -1,15 +1,17 @@
 //! Graph rebuilding and coordinate initialization for dense incremental fits.
 
 use crate::embedding::{DenseEmbedding, EmbeddingLayoutConfig, zero_weak_memberships};
-use crate::fit::{DenseGraphFitError, build_fitted_graph};
-use crate::fuzzy_graph::GraphOptions;
+use crate::fit::{DenseGraphFitError, build_fitted_graph, build_graph_with_cutoff};
+use crate::fuzzy_graph::{CsrGraph, GraphOptions};
 use crate::initialization::{
     InitializationError, coincident_layout_noise_scale, has_coincident_rows, normalize_columns,
     validate_finite, write_mean,
 };
+use crate::layout::{validate_parameters, validate_repulsion_strength};
 use crate::neighbors::{DistanceMetric, Neighbor, exhaustive_knn_with_metric};
 use crate::optimize::OptimizeError;
 use crate::rng::Mt19937;
+use crate::sampling::EdgeSamplingCursor;
 use crate::update_layout::{begin_update_layout_rng, optimize_update_layout};
 use std::fmt;
 
@@ -41,6 +43,9 @@ pub enum DenseUpdateError {
     Graph(DenseGraphFitError),
     /// The fitted coordinates or provisional layout cannot be normalized.
     Initialization(InitializationError),
+    /// Duplicate provisional coordinates require a finite layout for jitter.
+    /// The combined graph was rebuilt before this error.
+    CoincidentNonFiniteLayout { graph: CsrGraph },
     /// The optimizer uses a different coordinate width.
     LayoutWidth { fitted: usize, optimizer: usize },
     /// The optimizer rejected the graph, parameters, or a coordinate update.
@@ -60,6 +65,7 @@ impl fmt::Display for DenseUpdateError {
             ),
             Self::Graph(error) => error.fmt(formatter),
             Self::Initialization(error) => error.fmt(formatter),
+            Self::CoincidentNonFiniteLayout { .. } => formatter.write_str("Input contains NaN."),
             Self::LayoutWidth { fitted, optimizer } => {
                 write!(
                     formatter,
@@ -74,7 +80,9 @@ impl fmt::Display for DenseUpdateError {
 impl std::error::Error for DenseUpdateError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::InvalidDataShape { .. } | Self::LayoutWidth { .. } => None,
+            Self::InvalidDataShape { .. }
+            | Self::LayoutWidth { .. }
+            | Self::CoincidentNonFiniteLayout { .. } => None,
             Self::Graph(error) => Some(error),
             Self::Initialization(error) => Some(error),
             Self::Optimization(error) => Some(error),
@@ -94,6 +102,7 @@ impl From<InitializationError> for DenseUpdateError {
 /// fitted rows preceding appended rows. For each appended row, average its
 /// fitted neighbors in distance order, or use the mean of the fitted layout
 /// if none of its selected neighbors were fitted before this update.
+/// Rebuilding the graph uses the fitted metric without a distance cutoff.
 ///
 /// If provisional rows coincide, the noise scale is 0.001 times the mean
 /// closest-other-row distance. The transform seed consumes the layout's
@@ -102,6 +111,9 @@ impl From<InitializationError> for DenseUpdateError {
 ///
 /// The returned graph and coordinates own their data. Both inputs remain
 /// read-only throughout. This stage finishes before epoch optimization.
+/// Rows masked entirely with NaNs in a multi-row fit propagate through column normalization.
+/// If the provisional layout also has duplicate rows, preparation reports
+/// the rebuilt graph and a nonfinite-layout error.
 pub fn prepare_dense_update(
     data: &[f32],
     n_rows: usize,
@@ -143,13 +155,28 @@ pub fn update_dense_embedding(
         data, n_rows, n_features, n_existing, fitted, config, &mut rng,
     )?;
     zero_weak_memberships(&mut embedding.graph, layout.n_epochs, false);
-    optimize_update_layout(
-        &mut embedding.coordinates,
-        &embedding.graph,
-        layout,
-        &mut rng,
-    )
-    .map_err(DenseUpdateError::Optimization)?;
+    if embedding.coordinates[0].is_nan() {
+        // Rows masked by the original fit cause every normalized coordinate
+        // to be NaN. No attraction or repulsion can restore a finite coordinate.
+        validate_parameters(
+            layout.a.into(),
+            layout.b.into(),
+            layout.learning_rate.into(),
+        )
+        .map_err(|error| DenseUpdateError::Optimization(error.into()))?;
+        validate_repulsion_strength(layout.repulsion_strength.into())
+            .map_err(|error| DenseUpdateError::Optimization(error.into()))?;
+        EdgeSamplingCursor::from_positive_interval(1.0, layout.negative_sample_rate)
+            .map_err(|error| DenseUpdateError::Optimization(error.into()))?;
+    } else {
+        optimize_update_layout(
+            &mut embedding.coordinates,
+            &embedding.graph,
+            layout,
+            &mut rng,
+        )
+        .map_err(DenseUpdateError::Optimization)?;
+    }
     Ok(embedding)
 }
 
@@ -185,12 +212,36 @@ fn prepare_with_rng(
         }
         .into());
     }
-    validate_finite(fitted)?;
+    let mut has_masked_rows = false;
+    for (row, coordinates) in fitted.chunks_exact(width).enumerate() {
+        if n_existing > 1 && coordinates.iter().all(|value| value.is_nan()) {
+            has_masked_rows = true;
+        } else {
+            validate_finite(coordinates).map_err(|error| match error {
+                InitializationError::NonFiniteValue { index, value } => {
+                    InitializationError::NonFiniteValue {
+                        index: row * width + index,
+                        value,
+                    }
+                }
+                other => other,
+            })?;
+        }
+    }
     let neighbors =
         exhaustive_knn_with_metric(data, n_rows, n_features, config.n_neighbors, config.metric)
             .map_err(|error| DenseUpdateError::Graph(error.into()))?;
-    let graph = build_fitted_graph(&neighbors, config.graph_options)
-        .map_err(|error| DenseUpdateError::Graph(error.into()))?;
+    let graph = if config.metric.is_angular() {
+        build_graph_with_cutoff(
+            &neighbors,
+            config.n_neighbors,
+            f32::INFINITY,
+            config.graph_options.unwrap_or_default(),
+        )
+    } else {
+        build_fitted_graph(&neighbors, config.graph_options)
+    }
+    .map_err(|error| DenseUpdateError::Graph(error.into()))?;
     let mut coordinates = Vec::with_capacity(length);
     coordinates.extend_from_slice(fitted);
     coordinates.resize(length, 0.0);
@@ -200,11 +251,18 @@ fn prepare_with_rng(
         width,
         &neighbors[n_existing..],
     );
-    validate_finite(&coordinates)?;
-    if has_coincident_rows(&coordinates, width) {
-        perturb_coincident_layout(&mut coordinates, width, rng);
+    if has_masked_rows {
+        if has_coincident_rows(&coordinates, width) {
+            return Err(DenseUpdateError::CoincidentNonFiniteLayout { graph });
+        }
+        coordinates.fill(f32::NAN);
+    } else {
+        validate_finite(&coordinates)?;
+        if has_coincident_rows(&coordinates, width) {
+            perturb_coincident_layout(&mut coordinates, width, rng);
+        }
+        normalize_columns(&mut coordinates, n_rows, width)?;
     }
-    normalize_columns(&mut coordinates, n_rows, width)?;
     Ok(DenseEmbedding {
         graph,
         coordinates,

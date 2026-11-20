@@ -1,15 +1,15 @@
 use super::{
-    STATUS_INVALID_CONFIG, STATUS_INVALID_K, STATUS_INVALID_LENGTH, STATUS_INVALID_SHAPE,
-    STATUS_OK, UmapCapiDenseEmbedding, catch_status, input_slice, map_core_error,
-    map_embedding_error, slice_size_is_representable, validate_dense_input,
-    validate_required_pointer,
+    MetricTag, STATUS_INVALID_CONFIG, STATUS_INVALID_K, STATUS_INVALID_LENGTH,
+    STATUS_INVALID_METRIC, STATUS_INVALID_SHAPE, STATUS_NONFINITE_INPUT, STATUS_OK,
+    UmapCapiDenseEmbedding, catch_status, input_slice, map_core_error, map_embedding_error,
+    slice_size_is_representable, validate_dense_input, validate_required_pointer,
 };
 use umap_core::embedding::{DenseEmbedding, DenseEmbeddingFitError, EmbeddingLayoutConfig};
 use umap_core::fuzzy_graph::GraphOptions;
 use umap_core::neighbors::DistanceMetric;
 use umap_core::update::{DenseUpdateConfig, DenseUpdateError, update_dense_embedding};
 
-/// Layout and fuzzy graph settings for appending dense Euclidean rows.
+/// Layout and fuzzy graph settings for appending dense feature rows.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct UmapCapiDenseUpdateConfig {
@@ -41,6 +41,7 @@ fn map_update_error(error: DenseUpdateError) -> u32 {
             STATUS_INVALID_SHAPE
         }
         DenseUpdateError::Graph(error) => map_core_error(error),
+        DenseUpdateError::CoincidentNonFiniteLayout { .. } => STATUS_NONFINITE_INPUT,
         DenseUpdateError::Initialization(error) => {
             map_embedding_error(DenseEmbeddingFitError::Initialization(error))
         }
@@ -74,7 +75,44 @@ pub unsafe extern "C" fn umap_capi_update_dense_embedding(
     config: *const UmapCapiDenseUpdateConfig,
     out_embedding: *mut *mut UmapCapiDenseEmbedding,
 ) -> u32 {
+    // SAFETY: This wrapper forwards the caller's storage contract unchanged.
+    unsafe {
+        umap_capi_update_dense_embedding_with_metric(
+            data,
+            data_len,
+            n_rows,
+            n_features,
+            MetricTag::Euclidean as u32,
+            fitted,
+            config,
+            out_embedding,
+        )
+    }
+}
+
+/// Append rows using the same dense metric as the original fit.
+///
+/// The combined graph is rebuilt without a distance cutoff.
+///
+/// # Safety
+///
+/// The storage and handle requirements match [the Euclidean update](umap_capi_update_dense_embedding).
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn umap_capi_update_dense_embedding_with_metric(
+    data: *const f32,
+    data_len: usize,
+    n_rows: usize,
+    n_features: usize,
+    metric: u32,
+    fitted: *const UmapCapiDenseEmbedding,
+    config: *const UmapCapiDenseUpdateConfig,
+    out_embedding: *mut *mut UmapCapiDenseEmbedding,
+) -> u32 {
     catch_status(|| {
+        let Some(metric) = MetricTag::parse(metric) else {
+            return STATUS_INVALID_METRIC;
+        };
         // SAFETY: The ABI caller guarantees the documented storage lifetimes.
         unsafe {
             update_dense_impl(
@@ -82,6 +120,7 @@ pub unsafe extern "C" fn umap_capi_update_dense_embedding(
                 data_len,
                 n_rows,
                 n_features,
+                metric.into_core(),
                 fitted,
                 config,
                 out_embedding,
@@ -91,11 +130,13 @@ pub unsafe extern "C" fn umap_capi_update_dense_embedding(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 unsafe fn update_dense_impl(
     data: *const f32,
     data_len: usize,
     n_rows: usize,
     n_features: usize,
+    metric: DistanceMetric,
     fitted: *const UmapCapiDenseEmbedding,
     config: *const UmapCapiDenseUpdateConfig,
     out_embedding: *mut *mut UmapCapiDenseEmbedding,
@@ -126,7 +167,7 @@ unsafe fn update_dense_impl(
         .map_err(|_| STATUS_INVALID_CONFIG)?;
     let core_config = DenseUpdateConfig {
         n_neighbors: config.n_neighbors,
-        metric: DistanceMetric::Euclidean,
+        metric,
         n_components,
         graph_options: (graph_options != GraphOptions::default()).then_some(graph_options),
         transform_seed: config.transform_seed,

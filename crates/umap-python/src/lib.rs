@@ -35,7 +35,7 @@ use umap_core::transform::{
     transform_dense_graph_with_cutoff, transform_dense_graph_with_tie_ranking,
     transform_embedding_from_graph, transform_ranked_neighbors_graph,
 };
-use umap_core::update::{DenseUpdateConfig, update_dense_embedding};
+use umap_core::update::{DenseUpdateConfig, DenseUpdateError, update_dense_embedding};
 
 type CsrComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
 type CooComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
@@ -381,17 +381,26 @@ fn _update_dense_embedding(
         repulsion_strength,
         negative_sample_rate,
     };
+    let result = py.detach(|| {
+        update_dense_embedding(
+            &data, shape.0, shape.1, n_existing, &fitted, &config, &layout,
+        )
+    });
     let DenseEmbedding {
         graph,
         coordinates,
         shape,
-    } = py
-        .detach(|| {
-            update_dense_embedding(
-                &data, shape.0, shape.1, n_existing, &fitted, &config, &layout,
-            )
-        })
-        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    } = match result {
+        Ok(embedding) => embedding,
+        Err(DenseUpdateError::CoincidentNonFiniteLayout { graph }) => {
+            let error = PyValueError::new_err("Input contains NaN.");
+            error
+                .value(py)
+                .setattr("_update_graph", csr_components(graph))?;
+            return Err(error);
+        }
+        Err(error) => return Err(PyValueError::new_err(error.to_string())),
+    };
     Ok((csr_components(graph), shape, coordinates))
 }
 

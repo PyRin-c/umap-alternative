@@ -34,9 +34,7 @@ fn metric_top_k_matches_full_sort() {
                         (f64::from(dx * dx) + f64::from(dy * dy)).sqrt() as f32
                     }
                     DistanceMetric::Manhattan => {
-                        let dx = f64::from(x) - f64::from(other_x);
-                        let dy = f64::from(y) - f64::from(other_y);
-                        (dx.abs() + dy.abs()) as f32
+                        (f64::from((x - other_x).abs()) + f64::from((y - other_y).abs())) as f32
                     }
                     DistanceMetric::Chebyshev => {
                         let dx = f64::from(x) - f64::from(other_x);

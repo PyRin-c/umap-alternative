@@ -146,7 +146,7 @@ batch.
 ## Reproduction on Windows
 
 ```powershell
-$scratch = Join-Path $PWD 'target/approximate-followup'
+$scratch = Join-Path $env:LOCALAPPDATA 'Temp/umap-approximate-followup'
 New-Item -ItemType Directory -Force $scratch | Out-Null
 $env:UV_CACHE_DIR = Join-Path $scratch 'uv-cache'
 $env:UV_PROJECT_ENVIRONMENT = Join-Path $scratch 'wheel-venv'

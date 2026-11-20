@@ -158,9 +158,9 @@ pub fn exhaustive_knn(
 ///
 /// Euclidean distances use `f32` subtraction and squaring, followed by `f64`
 /// accumulation (in feature order) and square root before rounding to `f32`.
-/// Manhattan
-/// distances sum the absolute `f64` coordinate differences, and Chebyshev
-/// distances select the largest absolute `f64` coordinate difference; both are
+/// Manhattan distances sum the absolute `f32` coordinate differences in
+/// `f64`, and Chebyshev distances select the largest absolute coordinate
+/// difference. Both are
 /// rounded to `f32` for the returned neighbor record. Cosine accumulates
 /// float32 coordinate products in float64. Correlation centers the rows and
 /// computes products and sums in float64. Both use distance zero when both
@@ -188,6 +188,50 @@ pub(crate) fn dense_knn_counting_cutoff(
     metric: DistanceMetric,
     cutoff: f32,
 ) -> Result<(Vec<Vec<Neighbor>>, usize), KnnError> {
+    dense_knn_by(
+        data,
+        n_rows,
+        n_features,
+        k,
+        cutoff,
+        metric.is_angular(),
+        |left, right| metric.distance(left, right),
+    )
+}
+
+pub(crate) fn exhaustive_manhattan_target_knn(
+    data: &[f32],
+    n_rows: usize,
+    n_features: usize,
+    k: usize,
+) -> Result<Vec<Vec<Neighbor>>, KnnError> {
+    dense_knn_by(
+        data,
+        n_rows,
+        n_features,
+        k,
+        f32::INFINITY,
+        false,
+        |left, right| {
+            // Continuous Manhattan targets use wide subtraction.
+            left.iter()
+                .zip(right)
+                .map(|(&left, &right)| (f64::from(left) - f64::from(right)).abs())
+                .sum::<f64>() as f32
+        },
+    )
+    .map(|(neighbors, _)| neighbors)
+}
+
+fn dense_knn_by(
+    data: &[f32],
+    n_rows: usize,
+    n_features: usize,
+    k: usize,
+    cutoff: f32,
+    zero_diagonal: bool,
+    distance: impl Fn(&[f32], &[f32]) -> f32,
+) -> Result<(Vec<Vec<Neighbor>>, usize), KnnError> {
     let expected_values = n_rows.checked_mul(n_features);
     if expected_values != Some(data.len()) {
         return Err(KnnError::InvalidShape {
@@ -211,7 +255,6 @@ pub(crate) fn dense_knn_counting_cutoff(
     }
 
     let mut removed = 0;
-    let angular = metric.is_angular();
     let neighbors = collect_neighbors(n_rows, k, |query_index, candidates| {
         let query_start = query_index * n_features;
         let query = &data[query_start..query_start + n_features];
@@ -219,10 +262,10 @@ pub(crate) fn dense_knn_counting_cutoff(
         for candidate_index in 0..n_rows {
             let candidate_start = candidate_index * n_features;
             let candidate = &data[candidate_start..candidate_start + n_features];
-            let distance = if angular && candidate_index == query_index {
+            let distance = if zero_diagonal && candidate_index == query_index {
                 0.0
             } else {
-                metric.distance(query, candidate)
+                distance(query, candidate)
             };
             removed += usize::from(distance >= cutoff);
             candidates.push(Neighbor {
@@ -447,8 +490,7 @@ fn manhattan_distance(left: &[f32], right: &[f32]) -> f32 {
         .iter()
         .zip(right)
         .fold(0.0_f64, |sum, (&left_value, &right_value)| {
-            let difference = f64::from(left_value) - f64::from(right_value);
-            sum + difference.abs()
+            sum + f64::from((left_value - right_value).abs())
         });
     absolute_sum as f32
 }

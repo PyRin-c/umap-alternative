@@ -90,8 +90,9 @@ with the captured fitted coordinates on each host.
 `update_dense_embedding` carries the initialization RNG into the
 [serial optimizer](update_layout_reference.md) and returns the combined CSR
 and new coordinates. Python `UMAP.update(X, ensure_all_finite=True)` uses that
-path for unsupervised dense Euclidean models fitted with computed neighbors
-and no finite distance cutoff. A successful call returns `None`, retains the
+path for unsupervised dense models fitted with computed neighbors and
+Euclidean, Manhattan, Chebyshev, cosine, or correlation distance.
+A successful call returns `None`, retains the
 effective fitted neighbor count, and updates the exact-input transform
 shortcut to include all appended rows. A graph-only fit publishes the
 expanded graph and preserves the previous exact-input shortcut when the
@@ -100,8 +101,10 @@ missing embedding raises `AttributeError`.
 In C, `umap_capi_update_dense_embedding` borrows a fitted embedding handle
 and a contiguous matrix with the appended rows at the end. It returns a
 second handle with the updated coordinates and CSR graph. Both handles use
-the existing embedding view and release calls. The C11 smoke test covers
-there being zero, one, and two update epochs after a seeded dense fit.
+the existing embedding view and release calls. The metric-selecting
+`umap_capi_update_dense_embedding_with_metric` accepts the metric tag used
+for the original fit. The C11 smoke test covers zero, one, and two Euclidean
+update epochs and six-epoch cosine and correlation updates.
 
 The public update sets weights below `max(weight) / sampling_epochs` to
 positive zero while preserving the CSR positions. The duplicate-row case
@@ -113,11 +116,34 @@ specified budget above 10. Fit-time curve and learning-rate settings are
 retained, and update reads the current epoch count, graph settings, repulsion,
 negative sample rate and transform seed.
 
-Sparse feature updates, other metrics, externally supplied neighbors, and
-finite cutoffs remain open. The implementation requires finite float32
-features and a finite fitted layout. General equal-distance neighbor ties and
-state following a failure partway through embedding optimization remain
-unverified.
+### Metric and cutoff controls
+
+The expanded fixture includes successive batches, update epochs 0, 6, 9
+and 11, an omitted epoch count, explicit connectivity options, and both
+ends of the transform seed range. The updated graph uses the effective
+fitted neighbor count even when the requested count changes after fit.
+It rebuilds without the original distance cutoff. Antipodal cosine and
+correlation controls gain entries that were cut during fit. Held-out
+transforms still use the fitted cutoff after a successful update.
+
+If fit masked some rows with NaNs, those values propagate through column
+normalization. Duplicate provisional rows require jitter. With those
+duplicates and masked fitted rows, the public update exposes the rebuilt
+graph, raises `ValueError("Input contains NaN.")`, and preserves the former
+embedding and exact-input shortcut. The Python path reproduces this state.
+C callers retain the original handle and receive a nonfinite-input status
+in the duplicate case.
+
+Manhattan training and update round each coordinate difference to float32
+before summing in float64. Replaying a dense Manhattan distance matrix of
+these values through the public precomputed graph eliminates eight initial
+and four updated weight differences on the metric control. Native dense
+cutoff fits use the same distance and ranking kernels as the corresponding
+uncut fits, and retain only a row of candidates and the selected ranks.
+
+Sparse feature updates, additional metrics, externally supplied neighbors,
+general equal-distance ranking, and failures during the optimizer remain
+open.
 
 ## Reproduction
 
@@ -137,4 +163,6 @@ uv run --project reference --no-sync python -I reference/analyze_update_fixture.
 $holdouts = 'reference/fixtures/umap-learn-0.6.0-update-initialization-holdouts-x86_64.json'
 uv run --project reference --no-sync python -I reference/generate_update_fixture.py --initialization-holdouts --output $holdouts
 uv run --project reference --no-sync python -I reference/analyze_update_fixture.py $holdouts --check
+$metrics = 'reference/fixtures/umap-learn-0.6.0-update-metrics-windows-x86_64.json'
+uv run --project reference --no-sync python -I reference/generate_dense_update_metrics_fixture.py --output $metrics --check
 ```

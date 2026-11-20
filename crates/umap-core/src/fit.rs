@@ -18,7 +18,7 @@ use crate::fuzzy_graph::{
 };
 use crate::neighbors::{
     DistanceMetric, KnnError, Neighbor, PrecomputedKnnError, dense_knn_counting_cutoff,
-    exhaustive_knn_with_metric, precomputed_knn,
+    exhaustive_knn_with_metric, exhaustive_manhattan_target_knn, precomputed_knn,
 };
 
 pub use crate::fuzzy_graph::supplied_neighbors::{
@@ -419,13 +419,22 @@ pub fn fit_dense_continuous_graph(
     let graph = fit_dense_graph_with_options(data, n_rows, n_features, k, metric, options)
         .map_err(DenseContinuousGraphFitError::FeatureGraph)?;
     let isolated = count_isolated_rows(&graph);
-    let neighbors = exhaustive_knn_with_metric(
-        target.values,
-        n_rows,
-        target.n_features,
-        target.n_neighbors,
-        target.metric,
-    )
+    let neighbors = if target.metric == DistanceMetric::Manhattan {
+        exhaustive_manhattan_target_knn(
+            target.values,
+            n_rows,
+            target.n_features,
+            target.n_neighbors,
+        )
+    } else {
+        exhaustive_knn_with_metric(
+            target.values,
+            n_rows,
+            target.n_features,
+            target.n_neighbors,
+            target.metric,
+        )
+    }
     .map_err(|error| DenseContinuousGraphFitError::TargetGraph(error.into()))?;
     for (row, candidates) in neighbors.iter().enumerate() {
         for (position, neighbor) in candidates.iter().enumerate() {

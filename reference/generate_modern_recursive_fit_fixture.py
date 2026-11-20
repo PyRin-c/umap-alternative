@@ -48,7 +48,7 @@ def make_data(spec):
     return pairwise_distances(values) if spec.get("precomputed") else values
 
 
-def observe(case, method):
+def observe(case, method, *, exception_class_only=False):
     opts = case["options"]
     rng = TracedRandomState(case["seed"])
     if case.get("warm_gaussian"):
@@ -60,6 +60,8 @@ def observe(case, method):
         try:
             result = getattr(model, method)(make_data(case["data"]))
         except Exception as error:
+            if exception_class_only:
+                raise SystemExit(type(error).__name__) from None
             raise SystemExit(f"{case['name']}, {method}: {type(error).__name__}: {error}") from None
     if method == "fit":
         assert result is model

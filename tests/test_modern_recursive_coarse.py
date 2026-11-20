@@ -14,13 +14,11 @@ FIXTURE = (
     / f"reference/fixtures/umap-learn-0.6.0-modern-recursive-coarse-{PLATFORM}-x86_64.json"
 )
 CASES = json.loads(FIXTURE.read_text(encoding="utf-8"))["cases"]
-RESIDUALS = {
-    "ratio-three-stars-positive-only-eleven",
-}
 COORDINATE_BOUNDS = {
     "four-level-budget-3": 3e-5,
     "four-level-positive-only": 2e-5,
     "ratio-three-stars-budget-None": 2e-5,
+    "ratio-three-stars-positive-only-eleven": 3e-5,
     "two-level-strong_to_one": 2e-5,
     "three-level-budget-4": 2e-5,
     "three-level-budget-6": 1e-4,
@@ -62,12 +60,7 @@ def test_recursive_coarse_rng_trace(case, method):
     assert rng.calls[:outer_start] == expected[:outer_start]
 
 
-@pytest.mark.parametrize("case", [
-    pytest.param(case, id=case["name"], marks=pytest.mark.xfail(
-        raises=AssertionError, strict=True, reason="recursive coarse coordinate residual",
-    )) if case["name"] in RESIDUALS else pytest.param(case, id=case["name"])
-    for case in CASES
-])
+@pytest.mark.parametrize("case", CASES, ids=lambda case: case["name"])
 @pytest.mark.parametrize("method", ["fit", "fit_transform"])
 def test_recursive_coarse_coordinates(case, method):
     model, _ = fit_case(case, method)

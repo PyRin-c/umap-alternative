@@ -1,5 +1,8 @@
 # Recursive coarse edge positions in UMAP 0.6.0
 
+The [star placement follow-up](modern_recursive_star_reference.md) brings
+the attraction-only recipe below `3e-5` maximum coordinate error.
+
 The [fixture generator](generate_modern_recursive_transition_fixture.py)
 records public `label_propagation_init`, `UMAP.fit` and `fit_transform`
 observations. The supplied-graph controls fix the anchor, graph and seed.

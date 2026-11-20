@@ -19,18 +19,18 @@ _COARSE_EPOCHS = 50
 def _recursive_base(coordinates, depth):
     coordinates = np.array(coordinates, dtype=np.float32, copy=True, order="C")
     coordinates -= coordinates.mean(axis=0)
-    lower, upper = np.percentile(coordinates, (5, 95), axis=0).astype(np.float32)
-    spans = upper - lower
+    lower, upper = np.percentile(coordinates, (5, 95), axis=0)
+    spans = (upper - lower).astype(np.float32)
     spans[spans == 0] = 1.0
     target = 3.0 * np.log10(len(coordinates)) * np.log2(depth + 1.0)
-    coordinates *= np.asarray(target / spans.astype(np.float64), dtype=np.float32)
-    return coordinates
+    return (coordinates * (target / spans.astype(np.float64))).astype(np.float32)
 
 
 def _sampled_pca_anchor(features, n_components, rng):
     # The projection draws one normal sketch with eight extra columns.
     centered = features.astype(np.float64)
-    centered -= centered.mean(axis=0)
+    # The feature means round before centering the float64 sketch input.
+    centered -= features.mean(axis=0, dtype=np.float32)
     left, values, _ = randomized_svd(
         centered, n_components=n_components, n_oversamples=8, n_iter=1, random_state=rng,
     )
@@ -145,10 +145,11 @@ def _coarse_graphs(graph, labels, n_parts, weights, remove_diagonal):
         # The next contraction uses raw support and ranks hubs by the
         # normalized layout degrees. Expansion also uses the layout weights.
         coarse = csr_matrix((values, (source, target)), shape=shape)
-        totals = np.asarray(coarse.sum(axis=1)).ravel()
+        transition = coarse.astype(np.float64)
+        totals = np.asarray(transition.sum(axis=1)).ravel()
         inverse = np.divide(1.0, totals, out=np.zeros_like(totals), where=totals > 0)
-        transition = coarse.multiply(inverse[:, None]).tocsr()
-        layout = transition + transition.T - transition.multiply(transition.T)
+        transition = transition.multiply(inverse[:, None]).tocsr()
+        layout = (transition + transition.T - transition.multiply(transition.T)).astype(np.float32)
         layout.eliminate_zeros()
         return coarse, layout
     elif len(values):
@@ -166,11 +167,20 @@ def _coarse_graphs(graph, labels, n_parts, weights, remove_diagonal):
 
 
 def _expand_layout(graph, labels, child, anchor):
-    degrees = np.asarray(graph.sum(axis=1)).ravel()
+    rows = graph.tocoo().row
+    n_rows = len(labels)
+    degrees = np.bincount(rows, graph.data, minlength=n_rows)
     expanded = child[labels]
-    averages = np.divide(graph @ expanded, degrees[:, None], out=np.zeros_like(expanded), where=degrees[:, None] > 0)
+    # Each edge product rounds in float32 before it contributes to a
+    # float64 row sum. Keep that precision through centering.
+    averages = np.empty_like(expanded, dtype=np.float64)
+    for axis, values in enumerate(expanded.T):
+        products = graph.data * values[graph.indices]
+        averages[:, axis] = np.bincount(rows, products, minlength=n_rows)
+    np.divide(averages, degrees[:, None], out=averages, where=degrees[:, None] > 0)
     expanded = 0.5 * (expanded + averages)
     expanded -= expanded.mean(axis=0)
+    expanded = expanded.astype(np.float32)
     left, _, right = np.linalg.svd(expanded.T @ (anchor - anchor.mean(axis=0)))
     if np.linalg.det(left @ right) < 0:
         left[:, -1] *= -1
@@ -197,10 +207,10 @@ def _modern_recursive_initialization(graph, features, n_components, rng, options
         seed = rng.randint(-2**31 + 1, 2**31 - 2, 3)
         labels = _recursive_partition(contraction_graph, n_parts, seed, layout_graph=graph)
         counts = np.bincount(labels)
-        means = np.zeros((len(counts), n_components), dtype=np.float32)
+        means = np.zeros((len(counts), n_components), dtype=np.float64)
         np.add.at(means, labels, anchors[-1])
         means /= counts[:, None]
-        anchors.append(means)
+        anchors.append(means.astype(np.float32))
         child = None
         if n_parts > threshold or coarse_epochs:
             contraction_graph, child = _coarse_graphs(

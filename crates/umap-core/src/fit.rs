@@ -6,9 +6,8 @@
 //! It does not expose an estimator, layout, optimization, or any other
 //! sklearn behavior.
 //!
-//! The precomputed path is the first raw core layer only: it accepts a flat
-//! `f32` square distance matrix and leaves Python-facing input conversion and
-//! boundary behavior to a later layer.
+//! Precomputed fits accept a flat `f32` square distance matrix or ranked
+//! neighbor buffers. The estimator handles CSR storage and rank selection.
 
 use std::fmt;
 
@@ -23,7 +22,7 @@ use crate::neighbors::{
 };
 
 pub use crate::fuzzy_graph::supplied_neighbors::{
-    SuppliedNeighborsGraphError, fit_supplied_neighbors_graph,
+    SuppliedNeighborsGraphError, fit_sparse_precomputed_ranked_graph, fit_supplied_neighbors_graph,
 };
 
 /// Errors returned while fitting a dense fuzzy graph.

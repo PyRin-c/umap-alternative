@@ -115,7 +115,7 @@ def test_precomputed_singleton_clears_previous_graph():
         ([[0, -1, 3], [1, 0, 2], [3, 2, 0]], ValueError, "invalid distance -1"),
         ([[0, 1, 3], [1, 0.5, 2], [3, 2, 0]], ValueError, "self distance.*expected zero"),
         ([[0.5]], ValueError, "self distance.*expected zero"),
-        (csr_matrix(np.eye(3)), TypeError, "sparse input is not supported"),
+        (csr_matrix(np.eye(3)), ValueError, "Non-zero distances from samples to themselves"),
         (np.zeros((4, 4)), ValueError, "row 2 does not include itself"),
     ],
 )

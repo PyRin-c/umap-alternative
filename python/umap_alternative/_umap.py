@@ -7,7 +7,7 @@ import sys
 import warnings
 
 import numpy as np
-from scipy.sparse import coo_matrix, csc_matrix, csr_matrix, issparse
+from scipy.sparse import coo_matrix, csc_matrix, csr_matrix, issparse, tril, triu
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial import Delaunay
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -261,6 +261,106 @@ def _check_sparse_indices(indices, n_entries, axis_size):
         raise ValueError("sparse indices are out of bounds")
 
 
+def _check_compressed_storage(X):
+    data = np.asarray(X.data)
+    if data.ndim != 1:
+        raise ValueError("sparse data must be one-dimensional")
+    major_size, minor_size = X.shape if X.format == "csr" else X.shape[::-1]
+    offsets, indices = np.asarray(X.indptr), np.asarray(X.indices)
+    if (
+        offsets.shape != (major_size + 1,)
+        or offsets.dtype.kind not in "iu"
+        or offsets[0] != 0
+        or offsets[-1] != data.size
+        or np.any(offsets[1:] < offsets[:-1])
+    ):
+        raise ValueError("sparse indptr must be nondecreasing from zero to the stored value count")
+    _check_sparse_indices(indices, data.size, minor_size)
+
+
+def _check_sparse_precomputed(X):
+    if X.ndim != 2:
+        raise ValueError("precomputed distances must be two-dimensional")
+    if X.format in ("csr", "csc"):
+        _check_compressed_storage(X)
+    elif X.format == "coo":
+        _check_sparse_indices(np.asarray(X.row), X.data.size, X.shape[0])
+        _check_sparse_indices(np.asarray(X.col), X.data.size, X.shape[1])
+    return check_array(X, dtype=np.float32, accept_sparse="csr")
+
+
+def _rank_sparse_distances(X, k, *, requested_neighbors=None):
+    counts = np.diff(X.indptr)
+    if requested_neighbors not in (None, k) and k != 1 and counts[0] > k:
+        # Selection uses the effective count but fit buffers use the requested width.
+        raise ValueError(
+            f"could not broadcast input array from shape ({k},) into shape ({requested_neighbors},)"
+        )
+    insufficient = np.flatnonzero(counts <= k)
+    if insufficient.size:
+        row = insufficient[0]
+        if counts[row] == k:
+            # Keep NumPy's kth bounds error for a row with exactly k stored values.
+            np.argpartition(X.data[X.indptr[row]:X.indptr[row + 1]], k)
+        if requested_neighbors is not None:
+            raise ValueError("Some rows contain fewer than n_neighbors distances!")
+        raise ValueError(f"Need at least n_neighbors ({k}) distances for each row!")
+
+    # Validate row widths before allocating rank buffers, whose sizes are now
+    # bounded by the stored value count.
+    indices = np.empty((X.shape[0], k), dtype=X.indices.dtype)
+    distances = np.empty((X.shape[0], k), dtype=np.float32)
+    for row, (start, end) in enumerate(zip(X.indptr[:-1], X.indptr[1:])):
+        values = X.data[start:end]
+        # kth=k requires an extra stored entry, even though only k ranks are used.
+        ranks = np.argpartition(values, k)[:k]
+        ranks = ranks[np.argsort(values[ranks])]
+        indices[row] = X.indices[start:end][ranks]
+        distances[row] = values[ranks]
+    return indices, distances
+
+
+def _fit_sparse_precomputed_graph(X, k, requested_neighbors, cutoff, graph_options):
+    # The reference's symmetry check counts stored entries in each triangle.
+    if tril(X, k=-1).nnz != triu(X, k=1).nnz:
+        raise ValueError("Sparse precomputed distance matrices should be symmetrical!")
+    if np.any(X.diagonal() != 0):
+        raise ValueError("Non-zero distances from samples to themselves!")
+    indices, distances = _rank_sparse_distances(X, k, requested_neighbors=requested_neighbors)
+    if requested_neighbors != k:
+        # Truncation to a single rank broadcasts it across the requested width.
+        indices = np.broadcast_to(indices, (X.shape[0], requested_neighbors)).copy()
+        distances = np.broadcast_to(distances, indices.shape).copy()
+    cut = distances >= cutoff
+    indices[cut] = -1
+    distances[cut] = np.inf
+    components = _native._fit_supplied_neighbors_graph(
+        indices.ravel().tolist(),
+        distances.ravel().tolist(),
+        indices.shape,
+        k,
+        graph_options=graph_options,
+        sparse_precomputed=True,
+    )
+    return components, np.count_nonzero(cut)
+
+
+def _same_transform_input(queries, fitted):
+    if fitted is None:
+        return False
+    if issparse(queries) and issparse(fitted):
+        return (
+            type(queries) is type(fitted)
+            and queries.shape == fitted.shape
+            and np.array_equal(queries.indptr, fitted.indptr)
+            and np.array_equal(queries.indices, fitted.indices)
+            and np.array_equal(queries.data.view(np.uint32), fitted.data.view(np.uint32))
+        )
+    if not issparse(queries) and not issparse(fitted):
+        return np.array_equal(queries.view(np.uint32), fitted.view(np.uint32))
+    return False
+
+
 def _sparse_features(X, *, preserve_duplicates):
     if X.format not in ("csr", "csc", "coo"):
         raise TypeError("sparse graph fitting requires SciPy CSR, CSC, or COO input")
@@ -281,17 +381,8 @@ def _sparse_features(X, *, preserve_duplicates):
         csr = coo_matrix((data, (rows, columns)), shape=X.shape, copy=True).tocsr()
     else:
         compressed_rows = X.format == "csr"
-        major_size, minor_size = (n_rows, n_features) if compressed_rows else (n_features, n_rows)
+        _check_compressed_storage(X)
         offsets, indices = np.asarray(X.indptr), np.asarray(X.indices)
-        if (
-            offsets.shape != (major_size + 1,)
-            or offsets.dtype.kind not in "iu"
-            or offsets[0] != 0
-            or offsets[-1] != n_entries
-            or np.any(offsets[1:] < offsets[:-1])
-        ):
-            raise ValueError("sparse indptr must be nondecreasing from zero to the stored value count")
-        _check_sparse_indices(indices, n_entries, minor_size)
         # Compressed inputs are cast before coalescing. COO conversion
         # coalesces in the input dtype, as observed through the public API.
         data = check_array(data, dtype=np.float32, ensure_2d=False, ensure_min_samples=0)
@@ -331,13 +422,19 @@ class UMAP(BaseEstimator, TransformerMixin):
     ``"chebyshev"``. ``target_n_neighbors=-1`` uses the effective feature
     neighbor count for the target graph.
 
-    With ``metric="precomputed"``, provide a dense square distance matrix. After
-    conversion to float32, its entries must be finite and non-negative and its
-    diagonal must be zero. The rows are ranked independently, so asymmetric
-    distances are accepted. Each row's selected neighbors must include its
-    diagonal entry, which can be excluded when there are ties at zero distance.
+    With ``metric="precomputed"``, provide a dense or CSR distance matrix. A
+    dense matrix is square. After conversion to float32, its entries must be
+    finite and non-negative and its diagonal must be zero. The rows are
+    ranked independently, so asymmetric distances are accepted. Each dense
+    row's selected neighbors must include its diagonal entry, which can be
+    excluded when there are ties at zero distance.
+    CSR training requires equal stored counts above and below the diagonal and
+    zero diagonal distances. Training sorts CSR columns, and stored zeros and
+    duplicate distances count as candidates. Each CSR training or held-out row
+    needs more than the effective number of neighbors in stored entries.
     Held-out distances have one column per fitted sample. A finite distance
-    cutoff writes infinity into cut elements of the normalized fitting matrix.
+    cutoff writes infinity into cut elements of a normalized dense fitting
+    matrix. CSR fitting applies the cutoff to the selected neighbors.
 
     ``precomputed_knn=(indices, distances, search_index)`` supplies neighbor
     arrays for an unsupervised fit. All columns of matching two-dimensional
@@ -348,9 +445,9 @@ class UMAP(BaseEstimator, TransformerMixin):
     Held-out transforms after a supplied fit require a search backend, which
     this estimator does not implement.
 
-    For an embedding, use dense features, an integer ``random_state`` in
-    ``[0, 2**32 - 1]``, and ``compatibility_layout=True``. The default
-    ``init="spectral"`` uses the sampled graph to place its connected components.
+    For an embedding, use dense features or precomputed distances, an integer
+    ``random_state`` in ``[0, 2**32 - 1]``, and ``compatibility_layout=True``.
+    The default ``init="spectral"`` uses the sampled graph to place its connected components.
     For a connected graph the embedding dimension must be smaller than the
     number of samples. ``init`` can also be ``"random"`` or a finite
     NumPy array of shape ``(n_samples, n_components)`` with distinct rows
@@ -455,9 +552,7 @@ class UMAP(BaseEstimator, TransformerMixin):
 
         precomputed = metric == "precomputed"
         angular = not sparse and metric in _ANGULAR_METRICS
-        if sparse:
-            if precomputed:
-                raise TypeError("sparse input is not supported for metric='precomputed'")
+        if sparse and not precomputed:
             if embedding_mode:
                 raise TypeError("sparse input is not supported in embedding mode")
             if y is not None:
@@ -468,7 +563,10 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise NotImplementedError(
                 "supervised fitting with metric='precomputed' is not implemented"
             )
-        if sparse:
+        if sparse and precomputed:
+            X_checked = _check_sparse_precomputed(X)
+            X_checked.sort_indices()
+        elif sparse:
             X_checked = _sparse_features(X, preserve_duplicates=metric == "cosine")
         else:
             X_checked = check_array(
@@ -484,7 +582,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         n_rows, n_features = X_checked.shape
         transform_fit = (X_checked, metric)
         if precomputed:
-            if n_rows != n_features:
+            if not sparse and n_rows != n_features:
                 raise ValueError("precomputed distances must be a square matrix")
             warnings.warn(_PRECOMPUTED_WARNING, UserWarning, stacklevel=2)
             transform_fit = (X_checked.copy(), metric)
@@ -524,6 +622,12 @@ class UMAP(BaseEstimator, TransformerMixin):
                 "disconnection_distance with computed neighbors requires unsupervised dense features"
             )
         supplied = self._supplied_neighbors(n_rows, n_neighbors)
+        if embedding_mode and sparse and precomputed and (
+            densmap is not None or getattr(self, "output_dens", False)
+        ):
+            raise NotImplementedError(
+                "density fitting with sparse precomputed distances is not implemented"
+            )
         if embedding_mode and (densmap is not None or getattr(self, "output_dens", False)) and (
             supplied is not None or np.isfinite(cutoff)
         ):
@@ -534,7 +638,7 @@ class UMAP(BaseEstimator, TransformerMixin):
 
         # Singletons have no graph. Embedding mode exposes the public zero layout.
         if n_rows == 1:
-            if precomputed:
+            if precomputed and not sparse:
                 _native._fit_precomputed_graph([X_checked.item()], 1, 1)
             embedding = (
                 np.zeros((1, embedding_options["n_components"]), dtype=np.float64)
@@ -553,7 +657,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         transform_cutoff = cutoff if angular else None
         removed = 0
         feature_isolated = None
-        graph_from_neighbors = supplied is not None or cutoff < np.inf
+        graph_from_neighbors = supplied is not None or cutoff < np.inf or (sparse and precomputed)
         if supplied is not None:
             if y is not None:
                 raise NotImplementedError("supervised fitting with precomputed_knn is not implemented")
@@ -572,6 +676,12 @@ class UMAP(BaseEstimator, TransformerMixin):
                 X_checked.ravel().tolist(), n_rows, n_features, n_neighbors, metric, cutoff,
                 graph_options=graph_options,
             )
+        elif precomputed and sparse:
+            components, removed = _fit_sparse_precomputed_graph(
+                X_checked, n_neighbors, requested_neighbors, cutoff, graph_options
+            )
+            if cutoff < np.inf:
+                transform_cutoff = cutoff
         elif precomputed:
             if cutoff < np.inf:
                 components, removed = _native._fit_precomputed_graph_with_cutoff(
@@ -713,17 +823,18 @@ class UMAP(BaseEstimator, TransformerMixin):
         n_training_rows, n_features = training.shape
         if n_training_rows == 1:
             raise ValueError("Transform unavailable when model was fit with only a single data sample.")
-        if issparse(training):
+        if metric != "precomputed" and issparse(training):
             raise NotImplementedError("transform after fitting sparse features is not implemented")
-        if issparse(X):
-            raise TypeError("sparse input is not supported; pass a dense array")
-        queries = check_array(X, dtype=np.float32, order="C")
+        sparse = issparse(X)
+        if sparse:
+            if metric != "precomputed":
+                raise TypeError("sparse input is not supported; pass a dense array")
+            queries = _check_sparse_precomputed(X)
+        else:
+            queries = check_array(X, dtype=np.float32, order="C")
         n_query_rows, n_query_features = queries.shape
-        # The observed fast path compares normalized float32 data by bits.
         fitted_input = getattr(self, "_exact_fit_input", training)
-        if fitted_input is not None and np.array_equal(
-            queries.view(np.uint32), fitted_input.view(np.uint32)
-        ):
+        if _same_transform_input(queries, fitted_input):
             return self.embedding_ if self.transform_mode == "embedding" else self.graph_
         if getattr(self, "densmap", False):
             raise NotImplementedError("Transforming data into an existing embedding not supported for densMAP.")
@@ -733,11 +844,16 @@ class UMAP(BaseEstimator, TransformerMixin):
         ranked_columns = None
         if metric == "precomputed":
             warnings.warn(_PRECOMPUTED_TRANSFORM_WARNING, UserWarning, stacklevel=2)
-            if n_query_features != n_training_rows or queries.min() < 0.0:
+            if n_query_features != n_training_rows:
                 raise AssertionError
-            # The reference's tie order follows the platform's NumPy argsort.
-            order = np.argsort(queries, axis=1)[:, :self.n_neighbors_]
-            queries = np.take_along_axis(queries, order, axis=1)
+            if sparse:
+                order, queries = _rank_sparse_distances(queries, self.n_neighbors_)
+            else:
+                # Dense queries rank all columns before selecting neighbors.
+                order = np.argsort(queries, axis=1)[:, :self.n_neighbors_]
+                queries = np.take_along_axis(queries, order, axis=1)
+            if queries.min() < 0.0:
+                raise AssertionError
             ranked_columns = order.ravel().tolist()
         elif n_query_features != n_features:
             raise ValueError(
@@ -994,9 +1110,11 @@ class UMAP(BaseEstimator, TransformerMixin):
             del self.embedding_
         self.n_features_in_ = n_features
         self._graph_transform_fit = transform_fit
-        self._exact_fit_input = (
-            transform_fit[0] if transform_fit is not None and not issparse(transform_fit[0]) else None
-        )
+        self._exact_fit_input = None
+        if transform_fit is not None:
+            training, metric = transform_fit
+            if metric == "precomputed" or not issparse(training):
+                self._exact_fit_input = training
         self._supplied_transform_error = transform_error
         self._supervised_fit = supervised
         self._transform_cutoff = transform_cutoff

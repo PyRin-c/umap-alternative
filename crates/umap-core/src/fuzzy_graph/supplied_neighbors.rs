@@ -17,7 +17,7 @@ pub enum SuppliedNeighborsGraphError {
     },
     /// The requested neighbor count must be in `1..=width`.
     InvalidNeighborCount { width: usize, k: usize },
-    /// Each pair must be a valid index and finite non-negative distance or `(-1, +inf)`.
+    /// The pair has an invalid index, distance, or missing marker.
     InvalidNeighbor {
         row: usize,
         position: usize,
@@ -106,6 +106,42 @@ pub fn fit_supplied_neighbors_graph(
     options: GraphOptions,
     disconnection_distance: f32,
 ) -> Result<CsrGraph, SuppliedNeighborsGraphError> {
+    fit_ranked_neighbors_graph(
+        indices,
+        distances,
+        (n_rows, width),
+        k,
+        options,
+        disconnection_distance,
+        false,
+    )
+}
+
+/// Fit a fuzzy graph from ranked sparse precomputed distances.
+///
+/// As with supplied neighbors, rank zero is skipped during scale estimation.
+/// Sparse distance fits can supply finite signed values. Pass cut ranks as
+/// `(-1, +inf)` and keep them in the row width. Both buffers are row-major
+/// with the supplied shape. The scale target is `log2(k)`.
+pub fn fit_sparse_precomputed_ranked_graph(
+    indices: &[i32],
+    distances: &[f32],
+    shape: (usize, usize),
+    k: usize,
+    options: GraphOptions,
+) -> Result<CsrGraph, SuppliedNeighborsGraphError> {
+    fit_ranked_neighbors_graph(indices, distances, shape, k, options, f32::INFINITY, true)
+}
+
+fn fit_ranked_neighbors_graph(
+    indices: &[i32],
+    distances: &[f32],
+    (n_rows, width): (usize, usize),
+    k: usize,
+    options: GraphOptions,
+    disconnection_distance: f32,
+    allow_negative: bool,
+) -> Result<CsrGraph, SuppliedNeighborsGraphError> {
     use SuppliedNeighborsGraphError as Error;
 
     if n_rows == 0
@@ -132,7 +168,8 @@ pub fn fit_supplied_neighbors_graph(
             distance == f32::INFINITY
         } else {
             usize::try_from(index).is_ok_and(|index| index < n_rows)
-                && (0.0..=f32::MAX).contains(&distance)
+                && distance.is_finite()
+                && (allow_negative || distance >= 0.0)
         };
         if !valid {
             return Err(Error::InvalidNeighbor {

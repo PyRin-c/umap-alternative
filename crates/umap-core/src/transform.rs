@@ -430,7 +430,8 @@ fn embedding_cutoff(
 /// Initialize and optimize held-out coordinates from a directed query graph.
 ///
 /// The graph already contains its selected memberships and disconnection
-/// cutoff. The layout configuration controls the fixed-tail optimizer.
+/// cutoff. Repeated edges are summed for initialization, while the optimizer
+/// visits the original COO entries in order.
 pub fn transform_embedding_from_graph(
     graph: &CooGraph,
     fitted_embedding: &[f32],
@@ -438,7 +439,7 @@ pub fn transform_embedding_from_graph(
 ) -> Result<Vec<f32>, DenseEmbeddingTransformError> {
     use DenseEmbeddingTransformError as Error;
     let mut embedding =
-        initialize_transform_embedding(graph, fitted_embedding, config.n_components)
+        initialize_transform_embedding_impl(graph, fitted_embedding, config.n_components, true)
             .map_err(Error::Initialization)?;
     optimize_transform(&mut embedding, fitted_embedding, graph, config).map_err(Error::Optimize)?;
     Ok(embedding)
@@ -543,6 +544,15 @@ pub fn initialize_transform_embedding(
     fitted_embedding: &[f32],
     n_components: usize,
 ) -> Result<Vec<f32>, TransformInitializationError> {
+    initialize_transform_embedding_impl(graph, fitted_embedding, n_components, false)
+}
+
+fn initialize_transform_embedding_impl(
+    graph: &CooGraph,
+    fitted_embedding: &[f32],
+    n_components: usize,
+    coalesce_duplicates: bool,
+) -> Result<Vec<f32>, TransformInitializationError> {
     use TransformInitializationError as Error;
 
     if n_components == 0 || graph.n_cols.checked_mul(n_components) != Some(fitted_embedding.len()) {
@@ -596,12 +606,25 @@ pub fn initialize_transform_embedding(
             }
             entries.push((column, weight));
         }
-        entries.sort_unstable_by_key(|&(column, _)| column);
-        if let Some(pair) = entries.windows(2).find(|pair| pair[0].0 == pair[1].0) {
-            return Err(Error::RepeatedEdge {
-                row,
-                column: pair[0].0,
+        if coalesce_duplicates {
+            // Match COO-to-CSR summation order for repeated columns.
+            entries.sort_by_key(|&(column, _)| column);
+            entries.dedup_by(|(column, weight), (previous, sum)| {
+                if column == previous {
+                    *sum += *weight;
+                    true
+                } else {
+                    false
+                }
             });
+        } else {
+            entries.sort_unstable_by_key(|&(column, _)| column);
+            if let Some(pair) = entries.windows(2).find(|pair| pair[0].0 == pair[1].0) {
+                return Err(Error::RepeatedEdge {
+                    row,
+                    column: pair[0].0,
+                });
+            }
         }
         let row_start = row * n_components;
         let coordinates = &mut embedding[row_start..row_start + n_components];

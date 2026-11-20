@@ -93,13 +93,12 @@ finite-query check. Rust and C borrow their buffers. A ranked query
 distance exactly at the cutoff stores zero at COO coordinate (0, 0).
 An entirely cut query produces NaN embedding coordinates.
 
-The public captures agree across Windows and Ubuntu WSL. The regressions
+The public dense captures agree across Windows and Ubuntu WSL. The regressions
 check all 198 weights and their COO coordinates across 11 graph cases,
 and all 132 transformed coordinate bits across 13 embedding cases. The
 cases include zero-epoch warnings, asymmetric distances, local connectivity,
 effective neighbor truncation, cutoff boundaries, and six input errors.
-Sparse precomputed inputs and new data transforms under densMAP remain
-outside this path.
+New data transforms under densMAP raise `NotImplementedError`.
 
 On Windows x86-64 with an Intel Core Ultra 9 285K, ranking and constructing
 the graph for 256 queries, 4,096 fitted rows, and 15 neighbors took a
@@ -117,6 +116,59 @@ environment. Use an OS-specific output path for the environment metadata.
 uv run --project reference --locked python -I reference/generate_precomputed_transform_fixture.py \
   --output reference/fixtures/umap-learn-0.6.0-precomputed-transform-windows-x86_64.json --check
 ```
+
+### CSR precomputed distances
+
+Public 0.6.0 ranks stored CSR entries. Training sorts column indices before
+ranking and keeps duplicates. An unsorted float32 CSR matrix can therefore
+have its indices and data reordered in place. Held-out CSR queries use the
+incoming storage order. Explicit zeros participate in ranking and implicit
+zeros are absent. Removing the eight stored diagonal zeros from the fixture's
+training matrix changes the graph from 28 to 38 entries. The probes distinguish
+sorting selected ranks by distance from returning the raw partition order.
+
+Training checks that the strict lower and upper triangles have equal stored
+counts, including duplicate coordinates and zeros. Balanced asymmetric
+support and asymmetric values pass. The diagonal must sum to zero at each
+sample, including when duplicate diagonal entries cancel. Finite signed
+off-diagonal training values are accepted. A rectangular training CSR matrix
+with one trailing empty column passes and produces a square graph. Held-out
+inputs require one column per fitted row and assert on negative ranked
+distances. A row with fewer than the effective neighbor count gives the
+estimator's `ValueError`. A row with exactly that count gives NumPy's
+`kth` bounds `ValueError`. Truncating from 15 requested neighbors to 7
+on the eight-row sparse fit exposes a separate buffer-width `ValueError`.
+
+Training applies the inclusive cutoff to selected ranks. The disconnection
+warning counts how many of those ranks were cut. Training keeps the stored
+distances available for exact input identity. An external query computes memberships from the original
+ranked distances before masking ranks at or above the cutoff as zero entries
+at COO coordinate (0, 0). COO output preserves repeated columns. Embedding
+initialization sums repeated memberships, and optimization visits the
+original COO entries. The same compact Rust paths serve dense-fitted and
+CSR-fitted models. Distance validation and ranking use storage proportional
+to the stored entries and ranked buffers.
+
+The shared fixture was generated through the public estimator and matched
+byte-for-byte on Windows x86-64 and Ubuntu WSL x86-64 with Python 3.13.12
+and the locked reference environment. It checks CSR graph weights, ordered
+COO coordinates and weights, fitted and transformed embedding bits, input
+sorting and identity, and validation and cutoff warnings.
+
+```sh
+uv run --project reference --locked python -I reference/generate_sparse_precomputed_fixture.py \
+  --output reference/fixtures/umap-learn-0.6.0-sparse-precomputed-x86_64.json --check
+```
+
+The CSR matrix cases establish parity for the locked NumPy tie order and
+serial seeded layout. A public CSR-array training probe raised `TypingError`;
+this implementation processes CSR arrays through the CSR storage path.
+Selected training columns outside the fitted row range raise `ValueError`
+at the Rust boundary. Sparse precomputed density embeddings raise
+`NotImplementedError`. In a Windows spectral probe, the tied graph and the
+implicit-diagonal graph at cutoff 0.3 produced different coordinate bits.
+Bit parity for wide duplicate reductions and disconnected spectral layouts
+with many components remains unverified.
 
 ## Reproduce the fixture
 

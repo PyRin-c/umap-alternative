@@ -16,7 +16,7 @@ use umap_core::fit::{
     DenseContinuousTarget, fit_dense_categorical_graph_with_diagnostics,
     fit_dense_continuous_graph, fit_dense_graph_with_cutoff, fit_dense_graph_with_options,
     fit_precomputed_graph_with_cutoff, fit_precomputed_graph_with_options,
-    fit_supplied_neighbors_graph,
+    fit_sparse_precomputed_ranked_graph, fit_supplied_neighbors_graph,
 };
 use umap_core::fuzzy_graph::{CsrGraph, GraphOptions};
 use umap_core::inverse::{
@@ -614,7 +614,7 @@ fn _fit_precomputed_graph_with_cutoff(
 
 /// Fit a fuzzy graph from row-major indices and distances after estimator masking.
 #[pyfunction]
-#[pyo3(signature = (indices, distances, shape, k, *, graph_options=None))]
+#[pyo3(signature = (indices, distances, shape, k, *, graph_options=None, sparse_precomputed=false))]
 fn _fit_supplied_neighbors_graph(
     py: Python<'_>,
     indices: Vec<i32>,
@@ -622,10 +622,14 @@ fn _fit_supplied_neighbors_graph(
     shape: (usize, usize),
     k: usize,
     graph_options: Option<(f64, f64)>,
+    sparse_precomputed: bool,
 ) -> PyResult<CsrComponents> {
     let (n_rows, width) = shape;
     let options = parse_graph_options(graph_options)?.unwrap_or_default();
     py.detach(|| {
+        if sparse_precomputed {
+            return fit_sparse_precomputed_ranked_graph(&indices, &distances, shape, k, options);
+        }
         fit_supplied_neighbors_graph(
             &indices,
             &distances,

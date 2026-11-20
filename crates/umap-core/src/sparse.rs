@@ -34,6 +34,87 @@ impl<'a> CsrFeatures<'a> {
     }
 }
 
+/// Distinct stored rows and the map back to the original row order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CsrRowGroups {
+    /// First original row in each group, in lexicographic row-key order.
+    pub first: Vec<usize>,
+    /// Group index for each original row.
+    pub inverse: Vec<usize>,
+    /// Number of original rows in each group.
+    pub counts: Vec<usize>,
+}
+
+/// Group canonical CSR rows by their stored column indices and values.
+///
+/// Row keys start with all stored column indices, followed by the stored
+/// values. Explicit zeros participate in the key. Positive and negative
+/// zero compare equal, with the first occurrence chosen as representative.
+pub fn unique_csr_rows(input: CsrFeatures<'_>) -> Result<CsrRowGroups, SparseKnnError> {
+    validate_csr_features(input, None, false)?;
+    let mut order: Vec<_> = (0..input.shape.0).collect();
+    order.sort_unstable_by(|&left, &right| {
+        compare_row_keys(input.row(left), input.row(right)).then(left.cmp(&right))
+    });
+    let mut groups = CsrRowGroups {
+        first: Vec::new(),
+        inverse: vec![0; order.len()],
+        counts: Vec::new(),
+    };
+    for row in order {
+        let distinct = groups.first.last().is_none_or(|&previous| {
+            compare_row_keys(input.row(previous), input.row(row)) != Ordering::Equal
+        });
+        if distinct {
+            groups.first.push(row);
+            groups.counts.push(1);
+        } else if let Some(count) = groups.counts.last_mut() {
+            *count += 1;
+        }
+        groups.inverse[row] = groups.first.len() - 1;
+    }
+    Ok(groups)
+}
+
+enum RowKeyElement {
+    Column(usize),
+    Value(f32),
+}
+
+fn compare_row_keys(left: CsrRow<'_>, right: CsrRow<'_>) -> Ordering {
+    let left_key = row_key(left);
+    let right_key = row_key(right);
+    for (left, right) in left_key.zip(right_key) {
+        use RowKeyElement::{Column, Value};
+        let ordering = match (left, right) {
+            (Column(left), Column(right)) => left.cmp(&right),
+            (Value(left), Value(right)) => left.partial_cmp(&right).expect("validated values"),
+            (Column(column), Value(value)) => compare_column_to_value(column, value),
+            (Value(value), Column(column)) => compare_column_to_value(column, value).reverse(),
+        };
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    left.columns.len().cmp(&right.columns.len())
+}
+
+fn row_key(row: CsrRow<'_>) -> impl Iterator<Item = RowKeyElement> {
+    row.columns
+        .iter()
+        .copied()
+        .map(RowKeyElement::Column)
+        .chain(row.values.iter().copied().map(RowKeyElement::Value))
+}
+
+fn compare_column_to_value(column: usize, value: f32) -> Ordering {
+    // A large integer can round onto an exactly represented feature value.
+    (column as f64)
+        .partial_cmp(&f64::from(value))
+        .expect("validated value")
+        .then_with(|| (column as u128).cmp(&(value as u128)))
+}
+
 /// Distance metrics for exhaustive sparse feature search.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SparseDistanceMetric {

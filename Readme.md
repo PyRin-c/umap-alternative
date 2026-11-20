@@ -71,6 +71,8 @@ Euclidean、Manhattan、Chebyshev、cosine の互換レイアウトでは、CSR�
 
 学習済みの二つの `UMAP` は、同じ頂点数なら `+`、`*`、`-` でグラフを合成できます。結果は新しい `graph_` と `embedding_` を持ちます。減算では左の学習済みグラフにも重みの変更が入ります。[合成演算の参照記録](reference/composition_reference.md)
 
+`unique=True` は重複をまとめてグラフを学習し、埋め込みと密度半径を元の入力行に戻します。疎行の代表行、逆対応、件数は `umap_alternative.utils.csr_unique` で取得できます。[重複行学習の参照記録](reference/unique_reference.md)
+
 ## 独立実装と数値互換性
 
 実装側は公開論文と自前の仕様を参照し、設計判断の根拠を記録します。上流の実装コード・コメント・テストは閲覧や転用の対象から外します。クリーンルームで実装を担当する場合は、上流ソースの断片を含む過去の調査履歴も共有対象から外します。[UMAP 原論文](https://arxiv.org/abs/1802.03426)

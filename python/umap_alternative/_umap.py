@@ -202,6 +202,7 @@ _COMPOSITION_PARAMETERS = (
     "set_op_mix_ratio", "local_connectivity", "target_metric", "target_weight",
     "target_n_neighbors", "learning_rate", "min_dist", "spread", "repulsion_strength",
     "negative_sample_rate", "transform_seed", "dens_lambda", "dens_frac", "dens_var_shift",
+    "unique",
 )
 
 
@@ -576,6 +577,9 @@ class UMAP(BaseEstimator, TransformerMixin):
     diagnostic log radii for dense Euclidean features.
     """
 
+    # Estimators serialized before this option keep the original row behavior.
+    unique = False
+
     def __init__(
         self,
         n_components=2,
@@ -612,6 +616,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         init_scale_factor=1.0,
         exclude_graph_neighbors=False,
         negative_selection_range=200_000,
+        unique=False,
     ):
         self.n_components = n_components
         self.n_neighbors = n_neighbors
@@ -647,6 +652,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         self.init_scale_factor = init_scale_factor
         self.exclude_graph_neighbors = exclude_graph_neighbors
         self.negative_selection_range = negative_selection_range
+        self.unique = unique
 
     def fit(self, X, y=None):
         """Fit the fuzzy graph and, in embedding mode, the training layout."""
@@ -667,6 +673,8 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise ValueError("n_neighbors must be greater than 1")
 
         precomputed = metric == "precomputed"
+        if precomputed and self.unique:
+            raise ValueError("unique=True is not supported with precomputed distances")
         sparse_feature_layout = sparse and metric in _SPARSE_LAYOUT_METRICS
         sparse_embedding = sparse and not precomputed and embedding_mode
         angular = not sparse and metric in _ANGULAR_METRICS
@@ -705,6 +713,26 @@ class UMAP(BaseEstimator, TransformerMixin):
                 raise ValueError("precomputed distances must be a square matrix")
             warnings.warn(_PRECOMPUTED_WARNING, UserWarning, stacklevel=2)
             transform_fit = (X_checked.copy(), metric)
+        inverse_rows = None
+        if self.unique:
+            if sparse:
+                distinct_input = X_checked
+                if not distinct_input.has_canonical_format:
+                    distinct_input = X_checked.copy()
+                    distinct_input.sum_duplicates()
+                first, inverse_rows, _ = _native._unique_csr_rows(_csr_buffers(distinct_input))
+                X_checked = distinct_input[first]
+            else:
+                X_checked, first, inverse_rows = np.unique(
+                    X_checked, axis=0, return_index=True, return_inverse=True
+                )
+            if y is not None:
+                if len(y) != n_rows:
+                    raise ValueError(
+                        f"Length of x = {n_rows}, length of y = {len(y)}, while it must be equal."
+                    )
+                y = np.asarray(y)[first]
+            n_rows = X_checked.shape[0]
         spectral = False
         modern = False
         checkpoint_epochs = None
@@ -727,6 +755,10 @@ class UMAP(BaseEstimator, TransformerMixin):
                 selection_range = _finite_float(
                     self.negative_selection_range, "negative_selection_range"
                 )
+            if self.unique and not isinstance(self.init, str):
+                raw_init = np.asarray(self.init)
+                if raw_init.ndim == 2 and raw_init.shape[0] != n_rows:
+                    raise IndexError("explicit initialization must index the distinct rows")
             initial_coordinates = self._embedding_init(
                 n_rows, embedding_options["n_components"], modern=modern
             )
@@ -751,8 +783,8 @@ class UMAP(BaseEstimator, TransformerMixin):
             if metric == "manhattan" and supplied is None:
                 # When fitting coalesces stored entries, ordinary CSR copies
                 # take the held-out path in the public estimator.
-                if checked.nnz == X_checked.nnz:
-                    fitted_input = X_checked
+                if checked.nnz == transform_fit[0].nnz:
+                    fitted_input = transform_fit[0]
             else:
                 # Other paths retain duplicates left by format and dtype conversion.
                 fitted_input = csr_matrix(checked, copy=True)
@@ -948,8 +980,15 @@ class UMAP(BaseEstimator, TransformerMixin):
             embedding[np.diff(graph.indptr) == 0] = np.nan
         if embedding_mode and getattr(self, "output_dens", False):
             self._store_density_diagnostics(X_checked, graph, embedding, metric)
+            if inverse_rows is not None:
+                self.rad_orig_ = self.rad_orig_[inverse_rows]
+                self.rad_emb_ = self.rad_emb_[inverse_rows]
+        if embedding is not None and inverse_rows is not None:
+            embedding = embedding[inverse_rows]
         if history is not None:
-            self.embedding_list_ = history
+            self.embedding_list_ = (
+                history if inverse_rows is None else [layout[inverse_rows] for layout in history]
+            )
         return self._store_fit(
             n_features, transform_fit, graph, n_neighbors, embedding,
             embedding_options=embedding_options if embedding_mode else None,
@@ -959,6 +998,10 @@ class UMAP(BaseEstimator, TransformerMixin):
             exact_fit_input=fitted_input,
             inverse_cutoff=transform_cutoff,
             inverse_distances=inverse_distances,
+            inverse_unique_fit=(
+                (X_checked, inverse_rows) if embedding_mode and inverse_rows is not None and not sparse
+                else None
+            ),
         )
 
     def __add__(self, other):
@@ -992,13 +1035,14 @@ class UMAP(BaseEstimator, TransformerMixin):
 
         parameters = {}
         for name in _COMPOSITION_PARAMETERS:
-            values = tuple(
-                item
-                for estimator in (self, other)
-                for item in (getattr(estimator, name) if isinstance(estimator.n_components, tuple)
-                             else (getattr(estimator, name),))
-            )
-            parameters[name] = values
+            values = []
+            for estimator in (self, other):
+                value = getattr(estimator, name)
+                if isinstance(estimator.n_components, tuple):
+                    values.extend(value if isinstance(value, tuple) else (value,) * len(estimator.n_components))
+                else:
+                    values.append(value)
+            parameters[name] = tuple(values)
         epochs = _composition_epochs(self.n_epochs) + _composition_epochs(other.n_epochs)
         parameters["n_epochs"] = epochs if max(epochs) >= 0 else None
         n_epochs = _default_epochs(graph.shape[0]) if parameters["n_epochs"] is None else max(epochs)
@@ -1057,6 +1101,8 @@ class UMAP(BaseEstimator, TransformerMixin):
         n_training_rows, n_features = training.shape
         if n_training_rows == 1:
             raise ValueError("Transform unavailable when model was fit with only a single data sample.")
+        if self.unique and not hasattr(self, "n_neighbors_"):
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '_input_hash'")
         sparse_features = metric != "precomputed" and issparse(training)
         if sparse_features and metric not in _SPARSE_LAYOUT_METRICS:
             raise NotImplementedError("transform after fitting sparse features is not implemented")
@@ -1144,7 +1190,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             local_connectivity=self.local_connectivity,
             disconnection_distance=getattr(self, "_transform_cutoff", None),
             ranked_columns=ranked_columns,
-            rank_ties=_rank_tied_dense_distances if metric in _ANGULAR_METRICS else None,
+            rank_ties=_rank_tied_dense_distances if self.unique or metric in _ANGULAR_METRICS else None,
         )
         return coo_matrix(
             (
@@ -1182,7 +1228,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             local_connectivity=self.local_connectivity,
             disconnection_distance=cutoff,
             ranked_columns=ranked_columns,
-            rank_ties=_rank_tied_dense_distances if metric in _ANGULAR_METRICS else None,
+            rank_ties=_rank_tied_dense_distances if self.unique or metric in _ANGULAR_METRICS else None,
             **self._embedding_transform_options,
         )
         return np.asarray(coordinates, dtype=np.float32).reshape(queries.shape[0], n_components)
@@ -1304,6 +1350,10 @@ class UMAP(BaseEstimator, TransformerMixin):
         if saved_distances is not None:
             values, target = saved_distances
             distances = (values.ravel().tolist(), values.shape[1], target)
+        unique_fit = getattr(self, "_inverse_unique_fit", None)
+        if unique_fit is not None:
+            values, inverse = unique_fit
+            unique_fit = (values.ravel().tolist(), inverse.tolist())
         coordinates = _native._inverse_transform_dense_embedding(
             training.ravel().tolist(),
             fitted.ravel().tolist(),
@@ -1322,6 +1372,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             metric=metric,
             cutoff=getattr(self, "_inverse_cutoff", self._transform_cutoff),
             fitted_distances=distances,
+            unique_fit=unique_fit,
             **self._embedding_transform_options,
         )
         return np.asarray(coordinates, dtype=np.float32).reshape(queries.shape[0], n_features)
@@ -1355,6 +1406,8 @@ class UMAP(BaseEstimator, TransformerMixin):
         search_index = None if len(neighbors) == 2 else neighbors[2]
         if distances is None:
             return None
+        if self.unique:
+            raise ValueError("unique is not currently available for precomputed_knn.")
         if not isinstance(indices, np.ndarray):
             raise ValueError("precomputed_knn[0] must be ndarray object.")
         if not isinstance(distances, np.ndarray):
@@ -1379,7 +1432,7 @@ class UMAP(BaseEstimator, TransformerMixin):
     def _store_fit(
         self, n_features, transform_fit, graph, n_neighbors, embedding, *,
         embedding_options=None, transform_error=None, transform_cutoff=None, supervised=False,
-        exact_fit_input=None, inverse_cutoff=None, inverse_distances=None,
+        exact_fit_input=None, inverse_cutoff=None, inverse_distances=None, inverse_unique_fit=None,
     ):
         if graph is not None:
             self.graph_ = graph
@@ -1404,6 +1457,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         self._inverse_local_connectivity = float(self.local_connectivity)
         self._inverse_cutoff = inverse_cutoff
         self._inverse_distances = inverse_distances
+        self._inverse_unique_fit = inverse_unique_fit
         self._embedding_transform_options = None
         if embedding_options is not None:
             self._embedding_transform_options = {

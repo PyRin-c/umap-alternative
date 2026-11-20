@@ -20,9 +20,9 @@ use umap_core::fit::{
 };
 use umap_core::fuzzy_graph::{CsrGraph, FuzzySetOperation, GraphOptions, combine_fuzzy_graphs};
 use umap_core::inverse::{
-    DenseInverseInput, DenseInverseLayout, InverseTriangulation, dense_inverse_epochs,
-    fit_dense_inverse_scales_with_metric, fit_inverse_scales_from_ranked_distances,
-    inverse_transform_dense_with_metric,
+    DenseInverseError, DenseInverseInput, DenseInverseLayout, InverseTriangulation,
+    dense_inverse_epochs, fit_dense_inverse_scales_with_metric,
+    fit_inverse_scales_from_ranked_distances, inverse_transform_dense_with_metric,
 };
 use umap_core::modern_initialization::{
     ModernInit, ModernInitConfig, ModernInitRescale, initialize_modern_layout,
@@ -35,7 +35,7 @@ use umap_core::sampling::{ModernSampledLayout, ModernSamplingConfig};
 use umap_core::sparse::{
     CsrFeatures, SparseTieDistances, fit_sparse_euclidean_graph_with_cutoff,
     fit_sparse_feature_graph_with_cutoff, fit_sparse_graph_with_options,
-    rank_sparse_feature_queries,
+    rank_sparse_feature_queries, unique_csr_rows,
 };
 use umap_core::transform::{
     CooGraph, DenseEmbeddingTransformConfig, transform_dense_embedding_with_options,
@@ -45,6 +45,7 @@ use umap_core::transform::{
 use umap_core::update::{DenseUpdateConfig, DenseUpdateError, update_dense_embedding};
 
 type CsrComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
+type RowGroups = (Vec<usize>, Vec<usize>, Vec<usize>);
 type CooComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
 type EmbeddingComponents = (CsrComponents, (usize, usize), Vec<f32>);
 type RngState = (Vec<u32>, usize);
@@ -989,6 +990,15 @@ fn csr_features((shape, indptr, indices, data): &CsrComponents) -> CsrFeatures<'
     }
 }
 
+/// Group canonical feature rows in the public sparse unique order.
+#[pyfunction]
+fn _unique_csr_rows(py: Python<'_>, matrix: CsrComponents) -> PyResult<RowGroups> {
+    let groups = py
+        .detach(|| unique_csr_rows(csr_features(&matrix)))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok((groups.first, groups.inverse, groups.counts))
+}
+
 /// Return only the selected query columns and distances from canonical CSR.
 #[pyfunction]
 fn _rank_sparse_feature_queries(
@@ -1158,7 +1168,7 @@ fn _transform_dense_embedding(
     training, fitted_embedding, queries, simplices, query_simplices, *,
     n_features, n_components, k, a, b, learning_rate, fit_epochs,
     repulsion_strength, negative_sample_rate, transform_seed, local_connectivity,
-    use_computed_scales=true, metric="euclidean", cutoff=None, fitted_distances=None
+    use_computed_scales=true, metric="euclidean", cutoff=None, fitted_distances=None, unique_fit=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn _inverse_transform_dense_embedding(
@@ -1183,6 +1193,7 @@ fn _inverse_transform_dense_embedding(
     metric: &str,
     cutoff: Option<f32>,
     fitted_distances: Option<(Vec<f32>, usize, usize)>,
+    unique_fit: Option<(Vec<f32>, Vec<usize>)>,
 ) -> PyResult<Vec<f32>> {
     let metric = parse_metric(metric)?;
     let options = GraphOptions::new(local_connectivity, 1.0)
@@ -1215,6 +1226,22 @@ fn _inverse_transform_dense_embedding(
         let scales = if needs_scales {
             if let Some((distances, width, target)) = &fitted_distances {
                 fit_inverse_scales_from_ranked_distances(distances, *width, *target, options)?
+            } else if let Some((distinct, inverse)) = &unique_fit {
+                let mut fitted = fit_dense_inverse_scales_with_metric(
+                    distinct, n_features, k, metric, cutoff, options,
+                )?;
+                if training.len().checked_div(n_features) != Some(inverse.len())
+                    || inverse.len() < fitted.len()
+                    || inverse.iter().any(|&row| row >= fitted.len())
+                {
+                    return Err(DenseInverseError::LocalScales);
+                }
+                // The reference indexes the fitted scales in distinct-row order.
+                // Original rows past that prefix use the scale of their representative.
+                for &row in &inverse[fitted.len()..] {
+                    fitted.push(fitted[row]);
+                }
+                fitted
             } else {
                 fit_dense_inverse_scales_with_metric(
                     &training, n_features, k, metric, cutoff, options,
@@ -1232,6 +1259,7 @@ fn _inverse_transform_dense_embedding(
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", umap_core::VERSION)?;
+    module.add_function(wrap_pyfunction!(_unique_csr_rows, module)?)?;
     module.add_function(wrap_pyfunction!(_combine_fuzzy_graphs, module)?)?;
     module.add_function(wrap_pyfunction!(_optimize_aligned_layout, module)?)?;
     module.add_function(wrap_pyfunction!(_prepare_parametric_edges, module)?)?;

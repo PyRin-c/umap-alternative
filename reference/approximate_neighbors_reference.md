@@ -133,13 +133,14 @@ fractional connectivity, ties at `k=2`, an all-missing row, and a width greater
 than the training row count. The existing exact transform uses the same
 membership stage after selecting exhaustive ranks.
 
-The next native search stage can feed its training ranks to
+Native search feeds its training ranks to
 `fit_supplied_neighbors_graph` and held-out ranks to
 `transform_ranked_neighbors_graph`. The paired fingerprints let it check
 training support before investigating weight arithmetic. The held-out COO
 and exhaustive rank residuals distinguish a different candidate set from a
-tie-order change or a weight difference. Candidate generation, build/query
-index behavior and routing in the estimator remain open.
+tie-order change or a weight difference. The
+[native approximate stage](approximate_search_native_reference.md) records
+the candidate controls and compares a standalone Rust index to these fixtures.
 
 ## Reproduce
 

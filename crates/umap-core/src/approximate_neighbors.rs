@@ -1,0 +1,567 @@
+//! Seeded dense approximate ranks for the training and held-out graph handoffs.
+//!
+//! The projection trees, tie breaks, and query walk are native choices. The
+//! supplied-seed entry point also allows refinement to be measured independently
+//! of tree construction. Exhaustive search remains available through `neighbors`.
+
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+use std::fmt;
+
+use crate::neighbors::{DistanceMetric, KnnError, Neighbor};
+use crate::rng::Mt19937;
+
+const SMALL_DATA_LIMIT: usize = 4096;
+const MAX_CANDIDATES: usize = 60;
+
+/// Observed dense feature routing after any deduplication.
+///
+/// The caller handles singletons and any fallback from supplied neighbors before
+/// using this predicate. The exact and approximate search APIs remain separate.
+pub fn use_approximate_search(n_distinct_rows: usize, force: bool) -> bool {
+    n_distinct_rows > 1 && (force || n_distinct_rows >= SMALL_DATA_LIMIT)
+}
+
+/// Flat distance-ranked rows for the graph handoffs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RankedNeighbors {
+    /// Number of slots per row, including missing ranks.
+    pub width: usize,
+    /// Training indices in rank order. Missing ranks contain `-1`.
+    pub indices: Vec<i32>,
+    /// Distances in rank order. Missing ranks contain positive infinity.
+    pub distances: Vec<f32>,
+}
+
+/// Errors from dense approximate search or refinement.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ApproximateSearchError {
+    /// Matrix shape or value validation failed.
+    Matrix(KnnError),
+    /// The index requires at least two training rows and one feature, with
+    /// row indices representable as `i32`.
+    Dimensions,
+    /// Rank width is invalid, storage would overflow, or the seeds have the wrong size.
+    RankShape,
+    /// A supplied seed is neither a valid training index nor the missing marker.
+    InvalidSeed { position: usize, index: i32 },
+    /// The metric returned a non-finite distance for a ranked candidate.
+    NonFiniteDistance { row: usize, candidate: usize },
+}
+
+impl fmt::Display for ApproximateSearchError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Matrix(error) => error.fmt(formatter),
+            Self::Dimensions => write!(formatter, "invalid approximate index dimensions"),
+            Self::RankShape => write!(formatter, "invalid approximate rank buffer shape"),
+            Self::InvalidSeed { position, index } => {
+                write!(
+                    formatter,
+                    "invalid seed index {index} at position {position}"
+                )
+            }
+            Self::NonFiniteDistance { row, candidate } => {
+                write!(
+                    formatter,
+                    "non-finite distance from row {row} to candidate {candidate}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ApproximateSearchError {}
+
+/// A dense index with a bounded candidate build and graph-guided queries.
+///
+/// Fitting ranks are built from co-membership in seeded projection-tree leaves,
+/// random fill for undersized rows, and forward/reverse neighbor refinement.
+/// Queries descend a retained tree and walk the refined graph. The caller
+/// selects exhaustive search explicitly.
+pub struct DenseApproximateIndex<'a> {
+    data: DenseRows<'a>,
+    metric: DistanceMetric,
+    seed: u32,
+    fit_ranks: RankedNeighbors,
+    edges: Vec<Vec<usize>>,
+    tree: Tree,
+}
+
+impl<'a> DenseApproximateIndex<'a> {
+    /// Build using a caller-selected seed for the projection pivots and random fill.
+    ///
+    /// Training retains at most `min(width, n_rows - 1)` ranks, including self
+    /// as a candidate. The public training handoff uses the requested width as
+    /// its scale target. The same width is available for held-out ranks.
+    pub fn build(
+        data: &'a [f32],
+        n_rows: usize,
+        n_features: usize,
+        width: usize,
+        metric: DistanceMetric,
+        seed: u32,
+    ) -> Result<Self, ApproximateSearchError> {
+        let data = DenseRows::training(data, n_rows, n_features)?;
+        if width < 2 {
+            return Err(ApproximateSearchError::RankShape);
+        }
+        let mut fit_ranks = RankedNeighbors::with_capacity(n_rows, width)?;
+        let k = width.min(n_rows - 1);
+        let tree_count = 5 + ((n_rows as f64).sqrt() / 20.0).round() as usize;
+        let rounds = (((n_rows as f64).log2()).round() as usize).max(5);
+        let leaf_size = 10.max(k);
+        let mut rng = Mt19937::new(seed);
+        let mut ranks: Vec<_> = (0..n_rows)
+            .map(|index| {
+                vec![Neighbor {
+                    index,
+                    distance: 0.0,
+                }]
+            })
+            .collect();
+        let mut trees = (0..tree_count.min(64))
+            .map(|_| Tree::build(data, metric, (0..n_rows).collect(), leaf_size, &mut rng));
+        let tree = trees.next().expect("positive tree count");
+        tree.seed(data, metric, &mut ranks, k)?;
+        for other in trees {
+            other.seed(data, metric, &mut ranks, k)?;
+        }
+        for (row, retained) in ranks.iter_mut().enumerate() {
+            if retained.len() < k {
+                for candidate in sample_rows(n_rows, &mut rng) {
+                    let distance = data.distance(metric, row, candidate)?;
+                    offer(retained, candidate, distance, k);
+                    if retained.len() == k {
+                        break;
+                    }
+                }
+            }
+        }
+        refine(data, metric, &mut ranks, k, rounds)?;
+        let edges = incident(&ranks);
+        for rank in ranks {
+            fit_ranks.extend(&rank);
+        }
+        Ok(Self {
+            data,
+            metric,
+            seed,
+            fit_ranks,
+            edges,
+            tree,
+        })
+    }
+
+    /// Requested-width arrays for `fit_supplied_neighbors_graph`.
+    pub fn training_ranks(&self) -> &RankedNeighbors {
+        &self.fit_ranks
+    }
+
+    /// Effective fitted count for `transform_ranked_neighbors_graph`.
+    pub fn query_scale_neighbors(&self) -> usize {
+        self.fit_ranks.width.min(self.data.n_rows - 1)
+    }
+
+    /// Search each query independently, returning the requested width.
+    ///
+    /// Epsilon is 0.24 for the angular metrics and 0.12 otherwise. A candidate
+    /// can enter the walk while it is within `(1 + epsilon)` times the worst
+    /// retained distance. Missing slots have the graph handoff's sentinel pair.
+    pub fn query(
+        &self,
+        queries: &[f32],
+        n_query_rows: usize,
+    ) -> Result<RankedNeighbors, ApproximateSearchError> {
+        let queries = DenseRows::new(queries, n_query_rows, self.data.n_features)?;
+        let mut result = RankedNeighbors::with_capacity(n_query_rows, self.fit_ranks.width)?;
+        let k = self.fit_ranks.width.min(self.data.n_rows);
+        let factor = if self.metric.is_angular() { 1.24 } else { 1.12 };
+        let mut visited = vec![usize::MAX; self.data.n_rows];
+        for (row, query) in queries.data.chunks_exact(queries.n_features).enumerate() {
+            let mut best = Vec::with_capacity(k);
+            let mut frontier = BinaryHeap::new();
+            let mut visit =
+                |index: usize, best: &mut Vec<Neighbor>, frontier: &mut BinaryHeap<_>| {
+                    if visited[index] != row {
+                        visited[index] = row;
+                        let distance =
+                            checked_distance(self.metric, query, self.data.row(index), row, index)?;
+                        if distance <= bound(best, k, factor) {
+                            frontier.push(Reverse((distance.to_bits(), index)));
+                            offer(best, index, distance, k);
+                        }
+                    }
+                    Ok(())
+                };
+            for &index in self.tree.leaf(self.data, self.metric, query) {
+                visit(index, &mut best, &mut frontier)?;
+            }
+            // Small leaves can need additional entry points.
+            if best.len() < k {
+                let mut rng = Mt19937::new(self.seed);
+                for candidate in sample_rows(self.data.n_rows, &mut rng) {
+                    visit(candidate, &mut best, &mut frontier)?;
+                    if best.len() == k {
+                        break;
+                    }
+                }
+            }
+            while let Some(Reverse((distance, index))) = frontier.pop() {
+                if f32::from_bits(distance) > bound(&best, k, factor) {
+                    break;
+                }
+                for &candidate in &self.edges[index] {
+                    visit(candidate, &mut best, &mut frontier)?;
+                }
+            }
+            result.extend(&best);
+        }
+        Ok(result)
+    }
+}
+
+/// Isolate refinement from seed generation using supplied row-major indices.
+///
+/// Duplicate seeds coalesce. `-1` marks an empty rank. Self is considered
+/// during seeding, and distinct co-candidates around a row offer new edges to
+/// each other. A round joins fresh incident neighbors against one another and
+/// against the candidates from the previous round, including evicted neighbors.
+pub fn refine_training_neighbors(
+    data: &[f32],
+    n_rows: usize,
+    n_features: usize,
+    width: usize,
+    metric: DistanceMetric,
+    seed_indices: &[i32],
+    rounds: usize,
+) -> Result<RankedNeighbors, ApproximateSearchError> {
+    let data = DenseRows::training(data, n_rows, n_features)?;
+    if !(1..=n_rows).contains(&width) || n_rows.checked_mul(width) != Some(seed_indices.len()) {
+        return Err(ApproximateSearchError::RankShape);
+    }
+    let mut ranks = vec![Vec::new(); n_rows];
+    for (row, seeds) in seed_indices.chunks_exact(width).enumerate() {
+        offer(&mut ranks[row], row, 0.0, width);
+        for (offset, &index) in seeds.iter().enumerate() {
+            if index == -1 {
+                continue;
+            }
+            if index < 0 || index as usize >= n_rows {
+                return Err(ApproximateSearchError::InvalidSeed {
+                    position: row * width + offset,
+                    index,
+                });
+            }
+            let column = index as usize;
+            offer(
+                &mut ranks[row],
+                column,
+                data.distance(metric, row, column)?,
+                width,
+            );
+        }
+    }
+    refine(data, metric, &mut ranks, width, rounds)?;
+    let mut result = RankedNeighbors::with_capacity(n_rows, width)?;
+    for row in ranks {
+        result.extend(&row);
+    }
+    Ok(result)
+}
+
+#[derive(Clone, Copy)]
+struct DenseRows<'a> {
+    data: &'a [f32],
+    n_rows: usize,
+    n_features: usize,
+}
+
+impl<'a> DenseRows<'a> {
+    fn training(
+        data: &'a [f32],
+        n_rows: usize,
+        n_features: usize,
+    ) -> Result<Self, ApproximateSearchError> {
+        if n_rows < 2 || n_rows > i32::MAX as usize || n_features == 0 {
+            return Err(ApproximateSearchError::Dimensions);
+        }
+        Self::new(data, n_rows, n_features)
+    }
+
+    fn new(
+        data: &'a [f32],
+        n_rows: usize,
+        n_features: usize,
+    ) -> Result<Self, ApproximateSearchError> {
+        if n_rows.checked_mul(n_features) != Some(data.len()) {
+            return Err(ApproximateSearchError::Matrix(KnnError::InvalidShape {
+                n_rows,
+                n_features,
+                values: data.len(),
+            }));
+        }
+        if let Some((index, &value)) = data
+            .iter()
+            .enumerate()
+            .find(|(_, value)| !value.is_finite())
+        {
+            return Err(ApproximateSearchError::Matrix(KnnError::NonFiniteValue {
+                index,
+                value,
+            }));
+        }
+        Ok(Self {
+            data,
+            n_rows,
+            n_features,
+        })
+    }
+
+    fn row(self, index: usize) -> &'a [f32] {
+        let start = index * self.n_features;
+        &self.data[start..start + self.n_features]
+    }
+
+    fn distance(
+        self,
+        metric: DistanceMetric,
+        row: usize,
+        candidate: usize,
+    ) -> Result<f32, ApproximateSearchError> {
+        if row == candidate {
+            return Ok(0.0);
+        }
+        checked_distance(metric, self.row(row), self.row(candidate), row, candidate)
+    }
+}
+
+fn checked_distance(
+    metric: DistanceMetric,
+    left: &[f32],
+    right: &[f32],
+    row: usize,
+    candidate: usize,
+) -> Result<f32, ApproximateSearchError> {
+    let distance = metric.distance(left, right);
+    if !distance.is_finite() {
+        return Err(ApproximateSearchError::NonFiniteDistance { row, candidate });
+    }
+    Ok(if distance > 0.0 { distance } else { 0.0 })
+}
+
+impl RankedNeighbors {
+    fn with_capacity(rows: usize, width: usize) -> Result<Self, ApproximateSearchError> {
+        let slots = rows
+            .checked_mul(width)
+            .ok_or(ApproximateSearchError::RankShape)?;
+        let mut indices = Vec::new();
+        let mut distances = Vec::new();
+        indices
+            .try_reserve_exact(slots)
+            .map_err(|_| ApproximateSearchError::RankShape)?;
+        distances
+            .try_reserve_exact(slots)
+            .map_err(|_| ApproximateSearchError::RankShape)?;
+        Ok(Self {
+            width,
+            indices,
+            distances,
+        })
+    }
+
+    fn extend(&mut self, row: &[Neighbor]) {
+        self.indices
+            .extend(row.iter().map(|neighbor| neighbor.index as i32));
+        self.distances
+            .extend(row.iter().map(|neighbor| neighbor.distance));
+        self.indices
+            .extend(std::iter::repeat_n(-1, self.width - row.len()));
+        self.distances
+            .extend(std::iter::repeat_n(f32::INFINITY, self.width - row.len()));
+    }
+}
+
+fn bound(best: &[Neighbor], k: usize, factor: f32) -> f32 {
+    if best.len() < k {
+        f32::INFINITY
+    } else {
+        best[k - 1].distance * factor
+    }
+}
+
+fn offer(row: &mut Vec<Neighbor>, index: usize, distance: f32, k: usize) -> bool {
+    if (row.len() == k && distance >= row[k - 1].distance)
+        || row.iter().any(|neighbor| neighbor.index == index)
+    {
+        return false;
+    }
+    let position = row.partition_point(|neighbor| neighbor.distance <= distance);
+    if row.len() == k {
+        row.pop();
+    }
+    row.insert(position, Neighbor { index, distance });
+    true
+}
+
+fn incident(ranks: &[Vec<Neighbor>]) -> Vec<Vec<usize>> {
+    let mut edges = vec![Vec::new(); ranks.len()];
+    for (row, neighbors) in ranks.iter().enumerate() {
+        for neighbor in neighbors {
+            if row != neighbor.index {
+                edges[row].push(neighbor.index);
+                edges[neighbor.index].push(row);
+            }
+        }
+    }
+    for edge in &mut edges {
+        edge.sort_unstable();
+        edge.dedup();
+    }
+    edges
+}
+
+fn refine(
+    data: DenseRows<'_>,
+    metric: DistanceMetric,
+    ranks: &mut [Vec<Neighbor>],
+    k: usize,
+    rounds: usize,
+) -> Result<(), ApproximateSearchError> {
+    let mut previous = vec![Vec::new(); ranks.len()];
+    for _ in 0..rounds {
+        let mut candidates = incident(ranks);
+        let mut changed = false;
+        let mut new = Vec::new();
+        for (neighbors, old) in candidates.iter_mut().zip(&previous) {
+            neighbors.truncate(MAX_CANDIDATES);
+            new.clear();
+            new.extend(
+                neighbors
+                    .iter()
+                    .copied()
+                    .filter(|index| old.binary_search(index).is_err()),
+            );
+            for (position, &left) in new.iter().enumerate() {
+                for &right in new[position + 1..].iter().chain(old) {
+                    let distance = data.distance(metric, left, right)?;
+                    changed |= offer(&mut ranks[left], right, distance, k);
+                    changed |= offer(&mut ranks[right], left, distance, k);
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+        previous = candidates;
+    }
+    Ok(())
+}
+
+fn draw(rng: &mut Mt19937, upper: usize) -> usize {
+    ((u64::from(rng.next_u32()) * upper as u64) >> 32) as usize
+}
+
+// Partial Fisher-Yates sampling visits each index at most once.
+fn sample_rows(n_rows: usize, rng: &mut Mt19937) -> impl Iterator<Item = usize> + '_ {
+    let mut rows: Vec<_> = (0..n_rows).collect();
+    (0..n_rows).map(move |position| {
+        let pivot = position + draw(rng, n_rows - position);
+        rows.swap(position, pivot);
+        rows[position]
+    })
+}
+
+enum Tree {
+    Leaf(Vec<usize>),
+    Split {
+        a: usize,
+        b: usize,
+        left: Box<Tree>,
+        right: Box<Tree>,
+    },
+    Balanced {
+        left: Box<Tree>,
+        right: Box<Tree>,
+    },
+}
+
+impl Tree {
+    fn build(
+        data: DenseRows<'_>,
+        metric: DistanceMetric,
+        mut rows: Vec<usize>,
+        leaf_size: usize,
+        rng: &mut Mt19937,
+    ) -> Self {
+        if rows.len() <= leaf_size {
+            return Self::Leaf(rows);
+        }
+        let first = draw(rng, rows.len());
+        let second = draw(rng, rows.len() - 1);
+        let (a, b) = (rows[first], rows[second + usize::from(second >= first)]);
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for &index in &rows {
+            let da = metric.distance(data.row(index), data.row(a));
+            let db = metric.distance(data.row(index), data.row(b));
+            match da.total_cmp(&db) {
+                std::cmp::Ordering::Less => left.push(index),
+                std::cmp::Ordering::Greater => right.push(index),
+                std::cmp::Ordering::Equal if draw(rng, 2) == 0 => left.push(index),
+                std::cmp::Ordering::Equal => right.push(index),
+            }
+        }
+        // Keep tree depth bounded for skewed and degenerate projections.
+        if left.len().min(right.len()) < rows.len().div_ceil(16) {
+            let right = rows.split_off(rows.len() / 2);
+            return Self::Balanced {
+                left: Box::new(Self::build(data, metric, rows, leaf_size, rng)),
+                right: Box::new(Self::build(data, metric, right, leaf_size, rng)),
+            };
+        }
+        Self::Split {
+            a,
+            b,
+            left: Box::new(Self::build(data, metric, left, leaf_size, rng)),
+            right: Box::new(Self::build(data, metric, right, leaf_size, rng)),
+        }
+    }
+
+    fn seed(
+        &self,
+        data: DenseRows<'_>,
+        metric: DistanceMetric,
+        ranks: &mut [Vec<Neighbor>],
+        k: usize,
+    ) -> Result<(), ApproximateSearchError> {
+        match self {
+            Self::Leaf(rows) => {
+                for (position, &left) in rows.iter().enumerate() {
+                    for &right in &rows[position..] {
+                        let distance = data.distance(metric, left, right)?;
+                        offer(&mut ranks[left], right, distance, k);
+                        offer(&mut ranks[right], left, distance, k);
+                    }
+                }
+            }
+            Self::Split { left, right, .. } | Self::Balanced { left, right } => {
+                left.seed(data, metric, ranks, k)?;
+                right.seed(data, metric, ranks, k)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn leaf(&self, data: DenseRows<'_>, metric: DistanceMetric, query: &[f32]) -> &[usize] {
+        match self {
+            Self::Leaf(rows) => rows,
+            Self::Balanced { left, .. } => left.leaf(data, metric, query),
+            Self::Split { a, b, left, right } => {
+                let da = metric.distance(query, data.row(*a));
+                let db = metric.distance(query, data.row(*b));
+                if da <= db { left } else { right }.leaf(data, metric, query)
+            }
+        }
+    }
+}

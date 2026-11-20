@@ -1,6 +1,7 @@
 //! Core crate for the independent Rust implementation of UMAP.
 
 pub mod aligned;
+pub mod approximate_neighbors;
 pub mod density;
 pub mod densmap;
 pub mod embedding;

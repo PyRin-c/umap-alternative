@@ -1,4 +1,4 @@
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
@@ -11,6 +11,10 @@ use umap_core::fit::{
     fit_precomputed_graph_with_options, fit_supplied_neighbors_graph,
 };
 use umap_core::fuzzy_graph::{CsrGraph, GraphOptions};
+use umap_core::inverse::{
+    DenseInverseInput, DenseInverseLayout, InverseTriangulation, dense_inverse_epochs,
+    fit_dense_inverse_scales_with_options, inverse_transform_dense,
+};
 use umap_core::neighbors::DistanceMetric;
 use umap_core::rng::Mt19937;
 use umap_core::sparse::{SparseDistanceMetric, fit_sparse_graph_with_options};
@@ -381,6 +385,72 @@ fn _transform_dense_embedding(
     .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+/// Reconstruct features using the fitted data and the query locations in its layout.
+#[pyfunction]
+#[pyo3(signature = (
+    training, fitted_embedding, queries, simplices, query_simplices, *,
+    n_features, n_components, k, a, b, learning_rate, fit_epochs,
+    repulsion_strength, negative_sample_rate, transform_seed, local_connectivity,
+    use_computed_scales=true
+))]
+#[allow(clippy::too_many_arguments)]
+fn _inverse_transform_dense_embedding(
+    py: Python<'_>,
+    training: Vec<f32>,
+    fitted_embedding: Vec<f32>,
+    queries: Vec<f32>,
+    simplices: Vec<usize>,
+    query_simplices: Vec<Option<usize>>,
+    n_features: usize,
+    n_components: usize,
+    k: usize,
+    a: f64,
+    b: f64,
+    learning_rate: f64,
+    fit_epochs: Option<usize>,
+    repulsion_strength: f64,
+    negative_sample_rate: f64,
+    transform_seed: u32,
+    local_connectivity: f64,
+    use_computed_scales: bool,
+) -> PyResult<Vec<f32>> {
+    let options = GraphOptions::new(local_connectivity, 1.0)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let layout = DenseInverseLayout {
+        n_epochs: dense_inverse_epochs(fit_epochs, query_simplices.len()),
+        initial_alpha: learning_rate / 4.0,
+        repulsion_strength,
+        negative_sample_rate,
+        seed: transform_seed,
+    };
+    let needs_scales = layout.n_epochs > 1 && layout.initial_alpha != 0.0;
+    if needs_scales && !use_computed_scales {
+        return Err(PyNotImplementedError::new_err(
+            "Inverse optimization with supplied neighbors or a finite cutoff requires fitted neighbor scales.",
+        ));
+    }
+    let input = DenseInverseInput {
+        training: &training,
+        embedding: &fitted_embedding,
+        queries: &queries,
+        n_features,
+        n_components,
+        triangulation: InverseTriangulation {
+            simplices: &simplices,
+            query_simplices: &query_simplices,
+        },
+    };
+    py.detach(|| {
+        let scales = if needs_scales {
+            fit_dense_inverse_scales_with_options(&training, n_features, k, options)?
+        } else {
+            Vec::new()
+        };
+        inverse_transform_dense(&input, &scales, a, b, layout).map(|result| result.coordinates)
+    })
+    .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", umap_core::VERSION)?;
@@ -392,5 +462,9 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_fit_precomputed_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_supplied_neighbors_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_transform_dense_graph, module)?)?;
-    module.add_function(wrap_pyfunction!(_transform_dense_embedding, module)?)
+    module.add_function(wrap_pyfunction!(_transform_dense_embedding, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        _inverse_transform_dense_embedding,
+        module
+    )?)
 }

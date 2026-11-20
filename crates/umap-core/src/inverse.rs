@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::fuzzy_graph::{batch_scale_floor, row_parameters};
+use crate::fuzzy_graph::{GraphOptions, batch_scale_floor, row_parameters};
 use crate::layout::{LayoutError, validate_parameters, validate_repulsion_strength};
 use crate::neighbors::{KnnError, euclidean_distance_wide, exhaustive_knn};
 use crate::rng::{Mt19937, draw_negative_seed, sample_vertex};
@@ -144,6 +144,21 @@ pub fn fit_dense_inverse_scales(
     n_features: usize,
     n_neighbors: usize,
 ) -> Result<Vec<InverseLocalScale>, DenseInverseError> {
+    fit_dense_inverse_scales_with_options(
+        training,
+        n_features,
+        n_neighbors,
+        GraphOptions::default(),
+    )
+}
+
+/// Fit inverse metric scales using the fitted local connectivity.
+pub fn fit_dense_inverse_scales_with_options(
+    training: &[f32],
+    n_features: usize,
+    n_neighbors: usize,
+    options: GraphOptions,
+) -> Result<Vec<InverseLocalScale>, DenseInverseError> {
     let n_rows = matrix_rows(training, n_features).ok_or(DenseInverseError::Training)?;
     let neighbors = exhaustive_knn(training, n_rows, n_features, n_neighbors)
         .map_err(DenseInverseError::Neighbors)?;
@@ -159,7 +174,7 @@ pub fn fit_dense_inverse_scales(
     Ok(distances
         .chunks_exact(n_neighbors)
         .map(|row| {
-            let (rho, sigma) = row_parameters(row, 1.0, batch_floor);
+            let (rho, sigma) = row_parameters(row, options.local_connectivity(), batch_floor);
             InverseLocalScale { rho, sigma }
         })
         .collect())

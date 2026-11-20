@@ -35,7 +35,9 @@ Wheel は `target/wheels/` に生成されます。Python パッケージ名は 
 
 密な新しい入力の `transform` は、学習時の座標を固定したまま `float32` の座標を返します。`transform_seed` は学習の `random_state` とは独立した整数シードで、既定値は `42` です。明示した `n_epochs` の 3 分の 1 を切り捨てた回数で最適化し、`None` の場合は入力が 10,000 行以下なら 100 エポック、それより多ければ 30 エポックを使います。検証結果と適用範囲は [埋め込み変換の参照記録](reference/transform_embedding_reference.md) を参照してください。
 
-埋め込みでは教師あり入力、疎行列、事前計算済み距離、Adam と momentum、逆変換は未実装です。固定シードの検証条件と適用範囲は [スペクトル初期化を使った学習の参照記録](reference/spectral_fit_reference.md) と [ランダム初期化と初期座標を指定した学習の参照記録](reference/seeded_fit_reference.md) を参照してください。
+密な Euclidean 特徴量で学習した互換レイアウトでは、`inverse_transform` が埋め込み座標から元の特徴量と同じ列数の `float32` 配列を返します。埋め込みの凸包の外にある点は外挿し、警告を出します。検証結果と適用範囲は [逆変換の参照記録](reference/inverse_transform_reference.md) を参照してください。
+
+埋め込みでは教師あり入力、疎行列、事前計算済み距離、Adam と momentum は未実装です。固定シードの検証条件と適用範囲は [スペクトル初期化を使った学習の参照記録](reference/spectral_fit_reference.md) と [ランダム初期化と初期座標を指定した学習の参照記録](reference/seeded_fit_reference.md) を参照してください。
 
 `UMAP(transform_mode="graph").fit(X)` と `fit_transform(X)` は、Euclidean、Manhattan、Chebyshev、cosine の教師なし学習で SciPy の CSR、CSC、COO 形式の疎な特徴量を受け取ります。入力を変更せずに CSR に変換し、`float32` の CSR グラフを作ります。Cosine は圧縮形式の行に格納された重複要素を保持して距離を計算します。距離ゼロの同順位により自分自身が近傍から外れる場合は `ValueError` になります。疎行列での事前計算済み距離と変換は未実装です。形式ごとの検証結果は [疎グラフの参照記録](reference/sparse_graph_reference.md) を参照してください。
 

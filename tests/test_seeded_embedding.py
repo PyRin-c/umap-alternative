@@ -222,12 +222,13 @@ def test_refit_state_is_committed_after_validation_and_tracks_mode():
     assert model.transform(WEIGHTED.astype(np.float64)) is original_embedding
 
     assert model.transform(WEIGHTED[1:]).shape == original_embedding[1:].shape
-    with pytest.raises(NotImplementedError, match="inverse_transform"):
-        model.inverse_transform(original_embedding)
+    assert model.inverse_transform(original_embedding).shape == WEIGHTED.shape
 
     assert model.set_params(transform_mode="graph").fit(WEIGHTED) is model
     assert model.transform(WEIGHTED.copy()) is model.graph_
     assert not hasattr(model, "embedding_")
+    with pytest.raises(ValueError, match="Inverse transform not available for transform_mode"):
+        model.inverse_transform(original_embedding)
 
     changed = WEIGHTED[::-1, :2]
     assert model.set_params(transform_mode="embedding").fit(changed) is model

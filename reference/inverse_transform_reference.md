@@ -72,13 +72,29 @@ this repository. [Original transform checkpoints](transform_reference.md)
 | Exterior query whose squared distances overflow | The wheel warned and returned zero feature coordinates at zero epochs |
 | Before fitting | `AttributeError` |
 
-The Rust module covers dense Euclidean data with externally supplied geometry.
-Open work includes Python estimator wiring, the arithmetic of other input and
-output metrics, high-dimensional exterior reductions, and positive updates
-after every membership for a query rounds to zero. The Rust implementation
-keeps candidate discovery order on equal distances. The larger circle and
-duplicate-grid probes exercise the different equal-key order of the wheel's
-sorting path.
+## Python estimator
+
+`UMAP.inverse_transform` supports dense Euclidean compatibility fits with
+an integer transform seed. It reads the current public `embedding_` and
+locates the query batch with SciPy's `Delaunay(..., qhull_options="QJ")`.
+Each call returns a fresh float32 array with the original feature width.
+The original features, effective neighbor count, local connectivity, curve,
+and learning rate come from the fit. The estimator reads `n_epochs`,
+`transform_seed`, `repulsion_strength`, and `negative_sample_rate` at call
+time. A list of epochs can be set after fitting. The seeded Python fit
+accepts scalar epoch settings.
+
+Graph fits, sparse training, and other metrics are unavailable for inverse
+transformation. The supported fit uses exhaustive feature-space neighbors.
+Approximate and supplied-neighbor inverse fits are outside this scope.
+
+The Rust implementation keeps candidate discovery order on equal distances.
+The larger circle and duplicate-grid probes exercise the different equal-key
+order of the wheel's sorting path. High-dimensional exterior reductions can
+also select a different seed. A query whose memberships all round to zero
+returns zero coordinates at initialization and raises `ValueError` when
+optimization is active. For extreme exterior queries, the public wheel also
+emits NumPy's overflow `RuntimeWarning`. The Rust path emits the exterior warning.
 
 ## Verification
 
@@ -96,6 +112,17 @@ The optimized counts include 9/9 coordinates for each of the original
 45-epoch interior and exterior checkpoints. The tied-distance differences
 occur in 4 of 15 cases, where a tie changes which vertices fill the candidate
 quota.
+
+The Python tests replay the locked checkpoints through the estimator and
+also reproduce both original 45-epoch results from a real fit and forward
+transform. Separate public-wheel probes verify the initialization, first
+active epoch, transform seeds 0 and `2**32 - 1`, fractional fitted local
+connectivity, and a distinct fit with a truncated neighbor count. These
+checks pass on fresh wheel installations for Windows and Ubuntu WSL.
+An active inverse optimizer needs the feature-space scales from the original
+fit. For supplied neighbor arrays and finite distance cutoffs, the Python
+adapter currently supports inverse initialization and reports the missing
+fitted scales when an optimizer update is required.
 
 ## Reproduction
 

@@ -9,6 +9,7 @@ import warnings
 import numpy as np
 from scipy.sparse import coo_matrix, csc_matrix, csr_matrix, issparse
 from scipy.sparse.csgraph import connected_components
+from scipy.spatial import Delaunay
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.metrics import pairwise_distances
 from sklearn.utils.validation import check_array
@@ -52,6 +53,10 @@ _NO_SEARCH_INDEX = (
     "No search index available: transforming data into an existing embedding is not supported"
 )
 _EXTERNAL_SEARCH_UNAVAILABLE = "transform with a supplied search index is not implemented"
+_INVERSE_EXTERIOR_WARNING = (
+    "{count} inverse-transform point(s) lie outside the embedding convex hull; "
+    "using nearest-vertex extrapolation."
+)
 _DISCONNECTION_WARNING = (
     "A large number of your vertices were disconnected from the manifold.\n"
     "Disconnection_distance = {cutoff} has removed {removed} edges.\n"
@@ -261,8 +266,10 @@ class UMAP(BaseEstimator, TransformerMixin):
     training layout fixed. ``transform_seed`` (default 42) is an integer in
     ``[0, 2**32 - 1]``, independent of ``random_state``. The normalized fitted
     input returns ``embedding_`` itself. A singleton has a zero embedding and
-    no graph. Supervised embeddings, modern optimizers, and inverse transforms
-    raise explicit errors.
+    no graph. Supervised embeddings and modern optimizers raise explicit errors.
+    For a fitted dense Euclidean embedding, ``inverse_transform`` reconstructs
+    the original features as a new float32 array. It warns when any query
+    requires extrapolation outside the convex hull of the fitted layout.
     """
 
     def __init__(
@@ -575,11 +582,7 @@ class UMAP(BaseEstimator, TransformerMixin):
 
     def _transform_embedding(self, training, queries, metric):
         fitted = self.embedding_
-        seed = self.transform_seed
-        if not isinstance(seed, numbers.Integral):
-            raise ValueError("embedding transform requires transform_seed to be an integer seed")
-        if not 0 <= seed <= 2**32 - 1:
-            raise ValueError("Seed must be between 0 and 2**32 - 1")
+        seed = self._embedding_transform_seed()
         fit_epochs = None if self.n_epochs is None else _validate_epochs(self.n_epochs)
         repulsion, negative_rate = self._sampling_options()
         n_components = fitted.shape[1]
@@ -596,7 +599,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             fit_epochs=fit_epochs,
             repulsion_strength=repulsion,
             negative_sample_rate=negative_rate,
-            transform_seed=int(seed),
+            transform_seed=seed,
             local_connectivity=self.local_connectivity,
             disconnection_distance=getattr(self, "_transform_cutoff", None),
             **self._embedding_transform_options,
@@ -604,13 +607,73 @@ class UMAP(BaseEstimator, TransformerMixin):
         return np.asarray(coordinates, dtype=np.float32).reshape(queries.shape[0], n_components)
 
     def inverse_transform(self, X):
-        """Reject inverse transforms."""
+        """Reconstruct dense Euclidean features from points in the fitted layout."""
 
+        if not hasattr(self, "_graph_transform_fit"):
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '_sparse_data'")
+        transform_fit = self._graph_transform_fit
+        if transform_fit is None:
+            raise ValueError("Inverse transform not available for given metric.")
+        training, metric = transform_fit
+        if issparse(training):
+            raise ValueError("Inverse transform not available for sparse input.")
         if self.transform_mode == "graph":
-            raise NotImplementedError(
-                "inverse_transform is not implemented for the graph-only estimator"
+            raise ValueError("Inverse transform not available for transform_mode = 'graph'")
+        if metric != "euclidean":
+            raise ValueError("Inverse transform not available for given metric.")
+
+        fitted = self.embedding_
+        queries = check_array(X, dtype=np.float32, order="C")
+        n_components = fitted.shape[1]
+        if queries.shape[1] != n_components:
+            raise ValueError(
+                "Inverse transform input must have the same number of dimensions "
+                "as the fitted embedding."
             )
-        raise NotImplementedError("inverse_transform is not implemented")
+        seed = self._embedding_transform_seed()
+        triangulation = Delaunay(fitted, qhull_options="QJ")
+        locations = triangulation.find_simplex(queries)
+        exterior = np.count_nonzero(locations < 0)
+        if exterior:
+            warnings.warn(_INVERSE_EXTERIOR_WARNING.format(count=exterior), UserWarning, stacklevel=2)
+
+        fit_epochs = self.n_epochs
+        if isinstance(fit_epochs, (list, tuple)):
+            fit_epochs = np.max(fit_epochs)
+        if fit_epochs is not None:
+            fit_epochs = _validate_epochs(fit_epochs)
+        repulsion, negative_rate = self._sampling_options()
+        n_features = training.shape[1]
+        use_computed_scales = (
+            getattr(self, "_supplied_transform_error", None) is None
+            and getattr(self, "_transform_cutoff", None) is None
+        )
+        coordinates = _native._inverse_transform_dense_embedding(
+            training.ravel().tolist(),
+            fitted.ravel().tolist(),
+            queries.ravel().tolist(),
+            triangulation.simplices.ravel().tolist(),
+            [None if index < 0 else index for index in locations.tolist()],
+            n_features=n_features,
+            n_components=n_components,
+            k=self.n_neighbors_,
+            fit_epochs=fit_epochs,
+            repulsion_strength=repulsion,
+            negative_sample_rate=negative_rate,
+            transform_seed=seed,
+            local_connectivity=getattr(self, "_inverse_local_connectivity", self.local_connectivity),
+            use_computed_scales=use_computed_scales,
+            **self._embedding_transform_options,
+        )
+        return np.asarray(coordinates, dtype=np.float32).reshape(queries.shape[0], n_features)
+
+    def _embedding_transform_seed(self):
+        seed = self.transform_seed
+        if not isinstance(seed, numbers.Integral):
+            raise ValueError("embedding transform requires transform_seed to be an integer seed")
+        if not 0 <= seed <= 2**32 - 1:
+            raise ValueError("Seed must be between 0 and 2**32 - 1")
+        return int(seed)
 
     def _validate_mode(self):
         if self.transform_mode not in ("graph", "embedding"):
@@ -675,6 +738,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         )
         self._supplied_transform_error = transform_error
         self._transform_cutoff = transform_cutoff
+        self._inverse_local_connectivity = float(self.local_connectivity)
         self._embedding_transform_options = None
         if embedding_options is not None:
             self._embedding_transform_options = {

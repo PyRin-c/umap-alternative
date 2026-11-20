@@ -1,0 +1,28 @@
+[build-system]
+requires = ["maturin==1.16.0"]
+build-backend = "maturin"
+
+[project]
+name = "umap-alternative"
+description = "An independent Rust implementation of UMAP"
+readme = "Readme.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+dynamic = ["version"]
+
+[dependency-groups]
+dev = ["maturin==1.16.0", "pytest"]
+
+[tool.uv.dependency-groups]
+dev = { requires-python = "==3.13.*" }
+
+[tool.maturin]
+bindings = "pyo3"
+manifest-path = "crates/umap-python/Cargo.toml"
+python-source = "python"
+module-name = "umap_alternative._native"
+locked = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

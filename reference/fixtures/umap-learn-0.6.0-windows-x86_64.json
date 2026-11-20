@@ -1,0 +1,113 @@
+{
+  "operation": "UMAP.fit_transform",
+  "environment": {
+    "platform": "Windows",
+    "machine": "AMD64",
+    "python": "CPython 3.13.12",
+    "packages": {
+      "umap-learn": "0.6.0",
+      "numpy": "2.5.5",
+      "scipy": "1.18.1",
+      "scikit-learn": "1.9.1",
+      "numba": "0.68.1",
+      "llvmlite": "0.50.0",
+      "pynndescent": "0.7.0"
+    }
+  },
+  "input": {
+    "dtype": "float32",
+    "values": [
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.5,
+        0.1
+      ],
+      [
+        0.5,
+        0.0,
+        0.2
+      ],
+      [
+        0.5,
+        0.5,
+        0.3
+      ],
+      [
+        2.0,
+        2.0,
+        1.0
+      ],
+      [
+        2.0,
+        2.5,
+        1.1
+      ],
+      [
+        2.5,
+        2.0,
+        1.2
+      ],
+      [
+        2.5,
+        2.5,
+        1.3
+      ]
+    ]
+  },
+  "parameters": {
+    "n_components": 2,
+    "n_neighbors": 3,
+    "n_epochs": 30,
+    "metric": "euclidean",
+    "init": "random",
+    "random_state": 42,
+    "n_jobs": 1,
+    "compatibility_layout": true
+  },
+  "expected": {
+    "dtype": "float32",
+    "shape": [
+      8,
+      2
+    ],
+    "bits_uint32": [
+      [
+        1084002155,
+        1084273716
+      ],
+      [
+        1085120838,
+        1085032369
+      ],
+      [
+        1083086240,
+        1082507610
+      ],
+      [
+        1084154196,
+        1080137720
+      ],
+      [
+        1091923195,
+        1089325926
+      ],
+      [
+        1091335717,
+        1090568536
+      ],
+      [
+        1092536704,
+        1088016805
+      ],
+      [
+        1093084907,
+        1086910053
+      ]
+    ]
+  }
+}

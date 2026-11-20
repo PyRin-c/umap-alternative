@@ -519,7 +519,7 @@ class UMAP(BaseEstimator, TransformerMixin):
     coordinates for this path.
     A singleton has a zero embedding and no graph. Seeded modern Adam and
     momentum layouts accept random or explicit initialization.
-    For a fitted dense Euclidean embedding, ``inverse_transform`` reconstructs
+    For a fitted dense embedding, ``inverse_transform`` reconstructs
     the original features as a new float32 array. It warns when any query
     requires extrapolation outside the convex hull of the fitted layout.
     With ``output_dens=True``, ``fit_transform`` returns the layout and two
@@ -738,6 +738,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         embedding = None
         history = None
         transform_error = None
+        inverse_distances = None
         transform_cutoff = cutoff if angular else None
         removed = 0
         feature_isolated = None
@@ -756,6 +757,11 @@ class UMAP(BaseEstimator, TransformerMixin):
             distances[cut] = np.inf
             removed = np.count_nonzero(cut)
             components = _fit_neighbor_arrays(indices, distances, requested_neighbors, graph_options)
+            if embedding_mode and not (precomputed or sparse):
+                inverse_distances = (
+                    np.array(distances, dtype=np.float32, order="C", copy=True),
+                    requested_neighbors,
+                )
             if precomputed:
                 transform_fit = (X_checked.copy(), metric)
         elif (angular or cutoff < np.inf) and not (precomputed or sparse) and y is None:
@@ -891,6 +897,8 @@ class UMAP(BaseEstimator, TransformerMixin):
             transform_cutoff=transform_cutoff,
             supervised=y is not None,
             exact_fit_input=fitted_input,
+            inverse_cutoff=transform_cutoff,
+            inverse_distances=inverse_distances,
         )
 
     def fit_transform(self, X, y=None, **fit_params):
@@ -1121,7 +1129,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         )
 
     def inverse_transform(self, X):
-        """Reconstruct dense Euclidean features from points in the fitted layout."""
+        """Reconstruct dense features from points in the fitted layout."""
 
         if not hasattr(self, "_graph_transform_fit"):
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '_sparse_data'")
@@ -1135,9 +1143,6 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise ValueError("Inverse transform not available for sparse input.")
         if self.transform_mode == "graph":
             raise ValueError("Inverse transform not available for transform_mode = 'graph'")
-        if metric != "euclidean":
-            raise ValueError("Inverse transform not available for given metric.")
-
         fitted = self.embedding_
         queries = check_array(X, dtype=np.float32, order="C")
         n_components = fitted.shape[1]
@@ -1160,10 +1165,12 @@ class UMAP(BaseEstimator, TransformerMixin):
             fit_epochs = _validate_epochs(fit_epochs)
         repulsion, negative_rate = self._sampling_options()
         n_features = training.shape[1]
-        use_computed_scales = (
-            getattr(self, "_supplied_transform_error", None) is None
-            and getattr(self, "_transform_cutoff", None) is None
-        )
+        uses_supplied = getattr(self, "_supplied_transform_error", None) is not None
+        saved_distances = getattr(self, "_inverse_distances", None)
+        distances = None
+        if saved_distances is not None:
+            values, target = saved_distances
+            distances = (values.ravel().tolist(), values.shape[1], target)
         coordinates = _native._inverse_transform_dense_embedding(
             training.ravel().tolist(),
             fitted.ravel().tolist(),
@@ -1178,7 +1185,10 @@ class UMAP(BaseEstimator, TransformerMixin):
             negative_sample_rate=negative_rate,
             transform_seed=seed,
             local_connectivity=getattr(self, "_inverse_local_connectivity", self.local_connectivity),
-            use_computed_scales=use_computed_scales,
+            use_computed_scales=not uses_supplied,
+            metric=metric,
+            cutoff=getattr(self, "_inverse_cutoff", self._transform_cutoff),
+            fitted_distances=distances,
             **self._embedding_transform_options,
         )
         return np.asarray(coordinates, dtype=np.float32).reshape(queries.shape[0], n_features)
@@ -1236,7 +1246,7 @@ class UMAP(BaseEstimator, TransformerMixin):
     def _store_fit(
         self, n_features, transform_fit, graph, n_neighbors, embedding, *,
         embedding_options=None, transform_error=None, transform_cutoff=None, supervised=False,
-        exact_fit_input=None,
+        exact_fit_input=None, inverse_cutoff=None, inverse_distances=None,
     ):
         if graph is not None:
             self.graph_ = graph
@@ -1259,6 +1269,8 @@ class UMAP(BaseEstimator, TransformerMixin):
         self._supervised_fit = supervised
         self._transform_cutoff = transform_cutoff
         self._inverse_local_connectivity = float(self.local_connectivity)
+        self._inverse_cutoff = inverse_cutoff
+        self._inverse_distances = inverse_distances
         self._embedding_transform_options = None
         if embedding_options is not None:
             self._embedding_transform_options = {

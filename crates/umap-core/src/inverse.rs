@@ -2,9 +2,13 @@
 
 use std::fmt;
 
+use crate::fuzzy_graph::supplied_neighbors::ranked_scales;
 use crate::fuzzy_graph::{GraphOptions, batch_scale_floor, row_parameters};
 use crate::layout::{LayoutError, validate_parameters, validate_repulsion_strength};
-use crate::neighbors::{KnnError, euclidean_distance_wide, exhaustive_knn};
+use crate::neighbors::{
+    DistanceMetric, KnnError, correlation_products, cosine_products, euclidean_distance_wide,
+    exhaustive_knn_with_metric,
+};
 use crate::rng::{Mt19937, draw_negative_seed, sample_vertex};
 use crate::sampling::{EdgeSamplingCursor, SamplingError};
 
@@ -33,7 +37,7 @@ pub struct DenseInverseInput<'a> {
     pub triangulation: InverseTriangulation<'a>,
 }
 
-/// Original Euclidean metric scale at a training row.
+/// Original metric scale at a training row.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InverseLocalScale {
     /// Local offset in feature space.
@@ -159,14 +163,47 @@ pub fn fit_dense_inverse_scales_with_options(
     n_neighbors: usize,
     options: GraphOptions,
 ) -> Result<Vec<InverseLocalScale>, DenseInverseError> {
+    fit_dense_inverse_scales_with_metric(
+        training,
+        n_features,
+        n_neighbors,
+        DistanceMetric::Euclidean,
+        None,
+        options,
+    )
+}
+
+/// Fit inverse scales with the original feature metric and optional inclusive cutoff.
+pub fn fit_dense_inverse_scales_with_metric(
+    training: &[f32],
+    n_features: usize,
+    n_neighbors: usize,
+    metric: DistanceMetric,
+    cutoff: Option<f32>,
+    options: GraphOptions,
+) -> Result<Vec<InverseLocalScale>, DenseInverseError> {
     let n_rows = matrix_rows(training, n_features).ok_or(DenseInverseError::Training)?;
-    let neighbors = exhaustive_knn(training, n_rows, n_features, n_neighbors)
+    let neighbors = exhaustive_knn_with_metric(training, n_rows, n_features, n_neighbors, metric)
         .map_err(DenseInverseError::Neighbors)?;
     let distances = neighbors
         .iter()
         .flatten()
-        .map(|neighbor| neighbor.distance)
+        .map(|neighbor| {
+            if cutoff.is_some_and(|cutoff| neighbor.distance >= cutoff) {
+                f32::INFINITY
+            } else {
+                neighbor.distance
+            }
+        })
         .collect::<Vec<_>>();
+    if cutoff.is_some() || metric.is_angular() {
+        return fit_inverse_scales_from_ranked_distances(
+            &distances,
+            n_neighbors,
+            n_neighbors,
+            options,
+        );
+    }
     if distances.iter().any(|distance| !distance.is_finite()) {
         return Err(DenseInverseError::LocalScales);
     }
@@ -177,6 +214,31 @@ pub fn fit_dense_inverse_scales_with_options(
             let (rho, sigma) = row_parameters(row, options.local_connectivity(), batch_floor);
             InverseLocalScale { rho, sigma }
         })
+        .collect())
+}
+
+/// Recover inverse scales from the same ranked distances used to construct the fit graph.
+///
+/// Distances are row-major with the supplied width, including positive
+/// infinities at missing positions. The target count can be smaller than
+/// the supplied width.
+pub fn fit_inverse_scales_from_ranked_distances(
+    distances: &[f32],
+    width: usize,
+    target_neighbors: usize,
+    options: GraphOptions,
+) -> Result<Vec<InverseLocalScale>, DenseInverseError> {
+    if !(1..=width).contains(&target_neighbors)
+        || distances.is_empty()
+        || !distances.len().is_multiple_of(width)
+        || distances
+            .iter()
+            .any(|&d| d.is_nan() || d == f32::NEG_INFINITY)
+    {
+        return Err(DenseInverseError::LocalScales);
+    }
+    Ok(ranked_scales(distances, width, target_neighbors, options)
+        .map(|(rho, sigma)| InverseLocalScale { rho, sigma })
         .collect())
 }
 
@@ -205,6 +267,18 @@ pub fn inverse_transform_dense(
     b: f64,
     layout: DenseInverseLayout,
 ) -> Result<DenseInverseOutput, DenseInverseError> {
+    inverse_transform_dense_with_metric(input, scales, a, b, layout, DistanceMetric::Euclidean)
+}
+
+/// Reconstruct dense features with an original-space metric gradient.
+pub fn inverse_transform_dense_with_metric(
+    input: &DenseInverseInput<'_>,
+    scales: &[InverseLocalScale],
+    a: f64,
+    b: f64,
+    layout: DenseInverseLayout,
+    metric: DistanceMetric,
+) -> Result<DenseInverseOutput, DenseInverseError> {
     validate_parameters(a, b, layout.initial_alpha).map_err(DenseInverseError::Layout)?;
     validate_repulsion_strength(layout.repulsion_strength).map_err(DenseInverseError::Layout)?;
     let (mut output, edges) = initialize(input, a, b)?;
@@ -228,7 +302,14 @@ pub fn inverse_transform_dense(
     {
         return Err(DenseInverseError::NoMembership { row: row[0].row });
     }
-    optimize(input, scales, &edges, &mut output.coordinates, layout)?;
+    optimize(
+        input,
+        scales,
+        &edges,
+        &mut output.coordinates,
+        layout,
+        metric,
+    )?;
     Ok(output)
 }
 
@@ -413,6 +494,7 @@ fn optimize(
     edges: &[InverseEdge],
     coordinates: &mut [f32],
     layout: DenseInverseLayout,
+    metric: DistanceMetric,
 ) -> Result<(), DenseInverseError> {
     const EPSILON: f64 = 1e-6;
     EdgeSamplingCursor::from_positive_interval(1.0, layout.negative_sample_rate)?;
@@ -432,6 +514,7 @@ fn optimize(
     let mut rng = Mt19937::new(layout.seed);
     let mut random_state = draw_negative_seed(|| rng.next_u32());
     let features = |vertex: usize| &input.training[vertex * input.n_features..][..input.n_features];
+    let mut gradient = vec![0.0; input.n_features];
     let mut alpha = layout.initial_alpha;
     for epoch in 0..layout.n_epochs {
         let time = epoch as f64;
@@ -441,23 +524,23 @@ fn optimize(
             }
             let current = &mut coordinates[edge.row * input.n_features..][..input.n_features];
             let tail = features(edge.vertex);
-            let dist = euclidean_distance_wide(current, tail);
+            metric_gradient(metric, current, tail, &mut gradient);
             let coefficient = -1.0 / (edge.weight * f64::from(scales[edge.vertex].sigma) + EPSILON);
-            update_features(current, tail, dist + EPSILON, coefficient, alpha);
+            update_features(current, &gradient, coefficient, alpha);
             for _ in 0..cursor.take_negative_samples(time)? {
                 let vertex = sample_vertex(&mut random_state, scales.len());
                 if layout.repulsion_strength == 0.0 {
                     continue;
                 }
                 let tail = features(vertex);
-                let dist = euclidean_distance_wide(current, tail);
+                let dist = metric_gradient(metric, current, tail, &mut gradient);
                 let scale = scales[vertex];
                 let sigma = f64::from(scale.sigma);
                 let offset = (dist - f64::from(scale.rho)).max(0.0);
                 let membership = (-offset / (sigma + EPSILON)).exp();
                 let coefficient =
                     layout.repulsion_strength * membership / ((1.0 - membership) * sigma + EPSILON);
-                update_features(current, tail, dist + EPSILON, coefficient, alpha);
+                update_features(current, &gradient, coefficient, alpha);
             }
         }
         alpha = layout.initial_alpha * (1.0 - time / n_epochs);
@@ -465,9 +548,78 @@ fn optimize(
     Ok(())
 }
 
-fn update_features(current: &mut [f32], tail: &[f32], distance: f64, coefficient: f64, alpha: f64) {
-    for (value, &reference) in current.iter_mut().zip(tail) {
-        let gradient = (f64::from(*value - reference) / distance) * coefficient;
-        *value = (f64::from(*value) + alpha * gradient.clamp(-4.0, 4.0)) as f32;
+fn update_features(current: &mut [f32], gradient: &[f64], coefficient: f64, alpha: f64) {
+    for (value, &component) in current.iter_mut().zip(gradient) {
+        *value = (f64::from(*value) + alpha * (component * coefficient).clamp(-4.0, 4.0)) as f32;
     }
+}
+
+fn metric_gradient(
+    metric: DistanceMetric,
+    left: &[f32],
+    right: &[f32],
+    gradient: &mut [f64],
+) -> f64 {
+    match metric {
+        DistanceMetric::Euclidean => {
+            let distance = euclidean_distance_wide(left, right);
+            for (value, (&left, &right)) in gradient.iter_mut().zip(left.iter().zip(right)) {
+                *value = f64::from(left - right) / (distance + 1e-6);
+            }
+            distance
+        }
+        DistanceMetric::Manhattan => {
+            let mut distance = 0.0;
+            for (value, (&left, &right)) in gradient.iter_mut().zip(left.iter().zip(right)) {
+                let diff = left - right;
+                distance += f64::from(diff.abs());
+                *value = signed_step(diff);
+            }
+            distance
+        }
+        DistanceMetric::Chebyshev => {
+            let mut axis = 0;
+            let mut largest = 0.0_f32;
+            for (index, (&left, &right)) in left.iter().zip(right).enumerate() {
+                let diff = left - right;
+                if diff.abs() > largest.abs() {
+                    axis = index;
+                    largest = diff;
+                }
+            }
+            gradient.fill(0.0);
+            gradient[axis] = signed_step(largest);
+            f64::from(largest.abs())
+        }
+        DistanceMetric::Cosine | DistanceMetric::Correlation => {
+            angular_gradient(left, right, gradient, metric == DistanceMetric::Correlation)
+        }
+    }
+}
+
+fn signed_step(diff: f32) -> f64 {
+    if diff != 0.0 {
+        f64::from(diff.signum())
+    } else {
+        0.0
+    }
+}
+
+fn angular_gradient(left: &[f32], right: &[f32], gradient: &mut [f64], centered: bool) -> f64 {
+    let ((dot, norm_x, norm_y), (left_mean, right_mean)) = if centered {
+        correlation_products(left, right)
+    } else {
+        (cosine_products(left, right), (0.0, 0.0))
+    };
+    if norm_x == 0.0 || norm_y == 0.0 {
+        gradient.fill(0.0);
+        return if norm_x == norm_y { 0.0 } else { 1.0 };
+    }
+    let norm = (norm_x * norm_y).sqrt();
+    for (value, (&x, &y)) in gradient.iter_mut().zip(left.iter().zip(right)) {
+        let x = f64::from(x) - left_mean;
+        let y = f64::from(y) - right_mean;
+        *value = f64::from(((dot / norm_x * x - y) / norm) as f32);
+    }
+    1.0 - dot / norm
 }

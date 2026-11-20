@@ -21,7 +21,8 @@ use umap_core::fit::{
 use umap_core::fuzzy_graph::{CsrGraph, GraphOptions};
 use umap_core::inverse::{
     DenseInverseInput, DenseInverseLayout, InverseTriangulation, dense_inverse_epochs,
-    fit_dense_inverse_scales_with_options, inverse_transform_dense,
+    fit_dense_inverse_scales_with_metric, fit_inverse_scales_from_ranked_distances,
+    inverse_transform_dense_with_metric,
 };
 use umap_core::modern_initialization::{
     ModernInit, ModernInitConfig, ModernInitRescale, initialize_modern_layout,
@@ -1085,7 +1086,7 @@ fn _transform_dense_embedding(
     training, fitted_embedding, queries, simplices, query_simplices, *,
     n_features, n_components, k, a, b, learning_rate, fit_epochs,
     repulsion_strength, negative_sample_rate, transform_seed, local_connectivity,
-    use_computed_scales=true
+    use_computed_scales=true, metric="euclidean", cutoff=None, fitted_distances=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn _inverse_transform_dense_embedding(
@@ -1107,7 +1108,11 @@ fn _inverse_transform_dense_embedding(
     transform_seed: u32,
     local_connectivity: f64,
     use_computed_scales: bool,
+    metric: &str,
+    cutoff: Option<f32>,
+    fitted_distances: Option<(Vec<f32>, usize, usize)>,
 ) -> PyResult<Vec<f32>> {
+    let metric = parse_metric(metric)?;
     let options = GraphOptions::new(local_connectivity, 1.0)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     let layout = DenseInverseLayout {
@@ -1118,7 +1123,7 @@ fn _inverse_transform_dense_embedding(
         seed: transform_seed,
     };
     let needs_scales = layout.n_epochs > 1 && layout.initial_alpha != 0.0;
-    if needs_scales && !use_computed_scales {
+    if needs_scales && !use_computed_scales && fitted_distances.is_none() {
         return Err(PyNotImplementedError::new_err(
             "Inverse optimization with supplied neighbors or a finite cutoff requires fitted neighbor scales.",
         ));
@@ -1136,11 +1141,18 @@ fn _inverse_transform_dense_embedding(
     };
     py.detach(|| {
         let scales = if needs_scales {
-            fit_dense_inverse_scales_with_options(&training, n_features, k, options)?
+            if let Some((distances, width, target)) = &fitted_distances {
+                fit_inverse_scales_from_ranked_distances(distances, *width, *target, options)?
+            } else {
+                fit_dense_inverse_scales_with_metric(
+                    &training, n_features, k, metric, cutoff, options,
+                )?
+            }
         } else {
             Vec::new()
         };
-        inverse_transform_dense(&input, &scales, a, b, layout).map(|result| result.coordinates)
+        inverse_transform_dense_with_metric(&input, &scales, a, b, layout, metric)
+            .map(|result| result.coordinates)
     })
     .map_err(|error| PyValueError::new_err(error.to_string()))
 }

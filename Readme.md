@@ -41,7 +41,7 @@ Wheel は `target/wheels/` に生成されます。Python パッケージ名は 
 
 密な新しい入力の `transform` は、学習時の座標を固定したまま `float32` の座標を返します。`transform_seed` は学習の `random_state` とは独立した整数シードで、既定値は `42` です。明示した `n_epochs` の 3 分の 1 を切り捨てた回数で最適化し、`None` の場合は入力が 10,000 行以下なら 100 エポック、それより多ければ 30 エポックを使います。検証結果と適用範囲は [埋め込み変換の参照記録](reference/transform_embedding_reference.md) を参照してください。
 
-密な Euclidean 特徴量で学習した互換レイアウトでは、`inverse_transform` が埋め込み座標から元の特徴量と同じ列数の `float32` 配列を返します。埋め込みの凸包の外にある点は外挿し、警告を出します。検証結果と適用範囲は [逆変換の参照記録](reference/inverse_transform_reference.md) を参照してください。
+密な互換レイアウトでは、`inverse_transform` が元の特徴量と同じ列数の `float32` 配列を返します。Euclidean、Manhattan、Chebyshev、cosine、correlation を使えます。凸包の外にある点は外挿し、警告を出します。[逆変換の比較記録](reference/inverse_transform_reference.md)
 
 密な教師なし互換レイアウトでは、`update(X)` が学習時の距離と有効近傍数を使って行を追加します。Euclidean、Manhattan、Chebyshev、cosine、correlation を使えます。更新時のグラフは距離を切断せずに再構築され、学習済みの点も再配置の対象になります。C の `umap_capi_update_dense_embedding_with_metric` には学習時の距離タグを渡します。[更新の比較記録](reference/update_reference.md)
 

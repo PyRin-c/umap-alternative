@@ -74,7 +74,8 @@ this repository. [Original transform checkpoints](transform_reference.md)
 
 ## Python estimator
 
-`UMAP.inverse_transform` supports dense Euclidean compatibility fits with
+`UMAP.inverse_transform` supports dense compatibility fits with Euclidean,
+Manhattan, Chebyshev, cosine, or correlation distance and
 an integer transform seed. It reads the current public `embedding_` and
 locates the query batch with SciPy's `Delaunay(..., qhull_options="QJ")`.
 Each call returns a fresh float32 array with the original feature width.
@@ -84,9 +85,11 @@ and learning rate come from the fit. The estimator reads `n_epochs`,
 time. A list of epochs can be set after fitting. The seeded Python fit
 accepts scalar epoch settings.
 
-Graph fits, sparse training, and other metrics are unavailable for inverse
-transformation. The supported fit uses exhaustive feature-space neighbors.
-Approximate and supplied-neighbor inverse fits are outside this scope.
+Graph fits and sparse training are unavailable for inverse transformation.
+The inverse adapter derives scales from the fitted feature metric and
+cutoff, or from a retained copy of fit-time supplied neighbor distances.
+The supplied distances can be mutated after fitting without changing a
+reconstruction. Approximate inverse fits and additional metrics remain open.
 
 The Rust implementation keeps candidate discovery order on equal distances.
 The larger circle and duplicate-grid probes exercise the different equal-key
@@ -119,10 +122,19 @@ transform. Separate public-wheel probes verify the initialization, first
 active epoch, transform seeds 0 and `2**32 - 1`, fractional fitted local
 connectivity, and a distinct fit with a truncated neighbor count. These
 checks pass on fresh wheel installations for Windows and Ubuntu WSL.
-An active inverse optimizer needs the feature-space scales from the original
-fit. For supplied neighbor arrays and finite distance cutoffs, the Python
-adapter currently supports inverse initialization and reports the missing
-fitted scales when an optimizer update is required.
+An active inverse optimizer uses the original-space metric gradient. The
+Manhattan gradient is the coordinate sign, and Chebyshev uses the sign
+on the greatest-difference axis. The angular gradients round each
+component to float32 before applying the scale and learning rate.
+Cosine rounds coordinate products to float32 and sums in float64.
+Correlation centers and multiplies in float64.
+
+The metric and scale fixture records 50 public checkpoints, including
+one-step and longer attraction and repulsion, zero norms, constant rows,
+finite cutoffs, and supplied widths greater than the effective neighbor
+count. Windows and Ubuntu WSL regenerate the same record. The port
+matches 448 of 450 coordinate bits. Two coordinates in the correlation
+attraction-only checkpoint at fit epoch 30 differ by one float32 ULP.
 
 ## Reproduction
 
@@ -145,4 +157,5 @@ uv run --project reference --no-sync python -I reference/generate_inverse_transf
   --output reference/fixtures/umap-learn-0.6.0-inverse-windows-x86_64.json
 cargo test -p umap-core --test inverse_transform_fixture -- --nocapture
 cargo test -p umap-core --test inverse_transform_fixture -- --ignored --nocapture
+uv run --project reference --no-sync python -I reference/generate_dense_inverse_metrics_fixture.py --output reference/fixtures/umap-learn-0.6.0-inverse-metrics-x86_64.json --check
 ```

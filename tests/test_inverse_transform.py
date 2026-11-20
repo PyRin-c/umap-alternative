@@ -17,6 +17,9 @@ REFERENCE = json.loads(
 ORIGINAL = json.loads(
     (FIXTURES / "umap-learn-0.6.0-transform-windows-x86_64.json").read_text(encoding="utf-8")
 )
+METRICS = json.loads(
+    (FIXTURES / "umap-learn-0.6.0-inverse-metrics-x86_64.json").read_text(encoding="utf-8")
+)
 
 
 def estimator(**overrides):
@@ -44,28 +47,35 @@ def reconstruct(model, queries):
     return output, caught
 
 
-@pytest.mark.parametrize("custom_neighbors", ["supplied", "cutoff"])
-def test_inverse_uses_fitted_neighborhood_scales_only_for_active_epochs(custom_neighbors):
-    training = from_record(ORIGINAL["inputs"]["training"])
-    overrides = {"disconnection_distance": 2.0}
-    if custom_neighbors == "supplied":
-        delta = training[:, None, :] - training[None, :, :]
-        distance = np.linalg.norm(delta, axis=-1)
-        indices = np.argsort(distance, axis=1)[:, :4]
-        overrides = {
-            "precomputed_knn": (indices, np.take_along_axis(distance, indices, axis=1), None)
-        }
+@pytest.mark.parametrize("name", METRICS["cases"])
+def test_dense_inverse_uses_the_fitted_metric_and_scales(name):
+    case = METRICS["cases"][name]
+    training = np.asarray(case["training"], dtype=np.float32)
+    options = METRICS["parameters"] | case["settings"]
+    options["init"] = np.asarray(METRICS["explicit"], dtype=np.float32)
+    if case["supplied"] is not None:
+        values = training.astype(np.float64)
+        d = np.linalg.norm(values[:, None] - values[None, :], axis=-1).astype(np.float32)
+        indices = np.argsort(d, axis=1, kind="stable")[:, :case["supplied"]].astype(np.int32)
+        distances = np.take_along_axis(d, indices, axis=1) * np.float32(0.37)
+        options["precomputed_knn"] = (indices, distances, None)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
-        model = estimator(**overrides).fit(training)
-    query = model.embedding_[:1]
-    initial, _ = reconstruct(model, query)
-    model.set_params(n_epochs=5)
-    no_updates, _ = reconstruct(model, query)
-    assert_bits(no_updates, initial.view(np.uint32))
-    model.set_params(n_epochs=6)
-    with pytest.raises(NotImplementedError, match="requires fitted neighbor scales"):
-        reconstruct(model, query)
+        model = UMAP(**options).fit(training)
+    if case["supplied"] is not None:
+        distances.fill(123.0)
+    queries = np.asarray(METRICS["queries"], dtype=np.float32)
+    model.embedding_ = np.asarray(METRICS["embedding"], dtype=np.float32)
+    for checkpoint in case["checks"]:
+        model.set_params(n_epochs=checkpoint["fit_epochs"], repulsion_strength=checkpoint["strength"])
+        output, caught = reconstruct(model, queries)
+        assert [warning.category.__name__ for warning in caught] == checkpoint["warnings"]
+        if name == "correlation" and checkpoint["fit_epochs"] == 30 and checkpoint["strength"] == 0.0:
+            # Two coordinates in this attraction-only checkpoint differ by one ULP.
+            expected = np.asarray(checkpoint["bits"], dtype=np.uint32).view(np.float32)
+            np.testing.assert_array_max_ulp(output, expected, maxulp=1)
+        else:
+            assert_bits(output, checkpoint["bits"])
 
 
 @pytest.mark.parametrize("case", REFERENCE["cases"], ids=lambda case: case["name"])
@@ -164,11 +174,6 @@ def test_inverse_public_boundaries():
             fitted.inverse_transform(invalid)
         assert type(caught.value).__name__ == REFERENCE["boundaries"][name]["error"]
         assert str(caught.value).splitlines()[0] == REFERENCE["boundaries"][name]["message"]
-
-    for metric in ("manhattan", "chebyshev"):
-        with pytest.raises(ValueError, match="Inverse transform not available for given metric"):
-            estimator(metric=metric).fit(training).inverse_transform(query)
-
 
 def test_held_out_inverse_epochs_seed_and_fitted_state():
     # Separate public umap-learn 0.6.0 probe with nondefault fitted local connectivity.

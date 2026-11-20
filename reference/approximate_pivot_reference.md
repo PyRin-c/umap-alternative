@@ -151,7 +151,7 @@ run.
 ## Reproduction on Windows
 
 ```powershell
-$scratch = Join-Path $PWD 'target/pivot-stream'
+$scratch = Join-Path $env:LOCALAPPDATA 'Temp/umap-pivot-stream'
 New-Item -ItemType Directory -Force $scratch | Out-Null
 $env:UV_CACHE_DIR = Join-Path $scratch 'uv-cache'
 $env:UV_PROJECT_ENVIRONMENT = Join-Path $scratch 'wheel-venv'

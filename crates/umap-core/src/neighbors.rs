@@ -423,6 +423,11 @@ impl DistanceMetric {
 }
 
 fn cosine_distance(left: &[f32], right: &[f32]) -> f32 {
+    let (dot, left_squared, right_squared) = cosine_products(left, right);
+    angular_distance(dot, left_squared, right_squared)
+}
+
+pub(crate) fn cosine_products(left: &[f32], right: &[f32]) -> (f64, f64, f64) {
     let mut dot = 0.0_f64;
     let mut left_squared = 0.0_f64;
     let mut right_squared = 0.0_f64;
@@ -431,12 +436,17 @@ fn cosine_distance(left: &[f32], right: &[f32]) -> f32 {
         left_squared += f64::from(x * x);
         right_squared += f64::from(y * y);
     }
-    angular_distance(dot, left_squared, right_squared)
+    (dot, left_squared, right_squared)
 }
 
 fn correlation_distance(left: &[f32], right: &[f32]) -> f32 {
+    let ((dot, left_squared, right_squared), _) = correlation_products(left, right);
+    angular_distance(dot, left_squared, right_squared)
+}
+
+pub(crate) fn correlation_products(left: &[f32], right: &[f32]) -> ((f64, f64, f64), (f64, f64)) {
     if left.is_empty() {
-        return 0.0;
+        return ((0.0, 0.0, 0.0), (0.0, 0.0));
     }
     let left_mean = left.iter().map(|&x| f64::from(x)).sum::<f64>() / left.len() as f64;
     let right_mean = right.iter().map(|&y| f64::from(y)).sum::<f64>() / right.len() as f64;
@@ -450,7 +460,7 @@ fn correlation_distance(left: &[f32], right: &[f32]) -> f32 {
         left_squared += x * x;
         right_squared += y * y;
     }
-    angular_distance(dot, left_squared, right_squared)
+    ((dot, left_squared, right_squared), (left_mean, right_mean))
 }
 
 fn angular_distance(dot: f64, left_squared: f64, right_squared: f64) -> f32 {

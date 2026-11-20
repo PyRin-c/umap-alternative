@@ -222,43 +222,13 @@ pub(crate) fn build_ranked_graph(
     k: usize,
     options: GraphOptions,
 ) -> CsrGraph {
-    let target = (k as f64).log2();
-    let batch_floor = with_finite_distances(distances, |finite| {
-        if finite.is_empty() {
-            0.0
-        } else {
-            batch_scale_floor(finite)
-        }
-    });
     let mut directed = Vec::with_capacity(n_rows);
-    let mut positive = Vec::with_capacity(width);
-    let mut offsets = Vec::with_capacity(width - 1);
     let mut indices = indices;
-    for (row, distances) in distances.chunks_exact(width).enumerate() {
-        positive.clear();
-        positive.extend(
-            distances
-                .iter()
-                .copied()
-                .filter(|&distance| distance > 0.0 && distance.is_finite()),
-        );
-        let rho = local_offset(&positive, options.local_connectivity);
-        offsets.clear();
-        offsets.extend(
-            distances[1..]
-                .iter()
-                .filter(|distance| distance.is_finite())
-                .map(|&distance| (distance - rho).max(0.0)),
-        );
-        let floor = if rho > 0.0 {
-            with_finite_distances(distances, |finite| {
-                (MIN_SCALE_MULTIPLIER * mean_distance(finite)) as f32
-            })
-        } else {
-            batch_floor
-        };
-        let sigma = search_scale(&offsets, target, false).max(floor);
-
+    for (row, (distances, (rho, sigma))) in distances
+        .chunks_exact(width)
+        .zip(ranked_scales(distances, width, k, options))
+        .enumerate()
+    {
         let mut memberships = indices
             .by_ref()
             .take(width)
@@ -285,6 +255,49 @@ pub(crate) fn build_ranked_graph(
         let union = fuzzy_union(forward, reverse);
         let intersection = forward * reverse;
         mix * union + intersection_mix * intersection
+    })
+}
+
+pub(crate) fn ranked_scales(
+    distances: &[f32],
+    width: usize,
+    k: usize,
+    options: GraphOptions,
+) -> impl Iterator<Item = (f32, f32)> + '_ {
+    let target = (k as f64).log2();
+    let batch_floor = with_finite_distances(distances, |finite| {
+        if finite.is_empty() {
+            0.0
+        } else {
+            batch_scale_floor(finite)
+        }
+    });
+    let mut positive = Vec::with_capacity(width);
+    let mut offsets = Vec::with_capacity(width - 1);
+    distances.chunks_exact(width).map(move |distances| {
+        positive.clear();
+        positive.extend(
+            distances
+                .iter()
+                .copied()
+                .filter(|&distance| distance > 0.0 && distance.is_finite()),
+        );
+        let rho = local_offset(&positive, options.local_connectivity);
+        offsets.clear();
+        offsets.extend(
+            distances[1..]
+                .iter()
+                .filter(|distance| distance.is_finite())
+                .map(|&distance| (distance - rho).max(0.0)),
+        );
+        let floor = if rho > 0.0 {
+            with_finite_distances(distances, |finite| {
+                (MIN_SCALE_MULTIPLIER * mean_distance(finite)) as f32
+            })
+        } else {
+            batch_floor
+        };
+        (rho, search_scale(&offsets, target, false).max(floor))
     })
 }
 

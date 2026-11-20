@@ -2,7 +2,7 @@
 
 UMAP を Rust で独立実装するリポジトリです。`umap-learn` との数値の完全一致を検証したうえで高速化し、Rust ライブラリ、C ABI、PyO3 + Maturin による Python Wheel として提供します。
 
-`crates/umap-core` が Rust 本体の置き場で、`crates/umap-python` が Python 拡張です。現段階の Wheel はバージョン情報を公開します。UMAP 本体と C ABI は今後の実装範囲です。
+`crates/umap-core` が Rust 本体の置き場で、`crates/umap-python` が Python 拡張です。現段階の Python Wheel は、密な入力に対する graph-only `UMAP(transform_mode="graph")` の `fit`/`fit_transform` 経路を提供し、PyO3 の native graph primitive を内部で使います。`crates/umap-capi` は CSR graph を返す graph-only C ABI とヘッダーを提供します。埋め込みを含む full UMAP estimator、追加機能、一般的な bit parity は今後の実装・検証範囲であり、記録済み fixture は個別の証拠であって一般的な一致を主張しません。
 
 ## 開発環境
 

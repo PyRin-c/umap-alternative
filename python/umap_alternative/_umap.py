@@ -36,6 +36,10 @@ _TRUNCATION_WARNING = (
     "n_neighbors is larger than the dataset size; truncating to X.shape[0] - 1"
 )
 _PRECOMPUTED_WARNING = "using precomputed metric; inverse_transform will be unavailable"
+_DENSITY_NEIGHBOR_WARNING = (
+    "Failed to correctly find n_neighbors for some samples. Results may be less than "
+    "ideal. Try re-running with different parameters."
+)
 _DEFAULT_PRECOMPUTED_KNN = (None, None, None)
 _KNN_SEARCH_WARNING = (
     "precomputed_knn[2] (knn_search_index) is not an NNDescent object: "
@@ -283,6 +287,8 @@ class UMAP(BaseEstimator, TransformerMixin):
     For a fitted dense Euclidean embedding, ``inverse_transform`` reconstructs
     the original features as a new float32 array. It warns when any query
     requires extrapolation outside the convex hull of the fitted layout.
+    With ``output_dens=True``, ``fit_transform`` returns the layout and two
+    diagnostic log radii for dense Euclidean features.
     """
 
     def __init__(
@@ -311,6 +317,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         transform_seed=42,
         precomputed_knn=_DEFAULT_PRECOMPUTED_KNN,
         disconnection_distance=None,
+        output_dens=False,
     ):
         self.n_components = n_components
         self.n_neighbors = n_neighbors
@@ -336,6 +343,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         self.transform_seed = transform_seed
         self.precomputed_knn = precomputed_knn
         self.disconnection_distance = disconnection_distance
+        self.output_dens = output_dens
 
     def fit(self, X, y=None):
         """Fit the fuzzy graph and, in embedding mode, the training layout."""
@@ -402,6 +410,12 @@ class UMAP(BaseEstimator, TransformerMixin):
         elif not isinstance(cutoff, (int, float)):
             raise ValueError("disconnection_distance must either be None or a numeric.")
         supplied = self._supplied_neighbors(n_rows, n_neighbors)
+        if getattr(self, "output_dens", False) and embedding_mode and (
+            metric != "euclidean" or supplied is not None or np.isfinite(cutoff)
+        ):
+            raise NotImplementedError(
+                "output_dens requires dense Euclidean features with computed neighbors and no cutoff"
+            )
         requested_neighbors = n_neighbors
 
         # Singletons have no graph. Embedding mode exposes the public zero layout.
@@ -506,6 +520,8 @@ class UMAP(BaseEstimator, TransformerMixin):
             )
         elif embedding is not None:
             embedding[np.diff(graph.indptr) == 0] = np.nan
+        if embedding_mode and getattr(self, "output_dens", False):
+            self._store_density_diagnostics(X_checked, graph, embedding)
         return self._store_fit(
             n_features, transform_fit, graph, n_neighbors, embedding,
             embedding_options=embedding_options if embedding_mode else None,
@@ -525,6 +541,8 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise NotImplementedError("additional fit parameters are not implemented")
         self.fit(X, y=y)
         if self.transform_mode == "embedding":
+            if getattr(self, "output_dens", False):
+                return self.embedding_, self.rad_orig_, self.rad_emb_
             return self.embedding_.astype(np.float32, copy=False)
         return self.graph_
 
@@ -664,12 +682,16 @@ class UMAP(BaseEstimator, TransformerMixin):
             graph_options=graph_options,
             **self._embedding_transform_options,
         )
+        graph = _csr_graph(components)
+        embedding = np.asarray(coordinates, dtype=np.float32).reshape(shape)
+        if getattr(self, "output_dens", False):
+            self._store_density_diagnostics(combined, graph, embedding)
         self._store_fit(
             n_features,
             (combined, metric),
-            _csr_graph(components),
+            graph,
             n_neighbors,
-            np.asarray(coordinates, dtype=np.float32).reshape(shape),
+            embedding,
             embedding_options=self._embedding_transform_options,
         )
 
@@ -896,6 +918,20 @@ class UMAP(BaseEstimator, TransformerMixin):
         if negative_sample_rate <= 0:
             raise ValueError("negative_sample_rate must be positive")
         return repulsion_strength, negative_sample_rate
+
+    def _store_density_diagnostics(self, features, graph, embedding):
+        if self.n_neighbors >= len(embedding):
+            warnings.warn(_DENSITY_NEIGHBOR_WARNING, UserWarning, stacklevel=3)
+        original, embedded = _native._dense_euclidean_radius_log_inputs(
+            (graph.shape, graph.indptr.tolist(), graph.indices.tolist(), graph.data.tolist()),
+            features.ravel().tolist(),
+            features.shape[1],
+            embedding.ravel().tolist(),
+            embedding.shape[1],
+            self.n_neighbors,
+        )
+        self.rad_orig_ = np.log(np.asarray(original, dtype=np.float32))
+        self.rad_emb_ = np.log(np.asarray(embedded, dtype=np.float32))
 
     def _embedding_init(self, n_rows, n_components):
         if isinstance(self.init, str):

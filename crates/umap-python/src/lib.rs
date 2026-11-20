@@ -2,6 +2,9 @@ use pyo3::exceptions::{PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
+use umap_core::density::{
+    DensityError, RadiusSpace, embedding_radius_log_inputs_euclidean, euclidean_radius_log_inputs,
+};
 use umap_core::embedding::{
     DenseEmbedding, DenseEmbeddingConfig, DenseEmbeddingInit, EmbeddingLayoutConfig,
     fit_dense_embedding_seeded_with_graph_options, fit_graph_embedding_with_rng,
@@ -29,6 +32,35 @@ type CooComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
 type EmbeddingComponents = (CsrComponents, (usize, usize), Vec<f32>);
 type RngState = (Vec<u32>, usize);
 type GraphEmbeddingComponents = ((usize, usize), Vec<f32>, RngState);
+
+/// Compute the log inputs for original and embedding radius diagnostics.
+#[pyfunction]
+fn _dense_euclidean_radius_log_inputs(
+    py: Python<'_>,
+    graph: CsrComponents,
+    data: Vec<f32>,
+    n_features: usize,
+    coordinates: Vec<f32>,
+    n_components: usize,
+    n_neighbors: usize,
+) -> PyResult<(Vec<f32>, Vec<f32>)> {
+    let ((n_rows, n_cols), indptr, indices, data_weights) = graph;
+    let graph = CsrGraph {
+        n_rows,
+        n_cols,
+        indptr,
+        indices,
+        data: data_weights,
+    };
+    py.detach(|| {
+        let original =
+            euclidean_radius_log_inputs(&graph, &data, n_features, RadiusSpace::Original)?;
+        let embedded =
+            embedding_radius_log_inputs_euclidean(&coordinates, n_rows, n_components, n_neighbors)?;
+        Ok((original, embedded))
+    })
+    .map_err(|error: DensityError| PyValueError::new_err(error.to_string()))
+}
 
 fn csr_components(graph: CsrGraph) -> CsrComponents {
     (
@@ -514,6 +546,10 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_fit_sparse_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_embedding, module)?)?;
     module.add_function(wrap_pyfunction!(_update_dense_embedding, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        _dense_euclidean_radius_log_inputs,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(_fit_graph_embedding_with_rng, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_categorical_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_precomputed_graph, module)?)?;

@@ -315,6 +315,16 @@ def build():
         "warnings": pair_notes,
         "offset_candidates": pair_scores(pairs, pair_graph, pair_outputs),
     }
+    neighbor_widths = []
+    for width in (2, 3, 7, 8, 9, 15):
+        options = {"n_neighbors": width, "n_epochs": 2, **OUTPUT}
+        graph, outputs, notes = run(data, init, **options)
+        neighbor_widths.append({
+            "options": options,
+            "graph": intern(graphs, graph_record(graph)),
+            "outputs": [intern(arrays, array_record(output)) for output in outputs],
+            "warnings": notes,
+        })
     lock = (REFERENCE / "uv.lock").read_text(encoding="utf-8").encode("utf-8")
     return {
         "schema_version": 1,
@@ -333,7 +343,8 @@ def build():
                        "original_base_and_precomputed": original_scores(original_cohort),
                        "precomputed_at_n_epochs_0": precomputed,
                        "embedding": embedding_scores(list(projections.values()), BASE["n_neighbors"]),
-                       "close_pairs": pair_record},
+                       "close_pairs": pair_record,
+                       "neighbor_widths": neighbor_widths},
     }
 
 

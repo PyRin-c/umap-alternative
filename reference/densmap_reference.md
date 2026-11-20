@@ -73,8 +73,10 @@ diagnostics.
 [Narayan, Berger & Cho, Methods](https://pmc.ncbi.nlm.nih.gov/articles/PMC8195812/)
 
 - **Original radius.** Traverse the documented input `graph_` in ascending
-  row and column order. Reconstruct Euclidean distances using float64
-  arithmetic and round each distance to float32. For each directed entry
+  row and column order. Round coordinate differences and their squares to
+  float32, sum in float64, and round the square root to float32. The
+  neighbor-width cases distinguish this from computing every distance
+  operation in float64. For each directed entry
   of weight `w`, add `w` and `w * d²` to the denominator and numerator of
   both endpoints. Evaluate `w * d²` and its addition to the numerator in
   float64, rounding the result of each update to float32. The denominator
@@ -116,6 +118,37 @@ The precise weight solver and tie-breaking of the diagnostic graph, and
 exact diagnostic parity across graph regimes, remain unverified. The
 [serial densMAP optimization reference](densmap_layout_reference.md)
 describes the later layout probes and the native optimizer.
+
+## Python diagnostic output
+
+For a dense Euclidean compatibility embedding, `output_dens=True` enables
+`rad_orig_` and `rad_emb_`. `fit_transform` returns those arrays together
+with the embedding. The training-input transform returns the fitted
+embedding, and graph mode returns the CSR graph. For a single training row,
+the public fit creates a zero embedding and has no radius attributes.
+
+Rust calculates the graph refit, weighted reductions and offset. Python
+applies NumPy's float32 logarithm. On the recorded 128 embedding log inputs,
+this reproduces every reference bit. A float64 logarithm rounded to float32
+matches 110 values. The native scalar Rust radius functions can differ
+by one ULP at the final logarithm.
+
+The embedding refit uses the requested neighbor count in its fuzzy scale
+target. With eight rows, requests for 8, 9, and 15 use the available
+neighbors and emit the public warning. The fit regressions cover six
+epoch checkpoints, the close-pair offset control, and six distinct neighbor
+widths. General diagnostic search ties, supplied distances, and finite
+disconnection cutoffs remain open.
+
+The port recomputes both sets of radii after a successful dense update.
+Two independent public processes fitted the eight fixture rows at
+`n_neighbors=4` with random initialization, seed 42, two epochs, and
+`a=1.7, b=0.9`. Each appended the first two rows shifted by float32
+0.021. The updated layouts and embedding radii agreed at every position.
+The original radii agreed at 5 of 10 positions. The
+port uses the updated CSR and feature distances for a deterministic
+original radius. A subsequent ordinary fit preserves the previously
+published radius arrays, as observed in the public estimator.
 
 ## Fixture layout
 

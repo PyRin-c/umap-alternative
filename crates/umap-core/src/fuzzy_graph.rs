@@ -227,7 +227,7 @@ impl std::error::Error for GraphError {}
 /// membership underflows to zero. CSR columns are strictly ascending within
 /// every row, and the output is square with shape `n_rows x n_rows`.
 pub fn fuzzy_simplicial_set(neighbors: &[Vec<Neighbor>]) -> Result<CsrGraph, GraphError> {
-    build_fuzzy_graph(neighbors, GraphOptions::default(), true)
+    build_fuzzy_graph(neighbors, GraphOptions::default(), true, None)
 }
 
 /// Build a UMAP fuzzy graph with explicit local connectivity and mix options.
@@ -252,13 +252,27 @@ pub fn fuzzy_simplicial_set_with_options(
     neighbors: &[Vec<Neighbor>],
     options: GraphOptions,
 ) -> Result<CsrGraph, GraphError> {
-    build_fuzzy_graph(neighbors, options, false)
+    build_fuzzy_graph(neighbors, options, false, None)
+}
+
+/// Build a graph whose requested neighbor count includes missing candidates.
+pub(crate) fn fuzzy_simplicial_set_with_neighbor_target(
+    neighbors: &[Vec<Neighbor>],
+    requested_neighbors: usize,
+) -> Result<CsrGraph, GraphError> {
+    build_fuzzy_graph(
+        neighbors,
+        GraphOptions::default(),
+        false,
+        Some(requested_neighbors),
+    )
 }
 
 fn build_fuzzy_graph(
     neighbors: &[Vec<Neighbor>],
     options: GraphOptions,
     preserve_default_behavior: bool,
+    requested_neighbors: Option<usize>,
 ) -> Result<CsrGraph, GraphError> {
     let n_rows = neighbors.len();
     if n_rows == 0 {
@@ -339,7 +353,12 @@ fn build_fuzzy_graph(
     for (row_index, row) in neighbors.iter().enumerate() {
         let (rho, sigma) = if let Some(distances) = &sorted_distances {
             let distances = &distances[row_index * k..(row_index + 1) * k];
-            row_parameters(distances, options.local_connectivity, batch_floor)
+            row_parameters_with_target(
+                distances,
+                options.local_connectivity,
+                batch_floor,
+                requested_neighbors.unwrap_or(k),
+            )
         } else {
             let rho = default_local_offset(row);
             (rho, default_distance_scale(row_index, row, rho))
@@ -551,9 +570,18 @@ pub(crate) fn row_parameters(
     local_connectivity: f64,
     batch_floor: f32,
 ) -> (f32, f32) {
+    row_parameters_with_target(distances, local_connectivity, batch_floor, distances.len())
+}
+
+fn row_parameters_with_target(
+    distances: &[f32],
+    local_connectivity: f64,
+    batch_floor: f32,
+    requested_neighbors: usize,
+) -> (f32, f32) {
     let positive = &distances[distances.partition_point(|&distance| distance == 0.0)..];
     let rho = local_offset(positive, local_connectivity);
-    let target = (distances.len() as f64).log2();
+    let target = (requested_neighbors as f64).log2();
     // Omit one zero for self. The other zero-distance candidates still
     // contribute unit memberships, irrespective of the order of the ties.
     let offsets = distances[1..]

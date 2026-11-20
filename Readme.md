@@ -39,6 +39,8 @@ Wheel は `target/wheels/` に生成されます。Python パッケージ名は 
 
 密な Euclidean 特徴量の教師なし学習では、`update(X)` が行を追加し、学習済みの近傍数を使って `graph_` と `embedding_` を更新します。学習済みの点も再配置の対象になり、`n_epochs=None` の更新は初期化まで進みます。事前計算近傍や有限の切断距離を使う更新は未対応です。[更新の参照記録](reference/update_reference.md)
 
+`output_dens=True` を指定した密な Euclidean 埋め込みでは、`fit_transform` が埋め込み、元空間の対数半径、埋め込み空間の対数半径を返します。近傍を内部で計算し、有限の切断距離を使わない場合に利用できます。[半径の参照記録](reference/densmap_reference.md)
+
 埋め込みでは教師あり入力、疎行列、事前計算済み距離、Adam と momentum は未実装です。固定シードの検証条件と適用範囲は [スペクトル初期化を使った学習の参照記録](reference/spectral_fit_reference.md) と [ランダム初期化と初期座標を指定した学習の参照記録](reference/seeded_fit_reference.md) を参照してください。
 
 `UMAP(transform_mode="graph").fit(X)` と `fit_transform(X)` は、Euclidean、Manhattan、Chebyshev、cosine の教師なし学習で SciPy の CSR、CSC、COO 形式の疎な特徴量を受け取ります。入力を変更せずに CSR に変換し、`float32` の CSR グラフを作ります。Cosine は圧縮形式の行に格納された重複要素を保持して距離を計算します。距離ゼロの同順位により自分自身が近傍から外れる場合は `ValueError` になります。疎行列での事前計算済み距離と変換は未実装です。形式ごとの検証結果は [疎グラフの参照記録](reference/sparse_graph_reference.md) を参照してください。

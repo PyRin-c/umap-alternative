@@ -5,8 +5,10 @@
 
 use std::fmt;
 
-use crate::fuzzy_graph::{CsrGraph, GraphError, fuzzy_simplicial_set};
-use crate::neighbors::{KnnError, Neighbor, collect_neighbors};
+use crate::fuzzy_graph::{
+    CsrGraph, GraphError, fuzzy_simplicial_set, fuzzy_simplicial_set_with_neighbor_target,
+};
+use crate::neighbors::{KnnError, Neighbor, collect_neighbors, euclidean_distance_wide};
 
 pub(crate) const LOG_OFFSET: f32 = 1e-8;
 
@@ -113,14 +115,16 @@ pub(crate) fn radii_and_weights_from_edge_distances(
             actual: distances.len(),
         });
     }
-    reduce_radii(graph, space, |_, _, entry| distances[entry])
+    let (values, weights) = reduce_radius_log_inputs(graph, space, |_, _, entry| distances[entry])?;
+    Ok((values.into_iter().map(f32::ln).collect(), weights))
 }
 
 /// Compute original radii using a fitted graph and row-major Euclidean input.
 ///
-/// The input shape is `graph.n_rows` by `n_features`. Subtraction, squaring,
-/// summation and square root use `f64`; each edge distance is rounded to `f32`
-/// before the reduction. For a fitted [`crate::embedding::DenseEmbedding`],
+/// The input shape is `graph.n_rows` by `n_features`. Coordinate differences
+/// and their squares use `f32`. The sum and square root use `f64`, and each
+/// edge distance is rounded to `f32` before the reduction. For a fitted
+/// [`crate::embedding::DenseEmbedding`],
 /// pass its graph and the original training data. For other metrics or
 /// precomputed distances, use [`radii_from_edge_distances`].
 pub fn original_radii_euclidean(
@@ -173,6 +177,36 @@ pub fn refit_embedding_graph_euclidean(
     n_components: usize,
     n_neighbors: usize,
 ) -> Result<CsrGraph, DensityError> {
+    refit_embedding_graph(coordinates, n_rows, n_components, n_neighbors, n_neighbors)
+}
+
+/// Compute log inputs after an embedding refit using the requested neighbor count.
+///
+/// A request wider than the layout ranks all rows and keeps the requested
+/// count as the fuzzy membership target.
+pub fn embedding_radius_log_inputs_euclidean(
+    coordinates: &[f32],
+    n_rows: usize,
+    n_components: usize,
+    requested_neighbors: usize,
+) -> Result<Vec<f32>, DensityError> {
+    let graph = refit_embedding_graph(
+        coordinates,
+        n_rows,
+        n_components,
+        requested_neighbors.min(n_rows),
+        requested_neighbors,
+    )?;
+    euclidean_radius_log_inputs(&graph, coordinates, n_components, RadiusSpace::Embedding)
+}
+
+fn refit_embedding_graph(
+    coordinates: &[f32],
+    n_rows: usize,
+    n_components: usize,
+    n_neighbors: usize,
+    requested_neighbors: usize,
+) -> Result<CsrGraph, DensityError> {
     validate_coordinates(coordinates, n_rows, n_components, RadiusSpace::Embedding)?;
     if !(1..=n_rows).contains(&n_neighbors) {
         return Err(DensityError::Matrix(KnnError::InvalidK {
@@ -207,10 +241,15 @@ pub fn refit_embedding_graph_euclidean(
     if let Some(error) = invalid_distance {
         return Err(error);
     }
-    fuzzy_simplicial_set(&neighbors).map_err(DensityError::Refit)
+    if requested_neighbors > n_neighbors {
+        fuzzy_simplicial_set_with_neighbor_target(&neighbors, requested_neighbors)
+    } else {
+        fuzzy_simplicial_set(&neighbors)
+    }
+    .map_err(DensityError::Refit)
 }
 
-fn reduce_radii(
+fn reduce_radius_log_inputs(
     graph: &CsrGraph,
     space: RadiusSpace,
     distance: impl Fn(usize, usize, usize) -> f32,
@@ -266,7 +305,7 @@ fn reduce_radii(
     }
 
     for (numerator, &weight) in numerators.iter_mut().zip(&weights) {
-        *numerator = (*numerator / weight + LOG_OFFSET).ln();
+        *numerator = *numerator / weight + LOG_OFFSET;
     }
     Ok((numerators, weights))
 }
@@ -277,16 +316,36 @@ fn euclidean_radii(
     n_features: usize,
     space: RadiusSpace,
 ) -> Result<Vec<f32>, DensityError> {
+    Ok(
+        euclidean_radius_log_inputs(graph, coordinates, n_features, space)?
+            .into_iter()
+            .map(f32::ln)
+            .collect(),
+    )
+}
+
+/// Compute the float32 arguments to the diagnostic natural logarithm.
+///
+/// Use the fitted feature graph with [`RadiusSpace::Original`], or a graph
+/// refit on the layout with [`RadiusSpace::Embedding`]. This preserves the
+/// reduction and offset of the native diagnostics for clients that apply the
+/// logarithm with their own numerical library.
+pub fn euclidean_radius_log_inputs(
+    graph: &CsrGraph,
+    coordinates: &[f32],
+    n_features: usize,
+    space: RadiusSpace,
+) -> Result<Vec<f32>, DensityError> {
     validate_coordinates(coordinates, graph.n_rows, n_features, space)?;
-    reduce_radii(graph, space, |row, column, _| {
+    reduce_radius_log_inputs(graph, space, |row, column, _| {
         let left = coordinate_row(coordinates, n_features, row);
         let right = coordinate_row(coordinates, n_features, column);
         match space {
-            RadiusSpace::Original => wide_euclidean_distance(left, right),
+            RadiusSpace::Original => euclidean_distance_wide(left, right) as f32,
             RadiusSpace::Embedding => fused_euclidean_distance(left, right),
         }
     })
-    .map(|(radii, _)| radii)
+    .map(|(values, _)| values)
 }
 
 fn validate_coordinates(
@@ -316,14 +375,6 @@ fn validate_coordinates(
 fn coordinate_row(coordinates: &[f32], n_features: usize, row: usize) -> &[f32] {
     let start = row * n_features;
     &coordinates[start..start + n_features]
-}
-
-fn wide_euclidean_distance(left: &[f32], right: &[f32]) -> f32 {
-    let squared = left.iter().zip(right).fold(0.0, |sum, (&left, &right)| {
-        let delta = f64::from(left) - f64::from(right);
-        sum + delta * delta
-    });
-    squared.sqrt() as f32
 }
 
 fn fused_euclidean_distance(left: &[f32], right: &[f32]) -> f32 {

@@ -122,11 +122,12 @@ Rust tests compare canonical CSR, repeated CSR, and a second canonical
 input. The Python tests exercise CSR, CSC, and COO conversion.
 
 Empty rows are allowed. A singleton `fit` has no `graph_`, and its
-`fit_transform` raises `AttributeError`. The Rust search ranks ties by
-ascending row index and requires each row's selected neighbors to include
-itself. An all-zero 4-by-2 matrix with `n_neighbors=2` therefore raises
+`fit_transform` raises `AttributeError` in graph mode. The original Rust
+`fit_sparse_graph` entry point ranks ties by ascending row index and requires
+each row's selected neighbors to include itself. An all-zero 4-by-2 matrix with
+`n_neighbors=2` therefore raises
 `ValueError`. Public UMAP 0.6.0 returned a graph with 10 unit-weight entries
-on this input. Three identical rows among four with `n_neighbors=2` also
+with Euclidean distance on this input. Three identical rows among four with `n_neighbors=2` also
 raise `ValueError` when the third row loses its self neighbor.
 
 Sparse precomputed distances use a separate path. [Precomputed distance comparison](transform_reference.md#csr-precomputed-distances)
@@ -276,9 +277,8 @@ This implementation preserves the caller's buffers and takes the held-out
 path for those duplicate fits. Chebyshev preserves validated stored
 duplicates for the fitted-input check. Both metrics use canonical CSR
 distance processing for held-out queries.
-Sparse cosine keeps graph-only support and its separate rule for repeated
-compressed entries. Wider queries and approximate sparse search have the
-same scope limits as the sparse Euclidean transform.
+Wider queries and approximate sparse search have the same scope limits as
+the sparse Euclidean transform.
 
 The pinned public fixture regenerates byte for byte on Windows and Ubuntu
 WSL x86-64. It checks 37
@@ -291,6 +291,75 @@ fitted-input returns.
 uv run --project reference --locked python -I reference/generate_sparse_lp_transform_fixture.py \
   --output reference/fixtures/umap-learn-0.6.0-sparse-lp-transform-x86_64.json --check
 ```
+
+## Sparse cosine
+
+The compatibility layout fits unsupervised cosine from CSR, CSC, and COO
+features. Graph and embedding transforms accept dense or sparse queries of
+the same width or narrower. Both reuse the existing CSR cosine calculation,
+ranked graph construction, and serial seeded optimizer. Caller-owned sparse
+storage is preserved. A matching normalized input bypasses the search,
+including compressed input that retains its repeated entries.
+
+- Matched-width cosine fits and queries normalize the stored values. A
+  float32 square can underflow to zero or overflow to infinity. The
+  `overflow` fixture includes a zero row, `1e-26`, and `1e20`, for which the
+  exact CSR and COO weights match. The fitted matrix has zero diagonal
+  distances. Cross-matrix distances between zero rows are 1.
+- Compressed CSR and CSC duplicates contribute separately to the norm and
+  dot product. In the `split` probe, the same dense values stored as repeated
+  half entries change both training weights and held-out memberships. COO
+  conversion coalesces duplicates, so its split entries match canonical CSR.
+- Narrower queries use the leading training columns and coalesced values.
+  Two zero-norm prefixes have distance zero. Near parallel prefixes can
+  produce slightly negative float32 distances. They determine the rank
+  order before the result is clamped to zero for the existing smoother.
+- Cosine fit ties follow ascending training index. A separate probe over
+  63 public fits with identity and sparse integer-valued matrices matched
+  that tie order. Held-out ties follow the pinned NumPy `argsort` order.
+  The cutoff is inclusive and defaults to 2. The `antipodes` fixture shows
+  entries at exactly 2 removed by default and kept with cutoff 2.25.
+
+The pinned fixture regenerates byte for byte on Windows and Ubuntu WSL
+x86-64. It covers 36 fits with 1,682 CSR weights and 434 fitted coordinates,
+and 97 transform calls with 539 ordered COO entries, 330 returned coordinates,
+19 exact-object returns, and five `ValueError` results. It includes random
+and spectral initializations, zero, one, and positive epoch budgets,
+default epoch budgets, and both transform seed endpoints. The comparison
+uses fixed `a` and `b`. With both parameters inferred from `spread` and
+`min_dist`, the public `embedding_formats` fit at epoch 30 produced different
+coordinate bits across hosts even though its CSR graph was identical.
+[Generator](generate_sparse_cosine_fixture.py) · [Fixture](fixtures/umap-learn-0.6.0-sparse-cosine-x86_64.json)
+
+```sh
+uv run --project reference --locked python reference/generate_sparse_cosine_fixture.py \
+  --output reference/fixtures/umap-learn-0.6.0-sparse-cosine-x86_64.json --check
+```
+
+Reversing the stored columns and values of each `base` CSR row made the
+public fit sort the original input in place. The mutated input and a
+sorted copy took its fitted-input shortcut. A copy made before fit took the
+held-out path. The port sorts a copy during fit. A query with the original
+unsorted storage takes its held-out path.
+
+The port rejects wider queries. The public wheel accepts some, and the
+ranked columns for the same wider input can differ across hosts. Run this
+public probe with the locked environment to reproduce the discrepancy.
+The first query produced `[3, 2, 1, 0]` on Windows and `[3, 2, 4, 1]` on WSL.
+
+```python
+from scipy.sparse import csr_matrix
+from umap import UMAP
+
+training = csr_matrix([[1., 0.], [-1., 0.], [0., 1.], [0., -1.], [0., 0.]], dtype="float32")
+queries = csr_matrix([[1., 0., 9.], [0., 0., 9.], [0., 0., 0.], [-1., 0., 9.]], dtype="float32")
+model = UMAP(metric="cosine", n_neighbors=4, n_epochs=0, init="random",
+             compatibility_layout=True, random_state=19, n_jobs=1, transform_mode="graph")
+print(model.fit(training).transform(queries).col[:4].tolist())
+```
+
+Sparse inverse transform, density, supervision, modern layouts, and
+approximate sparse search remain outside this compatibility path.
 
 ## Reproducibility
 

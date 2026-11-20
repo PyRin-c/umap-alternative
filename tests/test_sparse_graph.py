@@ -260,9 +260,6 @@ def test_unimplemented_sparse_paths_fail_explicitly():
     matrix = fixture_input("features", "csr")
     with pytest.raises(TypeError, match="CSR, CSC, or COO"):
         graph_model().fit(matrix.tolil())
-    model = graph_model(metric="cosine").fit(matrix)
-    with pytest.raises(NotImplementedError, match="after fitting sparse features"):
-        model.transform(matrix[1:])
 
 
 def test_native_sparse_binding_reports_core_validation_errors():

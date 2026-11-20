@@ -57,9 +57,9 @@ Wheel は `target/wheels/` に生成されます。Python パッケージ名は 
 
 Adam と momentum による正のエポック数の学習は未実装です。固定シードの検証条件と適用範囲は [スペクトル初期化を使った学習の参照記録](reference/spectral_fit_reference.md) と [ランダム初期化と初期座標を指定した学習の参照記録](reference/seeded_fit_reference.md) を参照してください。
 
-Euclidean、Manhattan、Chebyshev の互換レイアウトでは、CSR、CSC、COO の特徴量を学習できます。有限の切断距離で孤立した行の座標は `NaN` になります。これらの距離で疎な特徴量を学習したモデルは、密な入力と CSR、CSC、COO の入力を変換できます。グラフモードは近傍順の COO グラフを、埋め込みモードは座標を返します。[疎な Manhattan と Chebyshev の比較記録](reference/sparse_graph_reference.md#sparse-manhattan-and-chebyshev)
+Euclidean、Manhattan、Chebyshev、cosine の互換レイアウトでは、CSR、CSC、COO の特徴量を学習できます。有限の切断距離で孤立した行の座標は `NaN` になります。これらの距離で疎な特徴量を学習したモデルは、密な入力と CSR、CSC、COO の入力を変換できます。グラフモードは近傍順の COO グラフを、埋め込みモードは座標を返します。[疎な Manhattan と Chebyshev の比較記録](reference/sparse_graph_reference.md#sparse-manhattan-and-chebyshev)・[疎な cosine の比較記録](reference/sparse_graph_reference.md#sparse-cosine)
 
-`UMAP(transform_mode="graph").fit(X)` と `fit_transform(X)` は、Euclidean、Manhattan、Chebyshev、cosine の教師なし学習で SciPy の CSR、CSC、COO 形式の疎な特徴量を受け取ります。入力を変更せずに CSR に変換し、`float32` の CSR グラフを作ります。Cosine は圧縮形式の行に格納された重複要素を保持して距離を計算します。Euclidean と cosine の既存のグラフ学習経路では、自分自身が距離ゼロの同順位で近傍から外れると `ValueError` になります。形式ごとの検証結果は [疎グラフの参照記録](reference/sparse_graph_reference.md) を参照してください。
+`UMAP(transform_mode="graph").fit(X)` と `fit_transform(X)` は、Euclidean、Manhattan、Chebyshev、cosine の教師なし学習で SciPy の CSR、CSC、COO 形式の疎な特徴量を受け取ります。入力を変更せずに CSR に変換し、`float32` の CSR グラフを作ります。Cosine は圧縮形式の行に格納された重複要素を保持して距離を計算し、既定で距離が2以上の辺を除外します。切断距離を指定しない Euclidean のグラフ学習では、自分自身が距離ゼロの同順位で近傍から外れると `ValueError` になります。形式ごとの検証結果は [疎グラフの参照記録](reference/sparse_graph_reference.md) を参照してください。
 
 `local_connectivity` は有限の非負値、`set_op_mix_ratio` は0から1までを受け付けます。Python の対応済みグラフ学習と固定シードの密な埋め込みに適用できます。C の `umap_capi_fit_dense_graph_with_options` でも密なグラフに両設定を渡せます。[C ヘッダー](crates/umap-capi/include/umap_capi.h)
 

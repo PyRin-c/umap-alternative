@@ -16,6 +16,9 @@ REFERENCE = json.loads(FIXTURE.read_bytes())
 LP_REFERENCE = json.loads(FIXTURE.with_name(
     "umap-learn-0.6.0-sparse-lp-transform-x86_64.json"
 ).read_bytes())
+COSINE_REFERENCE = json.loads(FIXTURE.with_name(
+    "umap-learn-0.6.0-sparse-cosine-x86_64.json"
+).read_bytes())
 
 
 def decode(record):
@@ -55,7 +58,8 @@ def warning_records(caught):
 
 def check_transform_case(reference, name):
     case = reference["cases"][name]
-    training = decode(reference["training"][case["training"]])
+    training_record = reference["training"][case["training"]]
+    training = decode(training_record)
     model = UMAP(**(reference["options"] | case["options"]), transform_mode=case["fit_mode"])
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -77,7 +81,8 @@ def check_transform_case(reference, name):
                 assert expected["error"] == "ValueError"
                 with pytest.raises(ValueError) as error:
                     model.transform(X)
-                assert str(error.value) == expected["message"]
+                if "message" in expected:
+                    assert str(error.value) == expected["message"]
             else:
                 transformed = model.transform(X)
                 assert (transformed is fitted) == expected["identity"]
@@ -89,6 +94,7 @@ def check_transform_case(reference, name):
     assert_record(fitted, case["fitted"])
     if "fitted_graph" in case:
         assert_record(model.graph_, case["fitted_graph"])
+    assert_record(training, training_record)
 
 
 @pytest.mark.parametrize("name", REFERENCE["cases"])
@@ -101,19 +107,36 @@ def test_sparse_manhattan_and_chebyshev_match_public_060(name):
     check_transform_case(LP_REFERENCE, name)
 
 
+@pytest.mark.parametrize("name", COSINE_REFERENCE["cases"])
+def test_sparse_cosine_matches_public_060(name):
+    check_transform_case(COSINE_REFERENCE, name)
+
+
+@pytest.mark.parametrize("name", COSINE_REFERENCE["wider_query_residuals"])
+def test_wider_cosine_query_is_rejected(name):
+    reference = COSINE_REFERENCE
+    case = reference["cases"][name]
+    model = UMAP(**(reference["options"] | case["options"]), transform_mode=case["mode"])
+    requested = reference["wider_query_residuals"][name]["query"]
+    model.fit(decode(reference["training"][case["training"]]))
+    with pytest.raises(ValueError, match="X has 8 features, but UMAP was fit with 7"):
+        model.transform(decode(reference["queries"][requested]))
+
+
 @pytest.mark.parametrize("mode", ["graph", "embedding"])
-def test_identical_sparse_features_bypass_neighbor_search(monkeypatch, mode):
+@pytest.mark.parametrize("metric", ["euclidean", "cosine"])
+def test_identical_sparse_features_bypass_neighbor_search(monkeypatch, mode, metric):
     def fail(*args, **kwargs):
         pytest.fail("fitted input must bypass the query search")
 
     monkeypatch.setattr(_native, "_rank_sparse_feature_queries", fail)
     X = decode(REFERENCE["training"]["csr"])
-    model = UMAP(**REFERENCE["options"], transform_mode=mode).fit(X)
+    model = UMAP(**(REFERENCE["options"] | {"metric": metric}), transform_mode=mode).fit(X)
     fitted = model.graph_ if mode == "graph" else model.embedding_
     assert model.transform(X.tocoo()) is fitted
 
 
-@pytest.mark.parametrize("metric", ["euclidean", "manhattan", "chebyshev"])
+@pytest.mark.parametrize("metric", ["euclidean", "manhattan", "chebyshev", "cosine"])
 def test_wide_sparse_transform_uses_sparse_feature_buffers(monkeypatch, metric):
     def fail(*args, **kwargs):
         pytest.fail("CSR feature buffers must stay sparse")

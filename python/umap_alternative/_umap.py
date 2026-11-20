@@ -35,7 +35,7 @@ _METRIC_ALIASES = {
     "max": "chebyshev",
 }
 _ANGULAR_METRICS = ("cosine", "correlation")
-_SPARSE_LAYOUT_METRICS = ("euclidean", "manhattan", "chebyshev")
+_SPARSE_LAYOUT_METRICS = ("euclidean", "manhattan", "chebyshev", "cosine")
 
 _TRUNCATION_WARNING = (
     "n_neighbors is larger than the dataset size; truncating to X.shape[0] - 1"
@@ -506,20 +506,18 @@ def _sparse_features(X, *, preserve_duplicates):
 
 
 class UMAP(BaseEstimator, TransformerMixin):
-    """Fit a fuzzy graph or a serial seeded dense UMAP embedding.
+    """Fit a fuzzy graph or a serial seeded UMAP embedding.
 
     With ``transform_mode="graph"``, ``fit_transform`` returns the fuzzy
     simplicial-set graph as a float32 SciPy CSR matrix. Unsupervised feature
     fits accept dense input and SciPy CSR, CSC, or COO input for Euclidean,
-    Manhattan, and Chebyshev. Sparse features also accept cosine. Sparse
-    storage is normalized on a copy, preserving repeated CSR entries for cosine.
-    Zero-distance ties that exclude a row's self neighbor raise ``ValueError``.
-    Dense graph and embedding fits also accept cosine and correlation. For these two metrics
-    the ranked neighbors may omit self, and the default distance cutoff is 2.
+    Manhattan, Chebyshev, and cosine. Dense fits also accept correlation.
+    Sparse storage is normalized on a copy, preserving repeated CSR entries for cosine.
+    Uncut Euclidean graph fits require a self neighbor when there are zero-distance ties.
+    Cosine and correlation fits use a default distance cutoff of 2 and permit ties that omit self.
     A singleton graph fit has no ``graph_``.
     Graph ``transform`` accepts dense features or precomputed distances.
-    After a sparse Euclidean, Manhattan, or Chebyshev fit, it also accepts
-    sparse features.
+    After a sparse feature fit, it also accepts sparse features.
     It returns a float32 SciPy COO matrix with query rows and training columns
     for held-out data, and returns ``graph_`` itself for the fitted data.
 
@@ -556,8 +554,8 @@ class UMAP(BaseEstimator, TransformerMixin):
     Held-out transforms after a supplied fit require a search backend, which
     this estimator does not implement.
 
-    For an embedding, use dense features, sparse Euclidean, Manhattan, or
-    Chebyshev features, or precomputed distances, with an integer ``random_state`` in
+    For an embedding, use dense features, sparse Euclidean, Manhattan,
+    Chebyshev, or cosine features, or precomputed distances, with an integer ``random_state`` in
     ``[0, 2**32 - 1]`` and ``compatibility_layout=True``.
     The default ``init="spectral"`` uses the sampled graph to place its connected components.
     For a connected graph the embedding dimension must be smaller than the
@@ -567,9 +565,8 @@ class UMAP(BaseEstimator, TransformerMixin):
     Dense held-out features transform to ``float32`` coordinates with the
     training layout fixed. ``transform_seed`` (default 42) is an integer in
     ``[0, 2**32 - 1]``, independent of ``random_state``. The normalized fitted
-    input returns ``embedding_`` itself. Sparse Euclidean, Manhattan, and
-    Chebyshev fits accept dense, CSR, CSC, and COO queries. Float64 queries return float64
-    coordinates for this path.
+    input returns ``embedding_`` itself. Sparse feature fits accept dense, CSR,
+    CSC, and COO queries. Float64 queries return float64 coordinates for this path.
     A singleton has a zero embedding and no graph. Seeded modern Adam and
     momentum layouts accept spectral, random, and explicit initialization.
     For a fitted dense embedding, ``inverse_transform`` reconstructs
@@ -676,7 +673,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         if sparse and not precomputed:
             if sparse_embedding and not sparse_feature_layout:
                 raise TypeError(
-                    "sparse input in embedding mode requires Euclidean, Manhattan, or Chebyshev"
+                    "sparse input in embedding mode requires Euclidean, Manhattan, Chebyshev, or cosine"
                 )
             if y is not None:
                 raise TypeError("sparse input is not supported for supervised fitting")
@@ -741,7 +738,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             self._graph_transform_fit = transform_fit
         cutoff = self.disconnection_distance
         if cutoff is None:
-            cutoff = 2.0 if angular else np.inf
+            cutoff = 2.0 if angular or metric == "cosine" else np.inf
         elif not isinstance(cutoff, (int, float)):
             raise ValueError("disconnection_distance must either be None or a numeric.")
         if angular and y is not None and self.disconnection_distance is not None:
@@ -1109,8 +1106,10 @@ class UMAP(BaseEstimator, TransformerMixin):
                 raise ValueError(
                     f"X has {n_query_features} features, but UMAP was fit with {n_features}."
                 )
+            preserve_duplicates = metric == "cosine" and n_query_features == n_features
+            # Narrow cosine uses coalesced values in the shared feature prefix.
             # Earlier fits may have kept the raw CSR identity snapshot here.
-            if not training.has_canonical_format:
+            if not preserve_duplicates and not training.has_canonical_format:
                 training = _sparse_features(training, preserve_duplicates=False)
             rank_ties = (
                 _rank_tied_dense_distances
@@ -1119,7 +1118,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             )
             ranked_columns, distances = _native._rank_sparse_feature_queries(
                 _csr_buffers(training),
-                _csr_buffers(_sparse_features(queries, preserve_duplicates=False)),
+                _csr_buffers(_sparse_features(queries, preserve_duplicates=preserve_duplicates)),
                 self.n_neighbors_,
                 metric,
                 rank_ties,

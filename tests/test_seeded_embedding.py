@@ -285,8 +285,8 @@ def test_unsupported_embedding_features_fail_explicitly(overrides, exception, ma
 
 
 def test_embedding_rejects_sparse_features_with_an_unsupported_metric():
-    with pytest.raises(TypeError, match="sparse input"):
-        embedding_model(metric="cosine").fit(csr_matrix(WEIGHTED))
+    with pytest.raises(ValueError, match="recognised string"):
+        embedding_model(metric="correlation").fit(csr_matrix(WEIGHTED))
 
 
 def test_public_embedding_parameters_are_cloneable():

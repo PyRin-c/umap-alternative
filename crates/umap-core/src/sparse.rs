@@ -6,7 +6,7 @@ use std::fmt;
 use crate::fit::{build_fitted_graph, build_graph_with_cutoff};
 use crate::fuzzy_graph::{CsrGraph, GraphError, GraphOptions};
 use crate::neighbors::{
-    DistanceMetric, Neighbor, collect_neighbors, euclidean_distance_pairs,
+    DistanceMetric, Neighbor, collect_neighbors, cosine_distance_pairs, euclidean_distance_pairs,
     manhattan_distance_pairs, manhattan_distance_pairs_wide,
 };
 use crate::transform::{DenseGraphTransformError, QueryTieRanking};
@@ -271,23 +271,17 @@ pub fn exhaustive_csr_knn(
     k: usize,
     metric: impl Into<SparseDistanceMetric>,
 ) -> Result<Vec<Vec<Neighbor>>, SparseKnnError> {
-    csr_knn_counting_cutoff(
+    let input = CsrFeatures {
         indptr,
         indices,
         data,
-        (n_rows, n_features),
-        k,
-        metric.into(),
-        f32::INFINITY,
-    )
-    .map(|(neighbors, _)| neighbors)
+        shape: (n_rows, n_features),
+    };
+    csr_knn_counting_cutoff(input, k, metric.into(), f32::INFINITY).map(|(neighbors, _)| neighbors)
 }
 
 fn csr_knn_counting_cutoff(
-    indptr: &[usize],
-    indices: &[usize],
-    data: &[f32],
-    (n_rows, n_features): (usize, usize),
+    input: CsrFeatures<'_>,
     k: usize,
     metric: SparseDistanceMetric,
     cutoff: f32,
@@ -299,23 +293,17 @@ fn csr_knn_counting_cutoff(
         }
         metric => metric,
     };
-    let input = CsrFeatures {
-        indptr,
-        indices,
-        data,
-        shape: (n_rows, n_features),
-    };
     validate_csr_features(input, Some(k), metric == SparseDistanceMetric::Cosine)?;
-    let normalized_data =
-        (metric == SparseDistanceMetric::Cosine).then(|| normalize_sparse_rows(indptr, data));
+    let normalized_data = (metric == SparseDistanceMetric::Cosine)
+        .then(|| normalize_sparse_rows(input.indptr, input.data));
     let input = CsrFeatures {
-        data: normalized_data.as_deref().unwrap_or(data),
+        data: normalized_data.as_deref().unwrap_or(input.data),
         ..input
     };
     let mut removed = 0;
-    let neighbors = collect_neighbors(n_rows, k, |query_index, candidates| {
+    let neighbors = collect_neighbors(input.shape.0, k, |query_index, candidates| {
         let query = input.row(query_index);
-        for index in 0..n_rows {
+        for index in 0..input.shape.0 {
             let distance = match metric {
                 SparseDistanceMetric::Dense(metric) => {
                     sparse_distance(query, input.row(index), metric)
@@ -435,17 +423,19 @@ pub fn rank_sparse_euclidean_queries(
 
 /// A row of candidate distances in its search precision, for resolving ties.
 pub enum SparseTieDistances<'a> {
-    /// Euclidean and Chebyshev rank distances in float32.
+    /// Euclidean, Chebyshev, and cosine rank distances in float32.
     Float32(&'a [f32]),
     /// Manhattan ranks the accumulated values before rounding to float32.
     Float64(&'a [f64]),
 }
 
-/// Return selected Euclidean, Manhattan, or Chebyshev ranks from CSR rows.
+/// Return selected Euclidean, Manhattan, Chebyshev, or cosine ranks from CSR rows.
 ///
 /// Manhattan queries round each difference in float32 and sum the absolute
 /// differences in float64. Narrow queries use the leading training columns
-/// and rank in float32.
+/// and rank in float32. Cosine ranks matching-width queries using normalized
+/// stored values. A narrower query uses the cosine of the shared prefix and
+/// requires canonical CSR buffers without repeated entries.
 pub fn rank_sparse_feature_queries(
     training: CsrFeatures<'_>,
     queries: CsrFeatures<'_>,
@@ -461,11 +451,24 @@ pub fn rank_sparse_feature_queries(
             queries: queries.shape.1,
         });
     }
-    validate_csr_features(training, Some(k), false).map_err(Error::Training)?;
-    validate_csr_features(queries, None, false).map_err(Error::Queries)?;
+    let width = (queries.shape.1 < training.shape.1).then_some(queries.shape.1);
+    let normalize = metric == DistanceMetric::Cosine && width.is_none();
+    validate_csr_features(training, Some(k), normalize).map_err(Error::Training)?;
+    validate_csr_features(queries, None, normalize).map_err(Error::Queries)?;
+    let normalized_training =
+        normalize.then(|| normalize_sparse_rows(training.indptr, training.data));
+    let normalized_queries = normalize.then(|| normalize_sparse_rows(queries.indptr, queries.data));
+    let training = CsrFeatures {
+        data: normalized_training.as_deref().unwrap_or(training.data),
+        ..training
+    };
+    let queries = CsrFeatures {
+        data: normalized_queries.as_deref().unwrap_or(queries.data),
+        ..queries
+    };
+    let prefix_cosine = metric == DistanceMetric::Cosine && width.is_some();
     let mut ranks = Vec::new();
     let mut ranking = SparseFeatureRanking::new(training, metric);
-    let width = (queries.shape.1 < training.shape.1).then_some(queries.shape.1);
     for query in 0..queries.shape.0 {
         ranking.fill(queries.row(query), width);
         ranking
@@ -481,7 +484,16 @@ pub fn rank_sparse_feature_queries(
                     },
                 ));
             }
-            ranks.push(neighbor);
+            // Prefix cosine can round slightly below zero. Keep those values
+            // in the sort order, then pass zero distance to graph smoothing.
+            ranks.push(if prefix_cosine && neighbor.distance < 0.0 {
+                Neighbor {
+                    distance: 0.0,
+                    ..neighbor
+                }
+            } else {
+                neighbor
+            });
         }
     }
     Ok(ranks)
@@ -523,6 +535,10 @@ impl<'a> SparseFeatureRanking<'a> {
                     self.wide_distances.push(distance);
                     distance as f32
                 }
+                DistanceMetric::Cosine if width.is_some() => {
+                    cosine_distance_pairs(merged_features(row, candidate))
+                }
+                DistanceMetric::Cosine => sparse_cosine_distance(row, candidate),
                 _ => sparse_distance(row, candidate, self.metric),
             };
             self.candidates.push(Neighbor { index, distance });
@@ -559,7 +575,7 @@ impl<'a> SparseFeatureRanking<'a> {
 }
 
 fn validate_feature_metric(metric: DistanceMetric) -> Result<(), SparseKnnError> {
-    if metric.is_angular() {
+    if metric == DistanceMetric::Correlation {
         Err(SparseKnnError::UnsupportedFeatureMetric(metric))
     } else {
         Ok(())
@@ -616,23 +632,32 @@ pub fn fit_sparse_euclidean_graph_with_cutoff(
     cutoff: f32,
     options: GraphOptions,
 ) -> Result<(CsrGraph, usize), SparseGraphFitError> {
-    let (neighbors, removed) = csr_knn_counting_cutoff(
+    let input = CsrFeatures {
         indptr,
         indices,
         data,
         shape,
-        k,
-        DistanceMetric::Euclidean.into(),
-        cutoff,
-    )
-    .map_err(SparseGraphFitError::Knn)?;
+    };
+    fit_index_ranked_sparse_graph(input, k, DistanceMetric::Euclidean, cutoff, options)
+}
+
+fn fit_index_ranked_sparse_graph(
+    input: CsrFeatures<'_>,
+    k: usize,
+    metric: DistanceMetric,
+    cutoff: f32,
+    options: GraphOptions,
+) -> Result<(CsrGraph, usize), SparseGraphFitError> {
+    let (neighbors, removed) = csr_knn_counting_cutoff(input, k, metric.into(), cutoff)
+        .map_err(SparseGraphFitError::Knn)?;
     let graph = build_graph_with_cutoff(&neighbors, k, cutoff, options)
         .map_err(SparseGraphFitError::Graph)?;
     Ok((graph, removed))
 }
 
-/// Fit from canonical CSR, keeping Manhattan distances wide through selection
-/// and the inclusive fit cutoff. Return the count of cut ordered pairs.
+/// Fit from sorted CSR, keeping Manhattan distances wide through selection
+/// and the inclusive fit cutoff. Cosine accepts repeated columns and breaks
+/// fit ties by training index. Return the count of cut ordered pairs.
 pub fn fit_sparse_feature_graph_with_cutoff(
     input: CsrFeatures<'_>,
     k: usize,
@@ -643,6 +668,9 @@ pub fn fit_sparse_feature_graph_with_cutoff(
 ) -> Result<(CsrGraph, usize), SparseGraphFitError> {
     use SparseGraphFitError as Error;
     validate_feature_metric(metric).map_err(Error::Knn)?;
+    if metric == DistanceMetric::Cosine {
+        return fit_index_ranked_sparse_graph(input, k, metric, cutoff as f32, options);
+    }
     validate_csr_features(input, Some(k), false).map_err(Error::Knn)?;
     let mut ranking = SparseFeatureRanking::new(input, metric);
     let mut neighbors = Vec::with_capacity(input.shape.0);

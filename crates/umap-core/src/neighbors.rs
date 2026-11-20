@@ -428,10 +428,19 @@ fn cosine_distance(left: &[f32], right: &[f32]) -> f32 {
 }
 
 pub(crate) fn cosine_products(left: &[f32], right: &[f32]) -> (f64, f64, f64) {
+    cosine_products_pairs(left.iter().copied().zip(right.iter().copied()))
+}
+
+pub(crate) fn cosine_distance_pairs(values: impl Iterator<Item = (f32, f32)>) -> f32 {
+    let (dot, left_squared, right_squared) = cosine_products_pairs(values);
+    angular_distance(dot, left_squared, right_squared)
+}
+
+fn cosine_products_pairs(values: impl Iterator<Item = (f32, f32)>) -> (f64, f64, f64) {
     let mut dot = 0.0_f64;
     let mut left_squared = 0.0_f64;
     let mut right_squared = 0.0_f64;
-    for (&x, &y) in left.iter().zip(right) {
+    for (x, y) in values {
         dot += f64::from(x * y);
         left_squared += f64::from(x * x);
         right_squared += f64::from(y * y);

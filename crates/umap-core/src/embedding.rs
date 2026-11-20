@@ -1,17 +1,18 @@
 //! Dense end-to-end graph and embedding fitting.
 //!
-//! This module deliberately composes the existing dense graph, initialization,
-//! and injected-sampler optimization primitives.  It does not select random
-//! negative vertices: callers supply that policy through the sampler passed to
-//! [`fit_dense_embedding`].
+//! Both seeded and injected negative sampling use the same dense graph,
+//! initialization, and optimization pipeline.
 
 use std::fmt;
 
 use crate::fit::{DenseGraphFitError, fit_dense_graph};
 use crate::fuzzy_graph::CsrGraph;
-use crate::initialization::{InitializationError, normalize_columns, random_initialization};
+use crate::initialization::{
+    InitializationError, normalize_columns, random_initialization_with_rng,
+};
 use crate::neighbors::DistanceMetric;
 use crate::optimize::{OptimizeError, optimize_csr};
+use crate::rng::{Mt19937, NegativeSamplerError, SerialNegativeSampler};
 
 /// Initialization choices for a dense embedding fit.
 ///
@@ -54,11 +55,12 @@ impl DenseEmbeddingInit {
 /// does not infer them from a UMAP spread/minimum-distance policy.  The dense
 /// input is interpreted using `n_neighbors`, `metric`, and the caller's
 /// `n_rows`/`n_features` arguments to [`fit_dense_embedding`].
-/// Use `DenseEmbeddingConfig<f64>` to supply the curve parameters and initial
-/// learning rate at full attraction precision. The default `f32` type remains
-/// available for callers with single-precision settings.
+/// The first type parameter controls the precision of the curve parameters
+/// and the initial learning rate. The second controls repulsion strength.
+/// Use `DenseEmbeddingConfig<f64, f64>` for double precision throughout.
+/// Both type parameters default to `f32`.
 #[derive(Clone, Debug, PartialEq)]
-pub struct DenseEmbeddingConfig<T = f32> {
+pub struct DenseEmbeddingConfig<T = f32, R = f32> {
     /// Number of neighbors retained for each input row.
     pub n_neighbors: usize,
     /// Distance metric used by exhaustive dense neighbor search.
@@ -74,7 +76,7 @@ pub struct DenseEmbeddingConfig<T = f32> {
     /// Number of optimizer epochs.
     pub n_epochs: usize,
     /// Non-negative scale for negative-example updates.
-    pub repulsion_strength: f32,
+    pub repulsion_strength: R,
     /// Number of negative samples per positive sample.
     pub negative_sample_rate: f64,
     /// Seeded or explicit initial coordinates.
@@ -166,25 +168,97 @@ pub fn fit_dense_embedding<F>(
     data: &[f32],
     n_rows: usize,
     n_features: usize,
-    config: &DenseEmbeddingConfig<impl Copy + Into<f64>>,
+    config: &DenseEmbeddingConfig<impl Copy + Into<f64>, impl Copy + Into<f64>>,
     negative_sampler: F,
+) -> Result<DenseEmbedding, DenseEmbeddingFitError>
+where
+    F: FnMut(usize) -> usize,
+{
+    fit_dense_embedding_using(data, n_rows, n_features, config, |_, _| {
+        Ok(negative_sampler)
+    })
+}
+
+/// Fit a dense embedding using the serial seeded negative sampler.
+///
+/// For random initialization, the seed in [`DenseEmbeddingInit::Random`]
+/// initializes an RNG that draws the layout and then seeds the sampler.
+/// For explicit initialization, `explicit_seed` initializes the RNG and the
+/// sampler is seeded after the supplied coordinates have been normalized.
+/// Each row's sampling stream persists across all edges and epochs.
+pub fn fit_dense_embedding_seeded(
+    data: &[f32],
+    n_rows: usize,
+    n_features: usize,
+    config: &DenseEmbeddingConfig<impl Copy + Into<f64>, impl Copy + Into<f64>>,
+    explicit_seed: u32,
+) -> Result<DenseEmbedding, DenseEmbeddingFitError> {
+    fit_dense_embedding_using(
+        data,
+        n_rows,
+        n_features,
+        config,
+        |caller_rng, coordinates| {
+            let mut caller_rng = caller_rng.unwrap_or_else(|| Mt19937::new(explicit_seed));
+            let mut sampler = SerialNegativeSampler::new(
+                &mut caller_rng,
+                coordinates,
+                n_rows,
+                config.n_components,
+            )
+            .map_err(|error| match error {
+                NegativeSamplerError::InvalidShape {
+                    n_rows,
+                    n_components,
+                    values,
+                } => InitializationError::InvalidShape {
+                    n_rows,
+                    n_components,
+                    values,
+                },
+                NegativeSamplerError::NonFiniteHeadCoordinate { head, value } => {
+                    InitializationError::NonFiniteValue {
+                        index: head * config.n_components,
+                        value,
+                    }
+                }
+            })?;
+            Ok(move |row| {
+                sampler
+                    .sample(row)
+                    .expect("optimizer source row is in bounds")
+            })
+        },
+    )
+}
+
+fn fit_dense_embedding_using<F>(
+    data: &[f32],
+    n_rows: usize,
+    n_features: usize,
+    config: &DenseEmbeddingConfig<impl Copy + Into<f64>, impl Copy + Into<f64>>,
+    make_sampler: impl FnOnce(Option<Mt19937>, &[f32]) -> Result<F, InitializationError>,
 ) -> Result<DenseEmbedding, DenseEmbeddingFitError>
 where
     F: FnMut(usize) -> usize,
 {
     let graph = fit_dense_graph(data, n_rows, n_features, config.n_neighbors, config.metric)?;
 
-    let mut coordinates = match &config.init {
+    let (mut coordinates, caller_rng) = match &config.init {
         DenseEmbeddingInit::Random { seed } => {
-            random_initialization(*seed, n_rows, config.n_components)?
+            let mut caller_rng = Mt19937::new(*seed);
+            let coordinates =
+                random_initialization_with_rng(&mut caller_rng, n_rows, config.n_components)?;
+            (coordinates, Some(caller_rng))
         }
         DenseEmbeddingInit::Explicit { values } => {
             let mut coordinates = values.clone();
             normalize_columns(&mut coordinates, n_rows, config.n_components)?;
-            coordinates
+            (coordinates, None)
         }
     };
 
+    let negative_sampler = make_sampler(caller_rng, &coordinates)?;
     optimize_csr(
         &mut coordinates,
         config.n_components,

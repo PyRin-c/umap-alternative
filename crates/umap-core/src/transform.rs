@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::fuzzy_graph::{GraphOptions, batch_scale_floor, membership, row_parameters};
+use crate::fuzzy_graph::{GraphOptions, batch_scale_floor, membership, row_parameters_with_target};
 use crate::layout::{
     attractive_update_fixed_tail, negative_update_fixed_tail, validate_parameters,
     validate_repulsion_strength,
@@ -16,9 +16,10 @@ use crate::sampling::EdgeSamplingCursor;
 ///
 /// Each stored entry consists of the query row, training column, and membership
 /// at the same position in the three vectors. Uncut entries are grouped by
-/// ascending query row and ordered within a row by ascending distance, breaking
-/// ties by ascending training index. A distance cutoff can leave stored zeros
-/// at placeholder coordinates. The shape is `n_rows x n_cols`.
+/// ascending query row and preserve the search order within each row. Exact
+/// dense search breaks distance ties by ascending training index. Cut or missing
+/// entries retain stored zeros at placeholder coordinates. The shape is
+/// `n_rows x n_cols`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CooGraph {
     /// Number of query rows.
@@ -76,6 +77,77 @@ impl std::error::Error for DenseGraphTransformError {
         }
     }
 }
+
+/// Validation failures for [`transform_ranked_neighbors_graph`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum RankedQueryGraphError {
+    /// The training row count must be positive and the scale count must fit the rank width.
+    InvalidDimensions {
+        rank_width: usize,
+        scale_neighbors: usize,
+        n_training_rows: usize,
+    },
+    /// Both flat arrays must have exactly `n_query_rows * rank_width` entries.
+    InvalidShape {
+        n_query_rows: usize,
+        rank_width: usize,
+        indices: usize,
+        distances: usize,
+    },
+    /// A disconnection distance cannot be NaN.
+    InvalidCutoff,
+    /// A rank requires an in-range training column and nonnegative finite distance, or a missing pair.
+    InvalidNeighbor {
+        position: usize,
+        index: i32,
+        distance: f32,
+    },
+    /// Distances must be nondecreasing within a query row.
+    UnsortedDistances { position: usize },
+}
+
+impl fmt::Display for RankedQueryGraphError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::InvalidDimensions {
+                rank_width,
+                scale_neighbors,
+                n_training_rows,
+            } => {
+                write!(
+                    formatter,
+                    "invalid rank width {rank_width}, scale count {scale_neighbors}, or training row count {n_training_rows}"
+                )
+            }
+            Self::InvalidShape {
+                n_query_rows,
+                rank_width,
+                indices,
+                distances,
+            } => write!(
+                formatter,
+                "ranked queries require arrays of shape {n_query_rows}x{rank_width}, got {indices} indices and {distances} distances"
+            ),
+            Self::InvalidCutoff => write!(formatter, "disconnection distance cannot be NaN"),
+            Self::InvalidNeighbor {
+                position,
+                index,
+                distance,
+            } => write!(
+                formatter,
+                "invalid ranked query neighbor ({index}, {distance}) at position {position}"
+            ),
+            Self::UnsortedDistances { position } => {
+                write!(
+                    formatter,
+                    "ranked query distances decrease at position {position}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for RankedQueryGraphError {}
 
 /// Validation failures for [`initialize_transform_embedding`].
 #[derive(Clone, Debug, PartialEq)]
@@ -639,31 +711,161 @@ pub fn transform_dense_graph_with_cutoff(
             graph.data.push(neighbor.distance);
         }
     }
+    apply_query_memberships(&mut graph, k, k, cutoff, options, false);
+    Ok(graph)
+}
 
-    let target = (k as f64).log2();
-    let connectivity = (options.local_connectivity() - 1.0).max(0.0);
-    let min_scale = if connectivity == 0.0 {
-        minimum_transform_scale(&graph.data)
-    } else {
-        batch_scale_floor(&graph.data)
+/// Construct a held-out COO graph from an external search's ranked results.
+///
+/// Supply flat row-major `n_query_rows x rank_width` arrays. Each rank contains an
+/// in-range training index and a finite nonnegative distance, or `(-1, +inf)`
+/// for a missing neighbor. Distances are nondecreasing, and equal distances
+/// retain the supplied order. The search owns candidate selection and tie
+/// breaking. The query width includes missing ranks and can exceed
+/// the number of training rows.
+///
+/// The scale solve skips rank zero and targets `log2(scale_neighbors)`. Pass
+/// the effective fitted count in `1..=rank_width`, which can be smaller than
+/// the width requested from the search. Finite distances at or above the
+/// inclusive `cutoff` still contribute to scaling. Those ranks
+/// and missing ranks are stored as zero at `(0, 0)`. Missing distances do
+/// not enter scale floors. The query local connectivity is
+/// `max(0, options.local_connectivity() - 1)`.
+///
+/// # Errors
+///
+/// Returns an error for invalid counts, shapes, cutoff, index-distance pairs,
+/// or decreasing distances within a row.
+#[allow(clippy::too_many_arguments)]
+pub fn transform_ranked_neighbors_graph(
+    indices: &[i32],
+    distances: &[f32],
+    n_query_rows: usize,
+    n_training_rows: usize,
+    rank_width: usize,
+    scale_neighbors: usize,
+    cutoff: f32,
+    options: GraphOptions,
+) -> Result<CooGraph, RankedQueryGraphError> {
+    use RankedQueryGraphError as Error;
+
+    if n_training_rows == 0 || !(1..=rank_width).contains(&scale_neighbors) {
+        return Err(Error::InvalidDimensions {
+            rank_width,
+            scale_neighbors,
+            n_training_rows,
+        });
+    }
+    if n_query_rows.checked_mul(rank_width) != Some(indices.len())
+        || indices.len() != distances.len()
+    {
+        return Err(Error::InvalidShape {
+            n_query_rows,
+            rank_width,
+            indices: indices.len(),
+            distances: distances.len(),
+        });
+    }
+    if cutoff.is_nan() {
+        return Err(Error::InvalidCutoff);
+    }
+    let mut graph = CooGraph {
+        n_rows: n_query_rows,
+        n_cols: n_training_rows,
+        row: Vec::with_capacity(indices.len()),
+        col: Vec::with_capacity(indices.len()),
+        data: distances.to_vec(),
     };
-    for (row, distances) in graph.data.chunks_exact_mut(k).enumerate() {
-        let (rho, sigma) = if connectivity == 0.0 {
-            (0.0, transform_scale(distances, target).max(min_scale))
+    let mut has_missing = false;
+    for (position, (&index, &distance)) in indices.iter().zip(distances).enumerate() {
+        let column = if index == -1 && distance == f32::INFINITY {
+            has_missing = true;
+            0
+        } else if index >= 0
+            && (index as usize) < n_training_rows
+            && distance.is_finite()
+            && distance >= 0.0
+        {
+            index as usize
         } else {
-            row_parameters(distances, connectivity, min_scale)
+            return Err(Error::InvalidNeighbor {
+                position,
+                index,
+                distance,
+            });
+        };
+        if position % rank_width != 0 && distance < distances[position - 1] {
+            return Err(Error::UnsortedDistances { position });
+        }
+        graph.row.push(position / rank_width);
+        graph.col.push(column);
+    }
+    if !distances.is_empty() {
+        apply_query_memberships(
+            &mut graph,
+            rank_width,
+            scale_neighbors,
+            cutoff,
+            options,
+            has_missing,
+        );
+    }
+    Ok(graph)
+}
+
+fn apply_query_memberships(
+    graph: &mut CooGraph,
+    rank_width: usize,
+    scale_neighbors: usize,
+    cutoff: f32,
+    options: GraphOptions,
+    has_missing: bool,
+) {
+    let target = (scale_neighbors as f64).log2();
+    let connectivity = (options.local_connectivity() - 1.0).max(0.0);
+    let finite_distances;
+    let scale_distances = if has_missing {
+        finite_distances = graph
+            .data
+            .iter()
+            .copied()
+            .filter(|d| d.is_finite())
+            .collect::<Vec<_>>();
+        finite_distances.as_slice()
+    } else {
+        &graph.data
+    };
+    let min_scale = if scale_distances.is_empty() {
+        0.0
+    } else if connectivity == 0.0 {
+        minimum_transform_scale(scale_distances)
+    } else {
+        batch_scale_floor(scale_distances)
+    };
+    for (row, distances) in graph.data.chunks_exact_mut(rank_width).enumerate() {
+        let ordered: &[f32] = if has_missing {
+            &distances[..distances.partition_point(|d| d.is_finite())]
+        } else {
+            distances
+        };
+        let (rho, sigma) = if ordered.is_empty() {
+            (0.0, 1.0)
+        } else if connectivity == 0.0 {
+            (0.0, transform_scale(ordered, target).max(min_scale))
+        } else {
+            row_parameters_with_target(ordered, connectivity, min_scale, scale_neighbors)
         };
         for (column, distance) in distances.iter_mut().enumerate() {
             *distance = if *distance >= cutoff {
-                graph.row[row * k + column] = 0;
-                graph.col[row * k + column] = 0;
+                let position = row * rank_width + column;
+                graph.row[position] = 0;
+                graph.col[position] = 0;
                 0.0
             } else {
                 membership(*distance, rho, sigma)
             };
         }
     }
-    Ok(graph)
 }
 
 fn validate_matrix(data: &[f32], n_rows: usize, n_features: usize) -> Result<(), KnnError> {

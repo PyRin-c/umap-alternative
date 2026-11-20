@@ -573,7 +573,7 @@ pub(crate) fn row_parameters(
     row_parameters_with_target(distances, local_connectivity, batch_floor, distances.len())
 }
 
-fn row_parameters_with_target(
+pub(crate) fn row_parameters_with_target(
     distances: &[f32],
     local_connectivity: f64,
     batch_floor: f32,

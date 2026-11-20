@@ -5,8 +5,10 @@ use pyo3::wrap_pyfunction;
 use umap_core::fit::{fit_dense_categorical_graph, fit_dense_graph, fit_precomputed_graph};
 use umap_core::fuzzy_graph::CsrGraph;
 use umap_core::neighbors::DistanceMetric;
+use umap_core::transform::{CooGraph, transform_dense_graph};
 
 type CsrComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
+type CooComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
 
 fn csr_components(graph: CsrGraph) -> CsrComponents {
     (
@@ -74,10 +76,42 @@ fn _fit_precomputed_graph(distances: Vec<f32>, n_rows: usize, k: usize) -> PyRes
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+/// Return the shape, row indices, column indices, and memberships in COO order.
+#[pyfunction]
+fn _transform_dense_graph(
+    training: Vec<f32>,
+    n_training_rows: usize,
+    queries: Vec<f32>,
+    n_query_rows: usize,
+    n_features: usize,
+    k: usize,
+    metric: &str,
+) -> PyResult<CooComponents> {
+    let metric = parse_metric(metric)?;
+    let CooGraph {
+        n_rows,
+        n_cols,
+        row,
+        col,
+        data,
+    } = transform_dense_graph(
+        &training,
+        n_training_rows,
+        &queries,
+        n_query_rows,
+        n_features,
+        k,
+        metric,
+    )
+    .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok(((n_rows, n_cols), row, col, data))
+}
+
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", umap_core::VERSION)?;
     module.add_function(wrap_pyfunction!(_fit_dense_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_categorical_graph, module)?)?;
-    module.add_function(wrap_pyfunction!(_fit_precomputed_graph, module)?)
+    module.add_function(wrap_pyfunction!(_fit_precomputed_graph, module)?)?;
+    module.add_function(wrap_pyfunction!(_transform_dense_graph, module)?)
 }

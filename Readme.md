@@ -2,7 +2,7 @@
 
 UMAP を Rust で独立実装するリポジトリです。`umap-learn` との数値の完全一致を検証したうえで高速化し、Rust ライブラリ、C ABI、PyO3 + Maturin による Python Wheel として提供します。
 
-`crates/umap-core` が Rust 本体の置き場で、`crates/umap-python` が Python 拡張です。現段階の Python Wheel は、密な入力に対する graph-only `UMAP(transform_mode="graph")` の `fit`/`fit_transform` 経路を提供し、PyO3 の native graph primitive を内部で使います。`crates/umap-capi` は CSR graph を返す graph-only C ABI とヘッダーを提供します。埋め込みを含む full UMAP estimator、追加機能、一般的な bit parity は今後の実装・検証範囲であり、記録済み fixture は個別の証拠であって一般的な一致を主張しません。
+`crates/umap-core` が Rust 本体の置き場で、`crates/umap-python` が Python 拡張です。現段階の Python Wheel は、密な入力に対する graph-only `UMAP(transform_mode="graph")` の `fit`、`fit_transform`、`transform` を提供し、PyO3 の native graph primitive を内部で使います。`crates/umap-capi` は CSR graph を返す graph-only C ABI とヘッダーを提供します。埋め込みを含む full UMAP estimator、追加機能、一般的な bit parity は今後の実装・検証範囲であり、記録済み fixture は個別の証拠であって一般的な一致を主張しません。
 
 ## 開発環境
 
@@ -30,6 +30,10 @@ uv run --locked maturin build --release --locked --interpreter python
 ```
 
 Wheel は `target/wheels/` に生成されます。Python パッケージ名は `umap-alternative`、インポート名は `umap_alternative` です。Windows と Linux の CI では Wheel を隔離環境にインストールし、インポートまで確認します。
+
+`UMAP(transform_mode="graph").transform(X)` は、学習データと同じ特徴数の密な入力を受け取ります。学習データと `float32` 変換後のビット列が一致すれば `graph_` をそのまま返します。新しい入力に対しては、行が入力サンプル、列が学習サンプルに対応する `float32` の SciPy COO 行列を返し、近傍順と明示的なゼロ要素を保持します。
+
+変換は Euclidean、Manhattan、Chebyshev と既存の別名に対応し、`local_connectivity=1.0` を使用します。距離が等しい近傍は学習行の添字順で並べます。ビット単位の一致は記録済みの Euclidean fixture で検証しています。変換の対応範囲と公開 API の境界ケースは [変換の参照記録](reference/transform_reference.md) を参照してください。
 
 ## 独立実装と数値互換性
 

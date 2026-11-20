@@ -6,7 +6,7 @@ import numbers
 import warnings
 
 import numpy as np
-from scipy.sparse import csr_matrix, issparse
+from scipy.sparse import coo_matrix, csr_matrix, issparse
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_array
 
@@ -45,6 +45,9 @@ class UMAP(BaseEstimator, TransformerMixin):
 
     Dense ``transform_mode="graph"`` fitting is implemented and returns the
     fuzzy simplicial-set graph as a SciPy CSR matrix.
+    ``transform`` on held-out dense features returns a float32 SciPy COO
+    matrix with query rows and fitted training columns. Transforming the
+    fitted data returns ``graph_`` itself.
 
     For categorical supervision with dense features, supply one real numeric
     label per row in ``y``. A label of ``-1`` indicates an unlabeled row.
@@ -130,13 +133,16 @@ class UMAP(BaseEstimator, TransformerMixin):
         X_checked = check_array(
             X,
             dtype=np.float32,
+            order="C",
+            copy=not precomputed,
             ensure_2d=True,
             allow_nd=False,
             ensure_min_samples=1,
             ensure_min_features=1,
         )
-        X_checked = np.ascontiguousarray(X_checked, dtype=np.float32)
         n_rows, n_features = X_checked.shape
+        metric = self.metric if precomputed else _METRIC_ALIASES[self.metric.lower()]
+        transform_fit = None if precomputed else (X_checked, metric)
         if precomputed:
             if n_rows != n_features:
                 raise ValueError("precomputed distances must be a square matrix")
@@ -153,6 +159,7 @@ class UMAP(BaseEstimator, TransformerMixin):
                 del self.graph_
             if hasattr(self, "n_neighbors_"):
                 del self.n_neighbors_
+            self._graph_transform_fit = transform_fit
             return self
 
         if n_neighbors > n_rows - 1:
@@ -163,7 +170,6 @@ class UMAP(BaseEstimator, TransformerMixin):
         if precomputed:
             components = _native._fit_precomputed_graph(values, n_rows, n_neighbors)
         else:
-            metric = _METRIC_ALIASES[self.metric.lower()]
             dense_args = (values, n_rows, n_features, n_neighbors, metric)
             if y is None:
                 components = _native._fit_dense_graph(*dense_args)
@@ -182,10 +188,6 @@ class UMAP(BaseEstimator, TransformerMixin):
             shape=tuple(shape),
             dtype=np.float32,
         )
-        self.n_features_in_ = n_features
-        self.graph_ = graph
-        self.n_neighbors_ = n_neighbors
-
         # The tiny two-row case has no edges after self-neighbors are removed;
         # preserve the public warning text for this disconnected graph.
         if graph.nnz == 0:
@@ -194,6 +196,10 @@ class UMAP(BaseEstimator, TransformerMixin):
                 UserWarning,
                 stacklevel=2,
             )
+        self.n_features_in_ = n_features
+        self.graph_ = graph
+        self.n_neighbors_ = n_neighbors
+        self._graph_transform_fit = transform_fit
         return self
 
     def fit_transform(self, X, y=None, **fit_params):
@@ -209,10 +215,46 @@ class UMAP(BaseEstimator, TransformerMixin):
         return self.graph_
 
     def transform(self, X):
-        """Reject out-of-sample transforms until embedding support exists."""
+        """Return the fitted CSR graph or a held-out dense query-to-training COO graph."""
 
-        raise NotImplementedError(
-            "transform is not implemented; only dense graph fit_transform is supported"
+        self._validate_mode()
+        if not hasattr(self, "_graph_transform_fit"):
+            # Preserve the error text observed through the public transform call.
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '_raw_data'")
+        if self._graph_transform_fit is None:
+            raise NotImplementedError("transform with metric='precomputed' is not implemented")
+        training, metric = self._graph_transform_fit
+        n_training_rows, n_features = training.shape
+        if n_training_rows == 1:
+            raise ValueError("Transform unavailable when model was fit with only a single data sample.")
+        if issparse(X):
+            raise TypeError("sparse input is not supported; pass a dense array")
+        queries = check_array(X, dtype=np.float32, order="C")
+        n_query_rows, n_query_features = queries.shape
+        if n_query_features != n_features:
+            raise ValueError(
+                f"X has {n_query_features} features, but UMAP is expecting "
+                f"{n_features} features as input."
+            )
+        # The observed fast path compares normalized float32 data by bits.
+        if np.array_equal(queries.view(np.uint32), training.view(np.uint32)):
+            return self.graph_
+
+        shape, row, col, data = _native._transform_dense_graph(
+            training.ravel().tolist(),
+            n_training_rows,
+            queries.ravel().tolist(),
+            n_query_rows,
+            n_features,
+            self.n_neighbors_,
+            metric,
+        )
+        return coo_matrix(
+            (
+                np.asarray(data, dtype=np.float32),
+                (np.asarray(row, dtype=np.int64), np.asarray(col, dtype=np.int64)),
+            ),
+            shape=shape,
         )
 
     def inverse_transform(self, X):

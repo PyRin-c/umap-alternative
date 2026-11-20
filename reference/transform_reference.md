@@ -36,6 +36,38 @@ fixed inputs for downstream comparisons. The direct inverse case reads
 from `cases.embedding.transform.output`. The graph-mode checkpoint preserves
 the public COO `row`, `col`, and data arrays in their original stored order.
 
+## Graph transform boundary probes
+
+Additional probes used the locked 0.6.0 wheel's public `fit` and `transform`
+with graph mode and the fixture settings on Windows x86-64.
+
+| Input or state | Observed public result |
+| --- | --- |
+| Fitted rows as a copy, a list, a float64 array, or a Fortran-order array | The fitted `graph_` CSR object by identity. Changing a positive zero to negative zero produces COO. |
+| One held-out row | A `(1, 8)` COO matrix with four stored entries. |
+| Zero rows, zero features, a 1-D vector, or a 3-D array | `ValueError` from input validation. |
+| Transform before fitting | `AttributeError` with the message `'UMAP' object has no attribute '_raw_data'`, even if the query itself is invalid. |
+| Fit with only one training row | `ValueError` with the message `Transform unavailable when model was fit with only a single data sample.` |
+| NaN, infinity, or overflow during float32 conversion | `ValueError` from input validation. |
+| Two identical rows querying the training column `[0, 0, 0, 0, 0.1, 10, 20, 21, 25, 30]` at zero with five neighbors | COO with columns `[0, 1, 2, 3, 4]` and weights `[1, 1, 1, 1, 0]` stored for each row. |
+| Refit with NaN in the training rows | The rejected fit leaves the previous graph and held-out transform usable. |
+
+The Python wheel uses the existing Rust transform for dense feature input
+with `local_connectivity=1.0`. The wheel requires matching feature counts.
+The public small-data probe returned COO for both fewer and more query features.
+The Rust core rejects nonfinite selected distances. The same public probe
+with a finite `float32` maximum coordinate returned COO with four stored zeros
+at column zero. Python rejects sparse input and precomputed transforms.
+Embedding and inverse transforms are outside this wheel's graph estimator.
+
+The Rust core uses exhaustive Euclidean, Manhattan, or Chebyshev distances.
+It orders tied neighbors by training index. Tie order and metric arithmetic
+can differ from the reference. The Python tests check exact COO
+structure and float32 bits for the committed Euclidean graph fixture and the
+duplicate-query probe.
+
+## Reproduce the fixture
+
 Reproduce the Windows record from the repository root with the locked reference
 environment and caches under LocalAppData.
 

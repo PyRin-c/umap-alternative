@@ -146,11 +146,11 @@ def test_validation_matches_public_graph_contract():
         )
 
 
-def test_embedding_and_supervised_paths_fail_explicitly():
+def test_embedding_and_transform_paths_fail_explicitly():
     with pytest.raises(NotImplementedError, match="transform_mode='graph'"):
         UMAP().fit(BASELINE)
-    with pytest.raises(NotImplementedError, match="supervised fitting"):
-        graph_model().fit(BASELINE, np.array([0, 1, 0, 1]))
+    with pytest.raises(NotImplementedError, match="transform_mode='graph'"):
+        UMAP().fit(BASELINE, np.array([0, 1, 0, 1]))
     with pytest.raises(NotImplementedError, match="transform is not implemented"):
         graph_model().transform(BASELINE)
 

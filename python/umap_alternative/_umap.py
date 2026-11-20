@@ -44,9 +44,12 @@ class UMAP(BaseEstimator, TransformerMixin):
     """A public, graph-only UMAP estimator.
 
     Dense ``transform_mode="graph"`` fitting is implemented and returns the
-    fuzzy simplicial-set graph as a SciPy CSR matrix.  Layout/embedding,
-    supervised fitting, sparse input, callable metrics, and out-of-sample
-    transforms are intentionally not implemented yet and fail explicitly.
+    fuzzy simplicial-set graph as a SciPy CSR matrix.
+
+    For categorical supervision with dense features, supply one real numeric
+    label per row in ``y``. A label of ``-1`` indicates an unlabeled row.
+    ``target_weight`` controls the reduction of edges between known classes
+    and must lie in the interval [0, 1].
 
     With ``metric="precomputed"``, provide a square distance matrix. After
     conversion to float32, its entries must be finite and non-negative and its
@@ -73,6 +76,8 @@ class UMAP(BaseEstimator, TransformerMixin):
         set_op_mix_ratio=1.0,
         local_connectivity=1.0,
         transform_mode="embedding",
+        target_metric="categorical",
+        target_weight=0.5,
     ):
         self.n_components = n_components
         self.n_neighbors = n_neighbors
@@ -85,6 +90,8 @@ class UMAP(BaseEstimator, TransformerMixin):
         self.set_op_mix_ratio = set_op_mix_ratio
         self.local_connectivity = local_connectivity
         self.transform_mode = transform_mode
+        self.target_metric = target_metric
+        self.target_weight = target_weight
 
     def fit(self, X, y=None):
         """Fit the dense fuzzy graph and return this estimator.
@@ -104,10 +111,6 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise NotImplementedError(
                 "local_connectivity values other than 1.0 are not implemented"
             )
-        if y is not None:
-            raise NotImplementedError(
-                "supervised fitting is not implemented; omit y for graph mode"
-            )
         if not isinstance(self.n_neighbors, numbers.Integral):
             raise ValueError("n_neighbors must be an integer")
         n_neighbors = int(self.n_neighbors)
@@ -116,6 +119,11 @@ class UMAP(BaseEstimator, TransformerMixin):
 
         if issparse(X):
             raise TypeError("sparse input is not supported; pass a dense array")
+        precomputed = self.metric == "precomputed"
+        if precomputed and y is not None:
+            raise NotImplementedError(
+                "supervised fitting with metric='precomputed' is not implemented"
+            )
         # check_array is public sklearn validation.  Its default finite-value
         # check supplies the captured ``Input contains NaN.`` error while the
         # dtype argument gives float64 inputs the native f32 behavior.
@@ -129,7 +137,6 @@ class UMAP(BaseEstimator, TransformerMixin):
         )
         X_checked = np.ascontiguousarray(X_checked, dtype=np.float32)
         n_rows, n_features = X_checked.shape
-        precomputed = self.metric == "precomputed"
         if precomputed:
             if n_rows != n_features:
                 raise ValueError("precomputed distances must be a square matrix")
@@ -154,13 +161,18 @@ class UMAP(BaseEstimator, TransformerMixin):
 
         values = X_checked.ravel(order="C").tolist()
         if precomputed:
-            shape, indptr, indices, data = _native._fit_precomputed_graph(
-                values, n_rows, n_neighbors
-            )
+            components = _native._fit_precomputed_graph(values, n_rows, n_neighbors)
         else:
-            shape, indptr, indices, data = _native._fit_dense_graph(
-                values, n_rows, n_features, n_neighbors, _METRIC_ALIASES[self.metric.lower()]
-            )
+            metric = _METRIC_ALIASES[self.metric.lower()]
+            dense_args = (values, n_rows, n_features, n_neighbors, metric)
+            if y is None:
+                components = _native._fit_dense_graph(*dense_args)
+            else:
+                labels = self._categorical_labels(y, n_rows)
+                components = _native._fit_dense_categorical_graph(
+                    *dense_args, labels, self.target_weight
+                )
+        shape, indptr, indices, data = components
         graph = csr_matrix(
             (
                 np.asarray(data, dtype=np.float32),
@@ -225,6 +237,28 @@ class UMAP(BaseEstimator, TransformerMixin):
             self.metric != "precomputed" and self.metric.lower() not in _METRIC_ALIASES
         ):
             raise ValueError("metric is neither callable nor a recognised string")
+
+    def _categorical_labels(self, y, n_rows):
+        if not isinstance(self.target_metric, str) or self.target_metric != "categorical":
+            raise NotImplementedError("supervised fitting requires target_metric='categorical'")
+        label_count = len(y)
+        if label_count != n_rows:
+            raise ValueError(
+                f"Length of x = {n_rows}, length of y = {label_count}, while it must be equal."
+            )
+        labels = check_array(y, dtype="numeric", ensure_2d=False)
+        if labels.ndim == 2 and labels.shape[1] == 1:
+            labels = labels[:, 0]
+        if labels.ndim != 1:
+            raise ValueError("categorical y must contain one label per row")
+        if labels.dtype.kind not in "biuf":
+            raise ValueError("categorical labels must be real numeric values")
+
+        # Encode by equality to preserve fractional classes and the full uint64
+        # range while reserving -1 as the native unlabeled sentinel.
+        _, encoded = np.unique(labels, return_inverse=True)
+        encoded[labels == -1] = -1
+        return encoded.tolist()
 
 
 __all__ = ["UMAP"]

@@ -2,7 +2,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
-use umap_core::fit::{fit_dense_graph, fit_precomputed_graph};
+use umap_core::fit::{fit_dense_categorical_graph, fit_dense_graph, fit_precomputed_graph};
 use umap_core::fuzzy_graph::CsrGraph;
 use umap_core::neighbors::DistanceMetric;
 
@@ -49,6 +49,23 @@ fn _fit_dense_graph(
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+/// Fit a fuzzy graph from dense features and one categorical label per row.
+#[pyfunction]
+fn _fit_dense_categorical_graph(
+    data: Vec<f32>,
+    n_rows: usize,
+    n_features: usize,
+    k: usize,
+    metric: &str,
+    labels: Vec<i64>,
+    target_weight: f64,
+) -> PyResult<CsrComponents> {
+    let metric = parse_metric(metric)?;
+    fit_dense_categorical_graph(&data, n_rows, n_features, k, metric, &labels, target_weight)
+        .map(csr_components)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// Fit a fuzzy graph from a flat row-major square f32 distance matrix.
 #[pyfunction]
 fn _fit_precomputed_graph(distances: Vec<f32>, n_rows: usize, k: usize) -> PyResult<CsrComponents> {
@@ -61,5 +78,6 @@ fn _fit_precomputed_graph(distances: Vec<f32>, n_rows: usize, k: usize) -> PyRes
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", umap_core::VERSION)?;
     module.add_function(wrap_pyfunction!(_fit_dense_graph, module)?)?;
+    module.add_function(wrap_pyfunction!(_fit_dense_categorical_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_precomputed_graph, module)?)
 }

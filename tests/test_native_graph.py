@@ -91,3 +91,8 @@ def test_native_dense_graph_translates_core_validation_errors(args, message):
 def test_native_dense_graph_rejects_unknown_metric():
     with pytest.raises(ValueError, match="unsupported metric"):
         _native._fit_dense_graph([0.0, 0.0], 1, 2, 1, "cosine")
+
+
+def test_native_dense_categorical_graph_translates_label_count_error():
+    with pytest.raises(ValueError, match="expected 2 categorical labels, got 1"):
+        _native._fit_dense_categorical_graph([0.0, 1.0], 2, 1, 2, "l2", [-1], 0.5)

@@ -671,7 +671,7 @@ pub fn attractive_optimize_csr(
     Ok(())
 }
 
-fn validate_csr_inputs(
+pub(crate) fn validate_csr_inputs(
     embedding: &[f32],
     n_components: usize,
     graph: &CsrGraph,

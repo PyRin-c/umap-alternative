@@ -5,6 +5,7 @@ pub mod fuzzy_graph;
 pub mod initialization;
 pub mod layout;
 pub mod neighbors;
+pub mod optimize;
 pub mod rng;
 pub mod sampling;
 

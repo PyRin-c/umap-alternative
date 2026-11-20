@@ -1,0 +1,247 @@
+{
+  "operation": "UMAP.fit_transform",
+  "probe": "optimizer-arithmetic-discriminator-4x1",
+  "case": "base-a1-b1",
+  "environment": {
+    "platform": "Windows",
+    "machine": "AMD64",
+    "python": "CPython 3.13.12",
+    "packages": {
+      "umap-learn": "0.6.0",
+      "numpy": "2.5.5",
+      "scipy": "1.18.1",
+      "scikit-learn": "1.9.1",
+      "numba": "0.68.1",
+      "llvmlite": "0.50.0",
+      "pynndescent": "0.7.0"
+    }
+  },
+  "input": {
+    "dtype": "float32",
+    "shape": [
+      4,
+      2
+    ],
+    "values": [
+      [
+        0.0,
+        0.0
+      ],
+      [
+        1.2,
+        0.13
+      ],
+      [
+        0.35,
+        2.3
+      ],
+      [
+        3.45,
+        0.78
+      ]
+    ],
+    "bits_uint32": [
+      [
+        0,
+        0
+      ],
+      [
+        1067030938,
+        1040522936
+      ],
+      [
+        1051931443,
+        1075000115
+      ],
+      [
+        1079823565,
+        1061662228
+      ]
+    ],
+    "init_dtype": "float32",
+    "init_shape": [
+      4,
+      1
+    ],
+    "init_values": [
+      [
+        -3.0
+      ],
+      [
+        0.5
+      ],
+      [
+        2.8
+      ],
+      [
+        6.4
+      ]
+    ],
+    "init_bits_uint32": [
+      [
+        3225419776
+      ],
+      [
+        1056964608
+      ],
+      [
+        1077097267
+      ],
+      [
+        1087163597
+      ]
+    ]
+  },
+  "parameters": {
+    "n_components": 1,
+    "n_neighbors": 3,
+    "metric": "euclidean",
+    "min_dist": 0.1,
+    "spread": 1.0,
+    "learning_rate": 1.0,
+    "negative_sample_rate": 5,
+    "repulsion_strength": 0.0,
+    "n_jobs": 1,
+    "random_state": 42,
+    "compatibility_layout": true,
+    "a": 1.0,
+    "b": 1.0,
+    "init": "explicit_float32_array",
+    "checkpoints_n_epochs": [
+      0,
+      2
+    ]
+  },
+  "expected": {
+    "checkpoints": [
+      {
+        "n_epochs": 0,
+        "embedding": {
+          "dtype": "float32",
+          "shape": [
+            4,
+            1
+          ],
+          "bits_uint32": [
+            [
+              0
+            ],
+            [
+              1080970306
+            ],
+            [
+              1086681699
+            ],
+            [
+              1092616192
+            ]
+          ]
+        },
+        "graph": {
+          "format": "csr",
+          "dtype": "float32",
+          "shape": [
+            4,
+            4
+          ],
+          "indptr": [
+            0,
+            2,
+            5,
+            8,
+            10
+          ],
+          "indices": [
+            1,
+            2,
+            0,
+            2,
+            3,
+            0,
+            1,
+            3,
+            1,
+            2
+          ],
+          "data_bits_uint32": [
+            1065353216,
+            1065353216,
+            1065353216,
+            1062463343,
+            1065353216,
+            1065353216,
+            1062463343,
+            1058389993,
+            1065353216,
+            1058389993
+          ]
+        },
+        "repeat_bits_equal": true
+      },
+      {
+        "n_epochs": 2,
+        "embedding": {
+          "dtype": "float32",
+          "shape": [
+            4,
+            1
+          ],
+          "bits_uint32": [
+            [
+              1073748211
+            ],
+            [
+              1078152281
+            ],
+            [
+              1085033088
+            ],
+            [
+              1092046255
+            ]
+          ]
+        },
+        "graph": {
+          "format": "csr",
+          "dtype": "float32",
+          "shape": [
+            4,
+            4
+          ],
+          "indptr": [
+            0,
+            2,
+            5,
+            8,
+            10
+          ],
+          "indices": [
+            1,
+            2,
+            0,
+            2,
+            3,
+            0,
+            1,
+            3,
+            1,
+            2
+          ],
+          "data_bits_uint32": [
+            1065353216,
+            1065353216,
+            1065353216,
+            1062463343,
+            1065353216,
+            1065353216,
+            1062463343,
+            1058389993,
+            1065353216,
+            1058389993
+          ]
+        },
+        "repeat_bits_equal": true
+      }
+    ]
+  }
+}

@@ -1,22 +1,24 @@
 //! Small deterministic layout-update primitives.
 //!
 //! This module contains the attractive part of the UMAP objective for one
-//! edge and a deterministic attractive-only epoch scheduler.  If
+//! edge, one explicit negative-example update, and a deterministic
+//! attractive-only epoch scheduler.  If
 //! `q = ||y_i - y_j||^2`, the edge loss is
 //! `log(1 + a * q^b)`.  Its gradient with respect to `y_i` is
 //!
 //! `2 * a * b * q^(b - 1) * (y_i - y_j) / (1 + a * q^b)`.
 //!
-//! The public update functions apply one simultaneous, symmetric gradient
-//! descent step in `f32` arithmetic.  The scheduler below adds only the
-//! public attractive edge-sampling rule; repulsive updates and random
-//! negative sampling remain outside this module.
+//! The public update functions apply one gradient descent step in `f32`
+//! arithmetic.  Attractive edge updates are symmetric, while a negative
+//! example updates only the explicitly supplied current endpoint.  The
+//! scheduler below adds only the public attractive edge-sampling rule; random
+//! negative sampling remains outside this module.
 
 use std::fmt;
 
 use crate::fuzzy_graph::CsrGraph;
 
-/// Input or arithmetic failures while applying one attractive edge update.
+/// Input or arithmetic failures while applying one layout update.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LayoutError {
     /// The row-major embedding does not have a positive component count or a
@@ -98,10 +100,12 @@ pub enum LayoutError {
         /// Invalid membership weight.
         weight: f32,
     },
-    /// A parameter is non-finite or outside the domain of the attractive
-    /// objective (`a > 0`, `b > 0`, and `learning_rate >= 0`).
+    /// A parameter is non-finite or outside the supported layout-update
+    /// domain (`a > 0`, `b > 0`, and `learning_rate >= 0`; the negative
+    /// example's `repulsion_strength` is finite and non-negative).
     InvalidParameter {
-        /// Parameter name (`"a"`, `"b"`, or `"learning_rate"`).
+        /// Parameter name (`"a"`, `"b"`, `"repulsion_strength"`, or
+        /// `"learning_rate"`).
         parameter: &'static str,
         /// Supplied parameter value.
         value: f32,
@@ -146,7 +150,7 @@ impl fmt::Display for LayoutError {
             ),
             Self::InvalidEndpointShape { head, tail } => write!(
                 formatter,
-                "attractive edge endpoints have different lengths: head={head}, tail={tail}"
+                "layout-update endpoints have different lengths: head={head}, tail={tail}"
             ),
             Self::InvalidRow { row, n_rows } => {
                 write!(formatter, "layout row {row} is outside 0..{n_rows}")
@@ -197,10 +201,7 @@ impl fmt::Display for LayoutError {
                 "CSR graph row {row}, position {position} has invalid weight {weight}"
             ),
             Self::InvalidParameter { parameter, value } => {
-                write!(
-                    formatter,
-                    "invalid attractive parameter {parameter}={value}"
-                )
+                write!(formatter, "invalid layout parameter {parameter}={value}")
             }
             Self::NonFiniteValue {
                 endpoint,
@@ -211,10 +212,7 @@ impl fmt::Display for LayoutError {
                 "{endpoint} coordinate {component} is not finite: {value}"
             ),
             Self::NonFiniteArithmetic { quantity, value } => {
-                write!(
-                    formatter,
-                    "attractive update {quantity} is not finite: {value}"
-                )
+                write!(formatter, "layout update {quantity} is not finite: {value}")
             }
             Self::NonFiniteUpdate {
                 endpoint,
@@ -222,7 +220,7 @@ impl fmt::Display for LayoutError {
                 value,
             } => write!(
                 formatter,
-                "attractive update would make {endpoint} coordinate {component} non-finite: {value}"
+                "layout update would make {endpoint} coordinate {component} non-finite: {value}"
             ),
         }
     }
@@ -344,6 +342,148 @@ pub fn attractive_update_pair(
         let difference = tail[component] - head[component];
         head[component] += step * difference;
         tail[component] -= step * difference;
+    }
+
+    Ok(())
+}
+
+/// Apply one one-sided negative-example update to a current endpoint.
+///
+/// `current` is the only coordinate vector that may be modified; `other` is
+/// an explicitly selected negative example and remains unchanged.  For
+/// `s = ||current - other||^2`, the low-dimensional membership is
+/// `q = 1 / (1 + a * s^b)`.  The negative-example cross-entropy term is
+/// `-log(1 - q)`, whose gradient-descent update is
+///
+/// `current += learning_rate * (2 * repulsion_strength * b)`
+/// `    * (current - other) / (s * (1 + a * s^b))`.
+///
+/// `repulsion_strength` is a finite, non-negative scale for the negative
+/// cross-entropy term.  Negative values are rejected rather than silently
+/// changing the force from repulsive to attractive.  As with the attractive
+/// kernel, `a > 0`, `b > 0`, and `learning_rate >= 0` are required, all input
+/// coordinates must be finite, and no clipping or epsilon is introduced.
+/// A coincident pair (`s == 0`) is a validated no-op because the exact
+/// derivative is singular and has no defined direction at that point.
+/// This primitive does not choose negative examples, schedule samples, or
+/// claim exact parity with a complete UMAP optimizer/runtime.
+/// Arithmetic or candidate-coordinate overflow returns an error before this
+/// endpoint is modified.
+pub fn negative_example_update(
+    current: &mut [f32],
+    other: &[f32],
+    a: f32,
+    b: f32,
+    repulsion_strength: f32,
+    learning_rate: f32,
+) -> Result<(), LayoutError> {
+    if current.is_empty() || current.len() != other.len() {
+        return Err(if current.len() != other.len() {
+            LayoutError::InvalidEndpointShape {
+                head: current.len(),
+                tail: other.len(),
+            }
+        } else {
+            LayoutError::InvalidShape {
+                n_components: 0,
+                values: current.len(),
+            }
+        });
+    }
+
+    validate_parameters(a, b, learning_rate)?;
+    validate_repulsion_strength(repulsion_strength)?;
+    validate_endpoint(current, "current")?;
+    validate_endpoint(other, "other")?;
+
+    // Keep the distance and force calculation in the same fixed-order f32
+    // arithmetic as the attractive kernel.  No epsilon is substituted for
+    // the exact squared distance: a positive distance can still be rejected
+    // if an intermediate is not representable in f32.
+    let mut distance_squared = 0.0_f32;
+    for (&current_value, &other_value) in current.iter().zip(other.iter()) {
+        let difference = current_value - other_value;
+        distance_squared += difference * difference;
+    }
+
+    if !distance_squared.is_finite() {
+        return Err(LayoutError::NonFiniteArithmetic {
+            quantity: "squared distance",
+            value: distance_squared,
+        });
+    }
+
+    // The negative-example loss diverges at zero distance and its direction
+    // is undefined.  Treat that degenerate case as a safe, explicit no-op.
+    if distance_squared == 0.0 || repulsion_strength == 0.0 || learning_rate == 0.0 {
+        return Ok(());
+    }
+
+    let distance_power_b = distance_squared.powf(b);
+    if !distance_power_b.is_finite() {
+        return Err(LayoutError::NonFiniteArithmetic {
+            quantity: "distance power",
+            value: distance_power_b,
+        });
+    }
+
+    let objective_denominator = 1.0_f32 + a * distance_power_b;
+    if !objective_denominator.is_finite() || objective_denominator <= 0.0 {
+        return Err(LayoutError::NonFiniteArithmetic {
+            quantity: "objective denominator",
+            value: objective_denominator,
+        });
+    }
+
+    let distance_denominator = distance_squared * objective_denominator;
+    if !distance_denominator.is_finite() || distance_denominator <= 0.0 {
+        return Err(LayoutError::NonFiniteArithmetic {
+            quantity: "negative-example denominator",
+            value: distance_denominator,
+        });
+    }
+
+    let numerator = 2.0_f32 * repulsion_strength * b;
+    if !numerator.is_finite() {
+        return Err(LayoutError::NonFiniteArithmetic {
+            quantity: "negative-example numerator",
+            value: numerator,
+        });
+    }
+
+    let gradient_scale = numerator / distance_denominator;
+    if !gradient_scale.is_finite() {
+        return Err(LayoutError::NonFiniteArithmetic {
+            quantity: "negative-example gradient scale",
+            value: gradient_scale,
+        });
+    }
+    let step = learning_rate * gradient_scale;
+    if !step.is_finite() {
+        return Err(LayoutError::NonFiniteArithmetic {
+            quantity: "negative-example gradient step",
+            value: step,
+        });
+    }
+
+    // Validate every candidate before mutating any coordinate, preserving the
+    // attractive kernel's all-or-nothing behavior for a single update.
+    for (component, (&current_value, &other_value)) in current.iter().zip(other.iter()).enumerate()
+    {
+        let difference = current_value - other_value;
+        let new_current = current_value + step * difference;
+        if !new_current.is_finite() {
+            return Err(LayoutError::NonFiniteUpdate {
+                endpoint: "current",
+                component,
+                value: new_current,
+            });
+        }
+    }
+
+    for (current_value, &other_value) in current.iter_mut().zip(other.iter()) {
+        let difference = *current_value - other_value;
+        *current_value += step * difference;
     }
 
     Ok(())
@@ -654,6 +794,16 @@ fn validate_parameters(a: f32, b: f32, learning_rate: f32) -> Result<(), LayoutE
     Ok(())
 }
 
+fn validate_repulsion_strength(repulsion_strength: f32) -> Result<(), LayoutError> {
+    if !repulsion_strength.is_finite() || repulsion_strength < 0.0 {
+        return Err(LayoutError::InvalidParameter {
+            parameter: "repulsion_strength",
+            value: repulsion_strength,
+        });
+    }
+    Ok(())
+}
+
 fn validate_endpoint(endpoint: &[f32], name: &'static str) -> Result<(), LayoutError> {
     if let Some((component, value)) = endpoint
         .iter()
@@ -672,7 +822,10 @@ fn validate_endpoint(endpoint: &[f32], name: &'static str) -> Result<(), LayoutE
 
 #[cfg(test)]
 mod tests {
-    use super::{LayoutError, attractive_optimize_csr, attractive_update, attractive_update_pair};
+    use super::{
+        LayoutError, attractive_optimize_csr, attractive_update, attractive_update_pair,
+        negative_example_update,
+    };
     use crate::fuzzy_graph::CsrGraph;
 
     #[test]
@@ -701,6 +854,64 @@ mod tests {
 
         assert_eq!(head, original);
         assert_eq!(tail, original);
+    }
+
+    #[test]
+    fn negative_example_update_matches_cross_entropy_gradient() {
+        let mut current = [1.0_f32, 2.0];
+        let other = [4.0_f32, 6.0];
+
+        negative_example_update(&mut current, &other, 1.0, 0.5, 0.75, 0.4).unwrap();
+
+        // s = 25, s^b = 5, and the exact negative-example coefficient is
+        // 2 * 0.75 * 0.5 / (25 * (1 + 5)) = 0.005.  Multiplying by the
+        // learning rate gives a step of 0.002, so current moves by
+        // 0.002 * [-3, -4] while `other` is untouched.
+        assert!((current[0] - 0.994).abs() < 1.0e-6);
+        assert!((current[1] - 1.992).abs() < 1.0e-6);
+        assert_eq!(other, [4.0, 6.0]);
+    }
+
+    #[test]
+    fn negative_example_zero_distance_is_a_no_op() {
+        let mut current = [1.25_f32, -2.5];
+        let original = current;
+        let other = original;
+
+        negative_example_update(&mut current, &other, 1.0, 0.25, 1.0, 10.0).unwrap();
+
+        assert_eq!(current, original);
+        assert_eq!(other, original);
+    }
+
+    #[test]
+    fn negative_example_rejects_signed_or_nonfinite_inputs_before_modifying() {
+        let mut current = [0.0_f32, 1.0];
+        let original = current;
+        let other = [2.0_f32, 3.0];
+
+        let error = negative_example_update(&mut current, &other, 1.0, 1.0, -1.0, 0.1).unwrap_err();
+        assert!(matches!(
+            error,
+            LayoutError::InvalidParameter {
+                parameter: "repulsion_strength",
+                ..
+            }
+        ));
+        assert_eq!(current, original);
+
+        let mut current = [0.0_f32, 1.0];
+        let other = [f32::NAN, 3.0];
+        let error = negative_example_update(&mut current, &other, 1.0, 1.0, 1.0, 0.1).unwrap_err();
+        assert!(matches!(
+            error,
+            LayoutError::NonFiniteValue {
+                endpoint: "other",
+                component: 0,
+                ..
+            }
+        ));
+        assert_eq!(current, [0.0, 1.0]);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-use crate::fit::build_fitted_graph;
+use crate::fit::{build_fitted_graph, build_graph_with_cutoff};
 use crate::fuzzy_graph::{CsrGraph, GraphError, GraphOptions};
 use crate::neighbors::{DistanceMetric, Neighbor, collect_neighbors};
 
@@ -201,7 +201,28 @@ pub fn exhaustive_csr_knn(
     k: usize,
     metric: impl Into<SparseDistanceMetric>,
 ) -> Result<Vec<Vec<Neighbor>>, SparseKnnError> {
-    let metric = match metric.into() {
+    csr_knn_counting_cutoff(
+        indptr,
+        indices,
+        data,
+        (n_rows, n_features),
+        k,
+        metric.into(),
+        f32::INFINITY,
+    )
+    .map(|(neighbors, _)| neighbors)
+}
+
+fn csr_knn_counting_cutoff(
+    indptr: &[usize],
+    indices: &[usize],
+    data: &[f32],
+    (n_rows, n_features): (usize, usize),
+    k: usize,
+    metric: SparseDistanceMetric,
+    cutoff: f32,
+) -> Result<(Vec<Vec<Neighbor>>, usize), SparseKnnError> {
+    let metric = match metric {
         SparseDistanceMetric::Dense(DistanceMetric::Cosine) => SparseDistanceMetric::Cosine,
         SparseDistanceMetric::Dense(DistanceMetric::Correlation) => {
             return Err(SparseKnnError::UnsupportedCorrelation);
@@ -281,19 +302,22 @@ pub fn exhaustive_csr_knn(
             values: &data[entries],
         }
     };
-    Ok(collect_neighbors(n_rows, k, |query_index, candidates| {
+    let mut removed = 0;
+    let neighbors = collect_neighbors(n_rows, k, |query_index, candidates| {
         let query = row_at(query_index);
-        candidates.extend((0..n_rows).map(|index| Neighbor {
-            index,
-            distance: match metric {
+        for index in 0..n_rows {
+            let distance = match metric {
                 SparseDistanceMetric::Dense(metric) => {
                     sparse_distance(query, row_at(index), metric)
                 }
                 SparseDistanceMetric::Cosine if query_index == index => 0.0,
                 SparseDistanceMetric::Cosine => sparse_cosine_distance(query, row_at(index)),
-            },
-        }));
-    }))
+            };
+            removed += usize::from(distance >= cutoff);
+            candidates.push(Neighbor { index, distance });
+        }
+    });
+    Ok((neighbors, removed))
 }
 
 /// Fit a square fuzzy graph from a sorted CSR feature matrix.
@@ -333,6 +357,32 @@ pub fn fit_sparse_graph_with_options(
     let neighbors = exhaustive_csr_knn(indptr, indices, data, n_rows, n_features, k, metric)
         .map_err(SparseGraphFitError::Knn)?;
     build_fitted_graph(&neighbors, options).map_err(SparseGraphFitError::Graph)
+}
+
+/// Fit canonical CSR from Euclidean feature ranks, counting all ordered
+/// pairs at or above the cutoff. Zero-distance ties may exclude self.
+pub fn fit_sparse_euclidean_graph_with_cutoff(
+    indptr: &[usize],
+    indices: &[usize],
+    data: &[f32],
+    shape: (usize, usize),
+    k: usize,
+    cutoff: f32,
+    options: GraphOptions,
+) -> Result<(CsrGraph, usize), SparseGraphFitError> {
+    let (neighbors, removed) = csr_knn_counting_cutoff(
+        indptr,
+        indices,
+        data,
+        shape,
+        k,
+        DistanceMetric::Euclidean.into(),
+        cutoff,
+    )
+    .map_err(SparseGraphFitError::Knn)?;
+    let graph = build_graph_with_cutoff(&neighbors, k, cutoff, options)
+        .map_err(SparseGraphFitError::Graph)?;
+    Ok((graph, removed))
 }
 
 #[derive(Clone, Copy)]

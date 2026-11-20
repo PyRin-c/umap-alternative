@@ -129,9 +129,72 @@ itself. An all-zero 4-by-2 matrix with `n_neighbors=2` therefore raises
 on this input. Three identical rows among four with `n_neighbors=2` also
 raise `ValueError` when the third row loses its self neighbor.
 
-Sparse precomputed distances, supervised sparse fits, sparse
-embeddings, and transforms with sparse training data or queries remain
-outside this implementation.
+Sparse precomputed distances use a separate path. [Precomputed distance comparison](transform_reference.md#csr-precomputed-distances)
+
+## Sparse Euclidean compatibility layout
+
+Seeded Euclidean embeddings accept CSR, CSC, and COO features. The estimator
+uses the existing CSR normalization on a copy and shares the Rust row
+distance calculation, fuzzy graph construction, and seeded optimizer.
+Random and explicit initialization match from epochs 0 and 1 through epochs
+2, 3, 6, 11, and 30 on the twelve-row fixture. Both also match the
+`[0, 2, 6]` checkpoints. Graph and coordinate tests cover an empty training
+row, a stored value at feature index 4096, all-zero rows with and without
+stored zeros, and duplicate coordinates. The float64 cancellation case
+keeps the conversion order already used for CSR, CSC, and COO graph fits.
+
+The embedding graph uses the first effective number of ranks, including
+zero-distance ties that omit self. The two-row all-zero case truncates to
+one neighbor and each row has one edge in the resulting symmetric graph.
+Graph-only fits retain the self-neighbor validation described above.
+The cutoff is inclusive and the warning counts cut distances over all
+ordered row pairs. At cutoff 0.5 the eight-row fixture cuts 44 distances
+and row 7 has NaN coordinates. At cutoff zero all 64 distances are cut
+and the public fit raises `ValueError`.
+
+The fitted-input shortcut compares the sorted, validated CSR storage
+captured at fit time. Explicit zeros and float32 duplicates count toward
+this comparison. Dense queries for sparse-trained models are converted
+to CSR. Float64 fitted-input queries and `fit_transform` calls return
+float64 coordinates and leave the stored fit at float32 for multisample
+inputs. Public UMAP sorts unsorted float32 CSR training input in place.
+This estimator sorts a copy and preserves caller storage.
+
+The existing spectral initialization matches the connected fixture
+at epochs zero and six and the two-component cutoff fixture at epoch six.
+The path with six components uses the same centroid calculation with
+sparse row means flattened to one feature vector per component. Its
+coordinate bits vary by host and are recorded separately. All other
+fixture data matched byte for byte on Windows and Ubuntu WSL x86-64 with
+CPython 3.13.12 and the locked reference dependencies.
+
+Each host checks 42 fits. The comparisons cover 40 graphs with 1,530
+weights, 814 stored coordinates, 814 returned coordinates, and 144
+checkpoint coordinates, bit for bit. The fixture has 56 fitted-input probes. Of those, 32
+return the fitted coordinates, including 22 that return the same object.
+The other 24 take the public held-out path.
+
+Public UMAP produced held-out coordinates for dense and sparse
+representations of the same query. Those transforms remain unsupported
+for sparse-trained models here. Both implementations raise `ValueError`
+for inverse transform with sparse features. Sparse density embeddings and
+non-Euclidean sparse embeddings remain outside this path. The public base
+input fits densMAP and produces embeddings with Manhattan, Chebyshev, and
+cosine metrics. Public CSR-array training raised `TypingError` in the
+probe. This estimator continues to normalize SciPy sparse arrays using
+the same CSR matrix path. Approximate neighbor search, large tie sets,
+modern layouts, and supervised sparse embeddings were outside the
+verified scope.
+
+Regenerate the common fixture and the spectral record for the current
+host with the locked reference environment. Use `windows` or `linux` for
+`<host>`.
+
+```sh
+uv run --project reference --locked python -I reference/generate_sparse_euclidean_embedding_fixture.py \
+  --output reference/fixtures/umap-learn-0.6.0-sparse-euclidean-embedding-x86_64.json \
+  --spectral-output reference/fixtures/umap-learn-0.6.0-sparse-euclidean-spectral-<host>-x86_64.json --check
+```
 
 ## Reproducibility
 

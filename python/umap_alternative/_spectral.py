@@ -81,7 +81,10 @@ def _disconnected_spectral_coordinates(graph, features, metric, n_components, rn
         axes = np.eye((count + 1) // 2, n_components)
         centers = np.concatenate((axes, -axes))[:count]
     else:
-        centroids = np.array([features[rows].mean(axis=0) for rows in groups], dtype=np.float64)
+        centroids = np.array(
+            [np.asarray(features[rows].mean(axis=0)).ravel() for rows in groups],
+            dtype=np.float64,
+        )
         distances = pairwise_distances(centroids, metric=metric)
         centers = SpectralEmbedding(
             n_components=n_components, affinity="precomputed", random_state=rng

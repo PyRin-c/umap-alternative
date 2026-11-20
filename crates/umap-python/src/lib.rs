@@ -29,7 +29,7 @@ use umap_core::modern_initialization::{
 use umap_core::neighbors::DistanceMetric;
 use umap_core::parametric::prepare_parametric_edges;
 use umap_core::rng::Mt19937;
-use umap_core::sparse::fit_sparse_graph_with_options;
+use umap_core::sparse::{fit_sparse_euclidean_graph_with_cutoff, fit_sparse_graph_with_options};
 use umap_core::transform::{
     CooGraph, DenseEmbeddingTransformConfig, transform_dense_embedding_with_options,
     transform_dense_graph_with_cutoff, transform_dense_graph_with_tie_ranking,
@@ -262,6 +262,27 @@ fn _fit_sparse_graph(
         )
     })
     .map(csr_components)
+    .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+#[pyo3(signature = (indptr, indices, data, shape, k, cutoff, *, graph_options=None))]
+#[allow(clippy::too_many_arguments)]
+fn _fit_sparse_euclidean_graph_with_cutoff(
+    py: Python<'_>,
+    indptr: Vec<usize>,
+    indices: Vec<usize>,
+    data: Vec<f32>,
+    shape: (usize, usize),
+    k: usize,
+    cutoff: f32,
+    graph_options: Option<(f64, f64)>,
+) -> PyResult<(CsrComponents, usize)> {
+    let options = parse_graph_options(graph_options)?.unwrap_or_default();
+    py.detach(|| {
+        fit_sparse_euclidean_graph_with_cutoff(&indptr, &indices, &data, shape, k, cutoff, options)
+    })
+    .map(|(graph, removed)| (csr_components(graph), removed))
     .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
@@ -963,6 +984,10 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_fit_dense_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_graph_with_cutoff, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_sparse_graph, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        _fit_sparse_euclidean_graph_with_cutoff,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_embedding, module)?)?;
     module.add_function(wrap_pyfunction!(_update_dense_embedding, module)?)?;
     module.add_function(wrap_pyfunction!(_density_radius_log_inputs, module)?)?;

@@ -150,6 +150,17 @@ pub fn fit_dense_graph_with_cutoff(
 ) -> Result<(CsrGraph, usize), DenseGraphFitError> {
     let (neighbors, removed) =
         dense_knn_counting_cutoff(data, n_rows, n_features, k, metric, cutoff)?;
+    let graph = build_graph_with_cutoff(&neighbors, k, cutoff, options)?;
+    Ok((graph, removed))
+}
+
+pub(crate) fn build_graph_with_cutoff(
+    neighbors: &[Vec<Neighbor>],
+    k: usize,
+    cutoff: f32,
+    options: GraphOptions,
+) -> Result<CsrGraph, GraphError> {
+    let n_rows = neighbors.len();
     let mut distances = Vec::with_capacity(n_rows * k);
     for (row, neighbors) in neighbors.iter().enumerate() {
         for (position, &Neighbor { index, distance }) in neighbors.iter().enumerate() {
@@ -163,15 +174,13 @@ pub fn fit_dense_graph_with_cutoff(
                     position,
                     index,
                     distance,
-                }
-                .into());
+                });
             }
         }
     }
     let indices = neighbors.iter().flatten().map(|neighbor| neighbor.index);
-    Ok((
-        build_ranked_graph(indices, &distances, n_rows, k, k, options),
-        removed,
+    Ok(build_ranked_graph(
+        indices, &distances, n_rows, k, k, options,
     ))
 }
 

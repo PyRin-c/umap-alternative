@@ -1,13 +1,20 @@
 //! Dense compatibility-path graph fitting.
 //!
-//! This module is intentionally limited to the graph stage: exhaustive
-//! neighbor search followed by fuzzy simplicial-set construction. It does not
-//! expose an estimator, layout, optimization, or any other sklearn behavior.
+//! This module is intentionally limited to the graph stage: exhaustive or
+//! precomputed neighbor search followed by fuzzy simplicial-set construction.
+//! It does not expose an estimator, layout, optimization, or any other
+//! sklearn behavior.
+//!
+//! The precomputed path is the first raw core layer only: it accepts a flat
+//! `f32` square distance matrix and leaves Python-facing input conversion and
+//! boundary behavior to a later layer.
 
 use std::fmt;
 
 use crate::fuzzy_graph::{CsrGraph, GraphError, fuzzy_simplicial_set};
-use crate::neighbors::{DistanceMetric, KnnError, exhaustive_knn_with_metric};
+use crate::neighbors::{
+    DistanceMetric, KnnError, PrecomputedKnnError, exhaustive_knn_with_metric, precomputed_knn,
+};
 
 /// Errors returned while fitting a dense fuzzy graph.
 ///
@@ -54,6 +61,15 @@ impl From<GraphError> for DenseGraphFitError {
     }
 }
 
+impl From<PrecomputedKnnError> for DenseGraphFitError {
+    fn from(error: PrecomputedKnnError) -> Self {
+        match error {
+            PrecomputedKnnError::Knn(error) => Self::Knn(error),
+            PrecomputedKnnError::Graph(error) => Self::Graph(error),
+        }
+    }
+}
+
 /// Fit a fuzzy graph from a dense row-major matrix.
 ///
 /// `data` must contain exactly `n_rows * n_features` finite `f32` values. The
@@ -77,11 +93,31 @@ pub fn fit_dense_graph(
     Ok(fuzzy_simplicial_set(&neighbors)?)
 }
 
+/// Fit a fuzzy graph from a precomputed row-major square distance matrix.
+///
+/// `distances` must contain exactly `n_rows * n_rows` finite, non-negative
+/// `f32` values, with an exactly zero diagonal. Each row is ranked as supplied;
+/// the matrix may be asymmetric, and this function does not infer or enforce
+/// symmetry. The requested `k` is passed unchanged to the neighbor primitive
+/// and therefore must be in `1..=n_rows`.
+///
+/// This is the first raw core precomputed-distance scope. It returns the same
+/// canonical CSR graph as the dense metric path, while Python-facing boundary
+/// conversion and estimator behavior remain outside this API.
+pub fn fit_precomputed_graph(
+    distances: &[f32],
+    n_rows: usize,
+    k: usize,
+) -> Result<CsrGraph, DenseGraphFitError> {
+    let neighbors = precomputed_knn(distances, n_rows, k).map_err(DenseGraphFitError::from)?;
+    Ok(fuzzy_simplicial_set(&neighbors)?)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DenseGraphFitError, fit_dense_graph};
+    use super::{DenseGraphFitError, fit_dense_graph, fit_precomputed_graph};
     use crate::fuzzy_graph::{CsrGraph, fuzzy_simplicial_set};
-    use crate::neighbors::{DistanceMetric, KnnError, exhaustive_knn_with_metric};
+    use crate::neighbors::{DistanceMetric, KnnError, exhaustive_knn_with_metric, precomputed_knn};
 
     const TIES_DATA: [f32; 16] = [
         0.0, 0.0, // 0
@@ -156,5 +192,58 @@ mod tests {
             Err(DenseGraphFitError::Knn(KnnError::NonFiniteValue { index: 1, value }))
                 if value.is_nan()
         ));
+    }
+
+    #[test]
+    fn fits_precomputed_asymmetric_rows_without_symmetrizing_support() {
+        let distances = [
+            0.0, 5.0, 1.0, // row 0
+            2.0, 0.0, 4.0, // row 1
+            3.0, 1.0, 0.0, // row 2
+        ];
+        let expected = fuzzy_simplicial_set(
+            &precomputed_knn(&distances, 3, 2).expect("valid asymmetric distances"),
+        )
+        .expect("valid precomputed neighbors");
+
+        assert_eq!(
+            fit_precomputed_graph(&distances, 3, 2).expect("valid precomputed graph"),
+            expected
+        );
+        assert_eq!(expected.indptr, vec![0, 2, 4, 6]);
+        assert_eq!(expected.indices, vec![1, 2, 0, 2, 0, 1]);
+    }
+
+    #[test]
+    fn fit_precomputed_preserves_distance_validation_errors() {
+        assert_eq!(
+            fit_precomputed_graph(&[0.0, 1.0, 2.0], 2, 1),
+            Err(DenseGraphFitError::Knn(KnnError::InvalidShape {
+                n_rows: 2,
+                n_features: 2,
+                values: 3,
+            }))
+        );
+        assert_eq!(
+            fit_precomputed_graph(&[0.0, -1.0, 1.0, 0.0], 2, 2),
+            Err(DenseGraphFitError::Graph(
+                crate::fuzzy_graph::GraphError::InvalidDistance {
+                    row: 0,
+                    position: 1,
+                    index: 1,
+                    distance: -1.0,
+                },
+            ))
+        );
+        assert_eq!(
+            fit_precomputed_graph(&[0.0, 1.0, 2.0, 0.5], 2, 2),
+            Err(DenseGraphFitError::Graph(
+                crate::fuzzy_graph::GraphError::InvalidSelfDistance {
+                    row: 1,
+                    position: 1,
+                    distance: 0.5,
+                },
+            ))
+        );
     }
 }

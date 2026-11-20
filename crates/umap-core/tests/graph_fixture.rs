@@ -21,14 +21,12 @@ const TIES_WINDOWS: &str =
     include_str!("../../../reference/fixtures/umap-learn-0.6.0-ties-duplicates-float32.json");
 
 // Known clean-room residuals are recorded as (position, reference bits,
-// current bits): the symmetric 1-5 weights differ by three ULPs, while the
-// symmetric 3-4 weights differ by one ULP. A future exact match is accepted
-// at these positions; any new or different mismatch still fails.
+// current bits): the symmetric 1-5 weights differ by three ULPs. A future
+// exact match is accepted at this position; any new or different mismatch
+// still fails.
 const CONNECTED_RESIDUAL: &[(usize, u32, u32)] = &[
     (6, 0x3e43_6488, 0x3e43_6485),
-    (18, 0x3f7f_ffff, 0x3f80_0000),
     (19, 0x3e43_6488, 0x3e43_6485),
-    (24, 0x3f7f_ffff, 0x3f80_0000),
 ];
 
 #[derive(Debug, Deserialize)]
@@ -145,8 +143,8 @@ fn connected_dense_graph_regression_matches_known_bits() {
     assert_eq!(expected_graph(&linux), expected_graph(&windows));
 
     let actual = graph_from_fixture(&linux);
-    // Structure and 22/26 data bits are exact. Four known data positions are
-    // currently admitted only at the explicit bit values above.
+    // Structure and 24/26 data bits are exact. The two symmetric 1-5 entries
+    // are currently admitted only at the explicit bit values above.
     assert_graph_bits(
         &actual,
         expected_graph(&linux),

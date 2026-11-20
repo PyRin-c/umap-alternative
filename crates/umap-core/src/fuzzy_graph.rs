@@ -143,9 +143,9 @@ impl std::error::Error for GraphError {}
 /// `sum(exp(-max(0, d_ij - rho_i) / sigma_i)) = log2(k)`.
 ///
 /// The scale search and membership arithmetic use `f32`, with an absolute sum
-/// tolerance of `1e-5`. If the zero-scale limit already meets the target, the
-/// scale is reduced to `0.001 * max_offset`; rows with no positive offset use
-/// a unit scale, though all their memberships are one.
+/// tolerance of `1e-5`. If the zero-scale limit exceeds the target, the scale
+/// is reduced to `0.001 * max_offset`; rows with no positive offset use a unit
+/// scale, though all their memberships are one.
 ///
 /// Directed memberships are combined with the fuzzy union
 /// `a + b - a * b`. The diagonal is omitted from the emitted graph, while all
@@ -308,7 +308,7 @@ fn distance_scale(row_index: usize, row: &[Neighbor], rho: f32) -> f32 {
     };
 
     let zero_scale_sum = offsets.iter().filter(|offset| **offset == 0.0).count() as f32;
-    if zero_scale_sum >= target {
+    if zero_scale_sum > target {
         return (max_offset * 0.001).max(f32::MIN_POSITIVE);
     }
 

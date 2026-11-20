@@ -1,0 +1,436 @@
+{
+  "operation": "public UMAP.fit, transform, and inverse_transform on dense input",
+  "environment": {
+    "platform": "Windows",
+    "platform_release": "11",
+    "platform_version": "10.0.26200",
+    "machine": "AMD64",
+    "python": "CPython 3.13.12",
+    "packages": {
+      "umap-learn": "0.6.0",
+      "numpy": "2.5.5",
+      "scipy": "1.18.1",
+      "scikit-learn": "1.9.1",
+      "numba": "0.68.1",
+      "llvmlite": "0.50.0",
+      "pynndescent": "0.7.0"
+    },
+    "thread_environment": {
+      "OMP_NUM_THREADS": "1",
+      "OPENBLAS_NUM_THREADS": "1",
+      "MKL_NUM_THREADS": "1",
+      "NUMBA_NUM_THREADS": "1"
+    }
+  },
+  "parameters": {
+    "n_components": 2,
+    "n_neighbors": 4,
+    "metric": "euclidean",
+    "output_metric": "euclidean",
+    "init": "random",
+    "n_epochs": 45,
+    "learning_rate": 1.0,
+    "min_dist": 0.1,
+    "spread": 1.0,
+    "local_connectivity": 1.0,
+    "set_op_mix_ratio": 1.0,
+    "repulsion_strength": 1.0,
+    "negative_sample_rate": 5,
+    "transform_queue_size": 4.0,
+    "random_state": 42,
+    "transform_seed": 24,
+    "n_jobs": 1,
+    "compatibility_layout": true,
+    "force_approximation_algorithm": false
+  },
+  "inputs": {
+    "training": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        3
+      ],
+      "bits_uint32": [
+        [
+          0,
+          0,
+          1036831949
+        ],
+        [
+          1063675494,
+          1036831949,
+          1045220557
+        ],
+        [
+          1050253722,
+          1065353216,
+          1053609165
+        ],
+        [
+          1068708659,
+          1063675494,
+          1050253722
+        ],
+        [
+          1045220557,
+          1058642330,
+          1066192077
+        ],
+        [
+          1065353216,
+          1045220557,
+          1067869798
+        ],
+        [
+          1070386381,
+          1067869798,
+          1065353216
+        ],
+        [
+          1060320051,
+          1071225242,
+          1061997773
+        ]
+      ]
+    },
+    "transform_queries": {
+      "dtype": "float32",
+      "shape": [
+        3,
+        3
+      ],
+      "bits_uint32": [
+        [
+          1053609165,
+          1050253722,
+          1056964608
+        ],
+        [
+          1067030938,
+          1061997773,
+          1066192077
+        ],
+        [
+          1053609165,
+          1068708659,
+          1058642330
+        ]
+      ]
+    },
+    "inverse_queries": {
+      "dtype": "float32",
+      "shape": [
+        3,
+        2
+      ],
+      "bits_uint32": [
+        [
+          1083179008,
+          1085695590
+        ],
+        [
+          1083598438,
+          1087373312
+        ],
+        [
+          1084751872,
+          1088421888
+        ]
+      ]
+    }
+  },
+  "cases": {
+    "embedding": {
+      "transform_mode": "embedding",
+      "training": {
+        "returns_estimator": true,
+        "warnings": [],
+        "embedding": {
+          "dtype": "float32",
+          "shape": [
+            8,
+            2
+          ],
+          "bits_uint32": [
+            [
+              1083448930,
+              1085764675
+            ],
+            [
+              1084694252,
+              1084486283
+            ],
+            [
+              1084694599,
+              1087584725
+            ],
+            [
+              1083183579,
+              1089614054
+            ],
+            [
+              1081104890,
+              1086003514
+            ],
+            [
+              1078386077,
+              1085123353
+            ],
+            [
+              1084706952,
+              1090632283
+            ],
+            [
+              1085388827,
+              1089568157
+            ]
+          ]
+        }
+      },
+      "transform": {
+        "input": "inputs.transform_queries",
+        "output": {
+          "dtype": "float32",
+          "shape": [
+            3,
+            2
+          ],
+          "bits_uint32": [
+            [
+              1085008843,
+              1082524661
+            ],
+            [
+              1077941459,
+              1088937048
+            ],
+            [
+              1079418794,
+              1089990984
+            ]
+          ]
+        },
+        "warnings": []
+      },
+      "inverse_transform": {
+        "input": "inputs.inverse_queries",
+        "output": {
+          "dtype": "float32",
+          "shape": [
+            3,
+            3
+          ],
+          "bits_uint32": [
+            [
+              1062748896,
+              1028535716,
+              3208519245
+            ],
+            [
+              1058774474,
+              1062253002,
+              3209029803
+            ],
+            [
+              1045175066,
+              1071861707,
+              3203585368
+            ]
+          ]
+        },
+        "warnings": []
+      },
+      "inverse_transform_roundtrip": {
+        "input": "cases.embedding.transform.output",
+        "output": {
+          "dtype": "float32",
+          "shape": [
+            3,
+            3
+          ],
+          "bits_uint32": [
+            [
+              3209920160,
+              3206433012,
+              3206027246
+            ],
+            [
+              1074012401,
+              1039832376,
+              1065853679
+            ],
+            [
+              3193319273,
+              1074293905,
+              1070080361
+            ]
+          ]
+        },
+        "warnings": [
+          {
+            "category": "UserWarning",
+            "message": "3 inverse-transform point(s) lie outside the embedding convex hull; using nearest-vertex extrapolation."
+          }
+        ]
+      },
+      "fresh_estimator_repeat_identical": {
+        "training": true,
+        "transform": true,
+        "inverse_transform": true,
+        "inverse_transform_roundtrip": true
+      }
+    },
+    "graph": {
+      "transform_mode": "graph",
+      "training": {
+        "returns_estimator": true,
+        "warnings": [],
+        "graph": {
+          "type": "csr_matrix",
+          "format": "csr",
+          "dtype": "float32",
+          "shape": [
+            8,
+            8
+          ],
+          "nnz": 30,
+          "data_bits_uint32": [
+            1065353216,
+            1060452290,
+            1058515483,
+            1065353216,
+            1048212954,
+            1063895612,
+            1058819482,
+            1060452290,
+            1048212954,
+            1052105986,
+            1065353216,
+            1065353216,
+            1063895612,
+            1052105986,
+            1053255142,
+            1065353216,
+            1051554422,
+            1058515483,
+            1065353216,
+            1065353216,
+            1058819482,
+            1053255142,
+            1065353216,
+            1051536484,
+            1065353216,
+            1051536484,
+            1063430864,
+            1065353216,
+            1051554422,
+            1063430864
+          ],
+          "indptr": [
+            0,
+            3,
+            7,
+            12,
+            17,
+            20,
+            24,
+            27,
+            30
+          ],
+          "indices": [
+            1,
+            2,
+            4,
+            0,
+            2,
+            3,
+            5,
+            0,
+            1,
+            3,
+            4,
+            7,
+            1,
+            2,
+            5,
+            6,
+            7,
+            0,
+            2,
+            5,
+            1,
+            3,
+            4,
+            6,
+            3,
+            5,
+            7,
+            2,
+            3,
+            6
+          ]
+        }
+      },
+      "transform": {
+        "input": "inputs.transform_queries",
+        "output": {
+          "type": "coo_matrix",
+          "format": "coo",
+          "dtype": "float32",
+          "shape": [
+            3,
+            8
+          ],
+          "nnz": 12,
+          "data_bits_uint32": [
+            1060221055,
+            1060057557,
+            1059658718,
+            1059566262,
+            1060813286,
+            1060722756,
+            1059772361,
+            1058787348,
+            1062034668,
+            1061965044,
+            1059126905,
+            1058190605
+          ],
+          "row": [
+            0,
+            0,
+            0,
+            0,
+            1,
+            1,
+            1,
+            1,
+            2,
+            2,
+            2,
+            2
+          ],
+          "col": [
+            1,
+            0,
+            4,
+            2,
+            6,
+            5,
+            3,
+            4,
+            2,
+            7,
+            4,
+            3
+          ]
+        },
+        "warnings": []
+      },
+      "fresh_estimator_repeat_identical": {
+        "training": true,
+        "transform": true
+      }
+    }
+  }
+}

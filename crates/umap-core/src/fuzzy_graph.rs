@@ -410,7 +410,7 @@ fn membership_sum(offsets: &[f32], sigma: f32) -> f64 {
         .sum()
 }
 
-fn membership(distance: f32, rho: f32, sigma: f32) -> f32 {
+pub(crate) fn membership(distance: f32, rho: f32, sigma: f32) -> f32 {
     if distance <= rho {
         1.0
     } else {

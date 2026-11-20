@@ -321,7 +321,7 @@ fn compare_neighbors(left: &Neighbor, right: &Neighbor) -> Ordering {
 }
 
 impl DistanceMetric {
-    fn distance(self, left: &[f32], right: &[f32]) -> f32 {
+    pub(crate) fn distance(self, left: &[f32], right: &[f32]) -> f32 {
         match self {
             Self::Euclidean => euclidean_distance(left, right),
             Self::Manhattan => manhattan_distance(left, right),

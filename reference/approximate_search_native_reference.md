@@ -120,10 +120,27 @@ uses the approximate comparison above. The measured differences leave the
 wheel's projection state, first-round candidate scheduling and search-index
 construction open for further reconstruction.
 
+## Training rank timing
+
+Windows x86-64 release measurements used a single Rust thread, eight
+Euclidean features, and width 15 including self. MT19937 seed 2026 supplied
+row-major uniform features cast to float32. The approximate index used
+seed 42. Each median uses five runs after one warm-up. The exact timing
+includes allocating and ranking the result. The approximate timing also
+includes retaining the index for queries. Recall counts approximate ranks
+present in the exact row's best 15. These measurements cover the standalone
+Rust searches.
+
+| Rows | Exact | Approximate | Ranks present |
+| ---: | ---: | ---: | ---: |
+| 4,095 | 75.165 ms | 41.008 ms | 61,354 / 61,425 |
+| 4,096 | 75.856 ms | 39.718 ms | 61,366 / 61,440 |
+| 8,192 | 300.582 ms | 87.002 ms | 122,700 / 122,880 |
+
 ## Reproduce on Windows
 
 ```powershell
-$probe = Join-Path $PWD 'target/approximate-probe'
+$probe = Join-Path $env:LOCALAPPDATA 'Temp/umap-approximate-probe'
 New-Item -ItemType Directory -Force $probe | Out-Null
 $env:UV_CACHE_DIR = Join-Path $probe 'uv-cache'
 $env:UV_PROJECT_ENVIRONMENT = Join-Path $probe 'wheel-venv'

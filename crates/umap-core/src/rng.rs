@@ -139,6 +139,26 @@ impl Mt19937 {
         mantissa as f64 / 9_007_199_254_740_992.0
     }
 
+    /// Draw a standard normal using the polar Box–Muller transform.
+    ///
+    /// Start with an empty cache and carry it across consecutive draws to
+    /// preserve the legacy `RandomState` Gaussian stream.
+    pub(crate) fn next_standard_normal(&mut self, cache: &mut Option<f64>) -> f64 {
+        if let Some(spare) = cache.take() {
+            return spare;
+        }
+        loop {
+            let x = 2.0 * self.next_f64() - 1.0;
+            let y = 2.0 * self.next_f64() - 1.0;
+            let squared_radius = x * x + y * y;
+            if squared_radius > 0.0 && squared_radius < 1.0 {
+                let factor = (-2.0 * squared_radius.ln() / squared_radius).sqrt();
+                *cache = Some(factor * x);
+                return factor * y;
+            }
+        }
+    }
+
     fn twist(&mut self) {
         for index in 0..STATE_WORDS {
             let joined = (self.state[index] & UPPER_MASK)

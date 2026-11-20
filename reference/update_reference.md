@@ -75,6 +75,16 @@ counterparts. At two epochs, the paired embedding differs from the predicted
 initial layout. The model covers initialization, with the later optimizer
 checkpoints available as public observations.
 
+## Rust replay
+
+`prepare_dense_update` rebuilds the dense fuzzy graph and prepares the
+normalized initial layout using the fitted neighbor count. The native
+regression replays 16 dense zero- and one-epoch checkpoints, including
+successive calls, anchors selected from the original coordinates, and
+the fallback to their mean. The rebuilt CSR and coordinate bits match
+the snapshot on Windows and Ubuntu WSL. Positive-epoch optimization and
+the estimator update entry point are subsequent stages.
+
 ## Reproduction
 
 Run from the repository root. The reference lock specifies CPython 3.13.12

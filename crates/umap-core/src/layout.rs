@@ -267,53 +267,10 @@ pub fn attractive_update_pair(
     let (a, b, learning_rate) = (a.into(), b.into(), learning_rate.into());
     validate_parameters(a, b, learning_rate)?;
 
-    // Accumulate in component order with one rounding per squared component.
-    let mut distance_squared = 0.0_f32;
-    for (&head_value, &tail_value) in head.iter().zip(tail.iter()) {
-        let difference = tail_value - head_value;
-        distance_squared = difference.mul_add(difference, distance_squared);
-    }
-
-    if !distance_squared.is_finite() {
-        // A non-finite coordinate propagates through the distance. Check the
-        // endpoints here to distinguish invalid input from distance overflow.
-        validate_endpoint(head, "head")?;
-        validate_endpoint(tail, "tail")?;
-        return Err(LayoutError::NonFiniteArithmetic {
-            quantity: "squared distance",
-            value: distance_squared,
-        });
-    }
-
-    // At zero distance the derivative expression contains q^(b - 1), which
-    // is singular for some valid b values.  The positional gradient is still
-    // exactly zero because every coordinate difference is zero.
-    if distance_squared == 0.0 || learning_rate == 0.0 {
+    let distance = scalar_squared_distance(head, tail, 0.0);
+    let Some(gradient_scale) = attractive_scale(head, tail, distance, a, b, learning_rate)? else {
         return Ok(());
-    }
-
-    let distance_squared = f64::from(distance_squared);
-    let distance_power_b = distance_squared.powf(b);
-    if !distance_power_b.is_finite() {
-        return Err(LayoutError::NonFiniteArithmetic {
-            quantity: "distance power",
-            value: distance_power_b as f32,
-        });
-    }
-    let denominator = 1.0 + a * distance_power_b;
-    if !denominator.is_finite() || denominator <= 0.0 {
-        return Err(LayoutError::NonFiniteArithmetic {
-            quantity: "objective denominator",
-            value: denominator as f32,
-        });
-    }
-    let gradient_scale = (2.0 * a * b * distance_squared.powf(b - 1.0)) / denominator;
-    if !gradient_scale.is_finite() {
-        return Err(LayoutError::NonFiniteArithmetic {
-            quantity: "gradient scale",
-            value: gradient_scale as f32,
-        });
-    }
+    };
 
     let updated_endpoints = |head: f32, tail: f32| {
         let difference = f64::from(tail - head);
@@ -348,6 +305,87 @@ pub fn attractive_update_pair(
     }
 
     Ok(())
+}
+
+// The held-out optimizer owns the query buffer. Shapes and parameters have
+// already been validated, and a failed update discards that whole buffer.
+pub(crate) fn attractive_update_fixed_tail(
+    head: &mut [f32],
+    tail: &[f32],
+    a: f64,
+    b: f64,
+    learning_rate: f64,
+) -> Result<(), LayoutError> {
+    let distance = transform_squared_distance(head, tail);
+    let Some(gradient_scale) = attractive_scale(head, tail, distance, a, b, learning_rate)? else {
+        return Ok(());
+    };
+    for (component, (head, &tail)) in head.iter_mut().zip(tail).enumerate() {
+        let difference = f64::from(*head - tail);
+        let gradient = (-gradient_scale * difference).clamp(-4.0, 4.0);
+        let value = (f64::from(*head) + learning_rate * gradient) as f32;
+        if !value.is_finite() {
+            return Err(LayoutError::NonFiniteUpdate {
+                endpoint: "head",
+                component,
+                value,
+            });
+        }
+        *head = value;
+    }
+    Ok(())
+}
+
+fn attractive_scale(
+    head: &[f32],
+    tail: &[f32],
+    distance_squared: f32,
+    a: f64,
+    b: f64,
+    learning_rate: f64,
+) -> Result<Option<f64>, LayoutError> {
+    if !distance_squared.is_finite() {
+        // A non-finite coordinate propagates through the distance. Check the
+        // endpoints here to distinguish invalid input from distance overflow.
+        validate_endpoint(head, "head")?;
+        validate_endpoint(tail, "tail")?;
+        return Err(LayoutError::NonFiniteArithmetic {
+            quantity: "squared distance",
+            value: distance_squared,
+        });
+    }
+
+    // At zero distance the derivative expression contains q^(b - 1), which
+    // is singular for some valid b values.  The positional gradient is still
+    // exactly zero because every coordinate difference is zero.
+    if distance_squared == 0.0 || learning_rate == 0.0 {
+        return Ok(None);
+    }
+
+    let distance_squared = f64::from(distance_squared);
+    let distance_power_b = distance_squared.powf(b);
+    if !distance_power_b.is_finite() {
+        return Err(LayoutError::NonFiniteArithmetic {
+            quantity: "distance power",
+            value: distance_power_b as f32,
+        });
+    }
+    let denominator = 1.0 + a * distance_power_b;
+    if !denominator.is_finite() || denominator <= 0.0 {
+        return Err(LayoutError::NonFiniteArithmetic {
+            quantity: "objective denominator",
+            value: denominator as f32,
+        });
+    }
+    let gradient_scale = (2.0 * a * b * distance_squared.powf(b - 1.0)) / denominator;
+    if !gradient_scale.is_finite() {
+        return Err(LayoutError::NonFiniteArithmetic {
+            quantity: "gradient scale",
+            value: gradient_scale as f32,
+        });
+    }
+
+    Ok(Some(gradient_scale))
 }
 
 /// Apply one one-sided negative-example update to a current endpoint.
@@ -400,12 +438,47 @@ pub fn negative_example_update(
     validate_endpoint(current, "current")?;
     validate_endpoint(other, "other")?;
 
-    let mut distance_squared = 0.0_f32;
-    for (&current_value, &other_value) in current.iter().zip(other.iter()) {
-        let difference = current_value - other_value;
-        distance_squared = difference.mul_add(difference, distance_squared);
-    }
+    let distance = scalar_squared_distance(current, other, 0.0);
+    apply_negative_update(
+        current,
+        other,
+        distance,
+        a,
+        b,
+        repulsion_strength,
+        learning_rate,
+    )
+}
 
+pub(crate) fn negative_update_fixed_tail(
+    current: &mut [f32],
+    other: &[f32],
+    a: f64,
+    b: f64,
+    repulsion_strength: f64,
+    learning_rate: f64,
+) -> Result<(), LayoutError> {
+    let distance = transform_squared_distance(current, other);
+    apply_negative_update(
+        current,
+        other,
+        distance,
+        a,
+        b,
+        repulsion_strength,
+        learning_rate,
+    )
+}
+
+fn apply_negative_update(
+    current: &mut [f32],
+    other: &[f32],
+    distance_squared: f32,
+    a: f64,
+    b: f64,
+    repulsion_strength: f64,
+    learning_rate: f64,
+) -> Result<(), LayoutError> {
     if !distance_squared.is_finite() {
         return Err(LayoutError::NonFiniteArithmetic {
             quantity: "squared distance",
@@ -482,6 +555,57 @@ pub fn negative_example_update(
     }
 
     Ok(())
+}
+
+fn scalar_squared_distance(head: &[f32], tail: &[f32], mut sum: f32) -> f32 {
+    for (&head, &tail) in head.iter().zip(tail) {
+        let difference = head - tail;
+        sum = difference.mul_add(difference, sum);
+    }
+    sum
+}
+
+// The Windows x86-64 transform checkpoints distinguish three accumulation
+// stages, with float32 rounding at every lane combination.
+fn transform_squared_distance(head: &[f32], tail: &[f32]) -> f32 {
+    let (head_blocks, head) = head.as_chunks::<32>();
+    let (tail_blocks, tail) = tail.as_chunks::<32>();
+    let mut sum = 0.0;
+    if !head_blocks.is_empty() {
+        let mut lanes = [0.0; 32];
+        accumulate_squared_blocks(&mut lanes, head_blocks, tail_blocks);
+        let combined: [f32; 8] = std::array::from_fn(|lane| {
+            (lanes[lane] + lanes[lane + 8]) + (lanes[lane + 16] + lanes[lane + 24])
+        });
+        let [a, b, c, d, e, f, g, h] = combined;
+        sum = reduce_four([a + e, b + f, c + g, d + h]);
+    }
+
+    let (head_blocks, head) = head.as_chunks::<4>();
+    let (tail_blocks, tail) = tail.as_chunks::<4>();
+    if !head_blocks.is_empty() {
+        let mut lanes = [sum, 0.0, 0.0, 0.0];
+        accumulate_squared_blocks(&mut lanes, head_blocks, tail_blocks);
+        sum = reduce_four(lanes);
+    }
+    scalar_squared_distance(head, tail, sum)
+}
+
+fn reduce_four([a, b, c, d]: [f32; 4]) -> f32 {
+    (a + c) + (b + d)
+}
+
+fn accumulate_squared_blocks<const N: usize>(
+    lanes: &mut [f32; N],
+    head: &[[f32; N]],
+    tail: &[[f32; N]],
+) {
+    for (head, tail) in head.iter().zip(tail) {
+        for ((sum, &head), &tail) in lanes.iter_mut().zip(head).zip(tail) {
+            let difference = head - tail;
+            *sum = difference.mul_add(difference, *sum);
+        }
+    }
 }
 
 /// Apply one symmetric attractive update to two rows in a row-major matrix.
@@ -769,7 +893,7 @@ pub(crate) fn validate_csr_inputs(
     Ok(())
 }
 
-fn validate_parameters(a: f64, b: f64, learning_rate: f64) -> Result<(), LayoutError> {
+pub(crate) fn validate_parameters(a: f64, b: f64, learning_rate: f64) -> Result<(), LayoutError> {
     if !a.is_finite() || a <= 0.0 {
         return Err(LayoutError::InvalidParameter {
             parameter: "a",

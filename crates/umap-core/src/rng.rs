@@ -230,11 +230,16 @@ impl SerialNegativeSampler {
     /// Returns `None` for an out-of-range head. A valid draw can select any
     /// vertex, including `head` itself.
     pub fn sample(&mut self, head: usize) -> Option<usize> {
+        self.sample_from(head, self.heads.len())
+    }
+
+    // For a held-out embedding the heads and the sampled vertices belong
+    // to different matrices. The caller supplies the positive tail count.
+    pub(crate) fn sample_from(&mut self, head: usize, n_vertices: usize) -> Option<usize> {
         // The validated input slice held at least one f32 per vertex, so the
         // vertex count fits in i64 on Rust's supported pointer widths.
-        let n_vertices = self.heads.len() as i64;
         let word = self.next_word(head)?;
-        Some(i64::from(word).rem_euclid(n_vertices) as usize)
+        Some(i64::from(word).rem_euclid(n_vertices as i64) as usize)
     }
 
     fn from_raw_words(
@@ -264,15 +269,25 @@ impl SerialNegativeSampler {
             }
         }
 
+        Ok(Self::from_head_coordinates(
+            rows.map(|row| row[0]),
+            next_raw_word,
+        ))
+    }
+
+    pub(crate) fn from_head_coordinates(
+        coordinates: impl Iterator<Item = f32>,
+        next_raw_word: impl FnMut() -> u32,
+    ) -> Self {
         let seed = draw_negative_seed(next_raw_word);
-        let heads = rows
-            .map(|row| {
+        let heads = coordinates
+            .map(|coordinate| {
                 // Promote the coordinate before reinterpreting its binary64 bits.
-                let coordinate_bits = f64::from(row[0]).to_bits() as i64;
+                let coordinate_bits = f64::from(coordinate).to_bits() as i64;
                 seed.map(|lane| coordinate_bits.wrapping_add(lane))
             })
             .collect();
-        Ok(Self { heads })
+        Self { heads }
     }
 
     fn next_word(&mut self, head: usize) -> Option<i32> {

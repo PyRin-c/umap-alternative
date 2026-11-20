@@ -1,9 +1,16 @@
-//! Directed bipartite graphs and embedding initialization for held-out UMAP inputs.
+//! Directed bipartite graphs and serial embeddings for held-out UMAP inputs.
 
 use std::fmt;
 
 use crate::fuzzy_graph::membership;
+use crate::layout::{
+    attractive_update_fixed_tail, negative_update_fixed_tail, validate_parameters,
+    validate_repulsion_strength,
+};
 use crate::neighbors::{DistanceMetric, KnnError, Neighbor};
+use crate::optimize::OptimizeError;
+use crate::rng::{Mt19937, SerialNegativeSampler};
+use crate::sampling::EdgeSamplingCursor;
 
 /// A rectangular coordinate (COO) graph of directed fuzzy memberships.
 ///
@@ -138,6 +145,207 @@ impl fmt::Display for TransformInitializationError {
 }
 
 impl std::error::Error for TransformInitializationError {}
+
+/// Settings for a serial compatibility transform against a fitted dense embedding.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DenseEmbeddingTransformConfig {
+    /// Effective number of neighbors used to build query-to-training memberships.
+    pub n_neighbors: usize,
+    /// Distance metric over feature rows. Layout distances are Euclidean.
+    pub metric: DistanceMetric,
+    /// Number of coordinates in each fitted and transformed row.
+    pub n_components: usize,
+    /// Curve coefficient used for the fit.
+    pub a: f64,
+    /// Curve exponent used for the fit.
+    pub b: f64,
+    /// Fit learning rate. The transform starts at one quarter of this value.
+    pub learning_rate: f64,
+    /// Fit epoch setting. An explicit count is divided by three, rounding down.
+    /// The default uses 100 transform epochs for up to 10,000 queries and 30 above that.
+    pub fit_epochs: Option<usize>,
+    /// Non-negative scale for negative-example updates.
+    pub repulsion_strength: f64,
+    /// Negative samples per positive sample.
+    pub negative_sample_rate: f64,
+    /// Seed for each transform call, independent of the fitting RNG.
+    pub transform_seed: u32,
+    /// Exclude neighbors at or above this positive feature distance.
+    /// Using `None` keeps every selected neighbor.
+    pub disconnection_distance: Option<f32>,
+}
+
+/// Failures returned by [`transform_dense_embedding`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum DenseEmbeddingTransformError {
+    /// Query-to-training graph construction failed.
+    Graph(DenseGraphTransformError),
+    /// Layout initialization failed.
+    Initialization(TransformInitializationError),
+    /// Layout parameters, timing, or arithmetic were invalid.
+    Optimize(OptimizeError),
+    /// The disconnection distance was NaN or nonpositive.
+    InvalidDisconnectionDistance(f32),
+}
+
+impl fmt::Display for DenseEmbeddingTransformError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Graph(error) => write!(formatter, "dense embedding transform graph: {error}"),
+            Self::Initialization(error) => {
+                write!(formatter, "dense transform initialization: {error}")
+            }
+            Self::Optimize(error) => write!(formatter, "dense transform optimization: {error}"),
+            Self::InvalidDisconnectionDistance(value) => {
+                write!(
+                    formatter,
+                    "disconnection distance must be positive, got {value}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for DenseEmbeddingTransformError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Graph(error) => Some(error),
+            Self::Initialization(error) => Some(error),
+            Self::Optimize(error) => Some(error),
+            Self::InvalidDisconnectionDistance(_) => None,
+        }
+    }
+}
+
+/// Compute row-major held-out coordinates with the serial compatibility layout.
+///
+/// Supply finite training and query feature matrices with the same feature
+/// count and the corresponding fitted coordinates. The exact neighbor search
+/// uses training local connectivity one. Fitted coordinates serve as fixed
+/// endpoints throughout optimization. A query without positive memberships
+/// returns NaN coordinates. Fitted NaNs may propagate during initialization
+/// and are ignored by layout updates involving those rows.
+///
+/// This function treats all supplied rows as held-out queries, including exact
+/// matches to individual training rows. Estimators that return their existing
+/// embedding for the full fitted input handle that special case before calling
+/// this function.
+///
+/// # Errors
+///
+/// Returns an error for invalid input shapes, graph or layout settings, or
+/// overflowing arithmetic in a scheduled update.
+pub fn transform_dense_embedding(
+    training: &[f32],
+    n_training_rows: usize,
+    queries: &[f32],
+    n_query_rows: usize,
+    n_features: usize,
+    fitted_embedding: &[f32],
+    config: &DenseEmbeddingTransformConfig,
+) -> Result<Vec<f32>, DenseEmbeddingTransformError> {
+    use DenseEmbeddingTransformError as Error;
+
+    let cutoff = config.disconnection_distance.unwrap_or(f32::INFINITY);
+    if cutoff.is_nan() || cutoff <= 0.0 {
+        return Err(Error::InvalidDisconnectionDistance(cutoff));
+    }
+    let graph = transform_dense_graph_with_cutoff(
+        training,
+        n_training_rows,
+        queries,
+        n_query_rows,
+        n_features,
+        config.n_neighbors,
+        config.metric,
+        cutoff,
+    )
+    .map_err(Error::Graph)?;
+    let mut embedding =
+        initialize_transform_embedding(&graph, fitted_embedding, config.n_components)
+            .map_err(Error::Initialization)?;
+    optimize_transform(&mut embedding, fitted_embedding, &graph, config)
+        .map_err(Error::Optimize)?;
+    Ok(embedding)
+}
+
+fn optimize_transform(
+    embedding: &mut [f32],
+    fitted_embedding: &[f32],
+    graph: &CooGraph,
+    config: &DenseEmbeddingTransformConfig,
+) -> Result<(), OptimizeError> {
+    let n_components = config.n_components;
+    let (a, b, repulsion) = (config.a, config.b, config.repulsion_strength);
+    validate_parameters(a, b, config.learning_rate)?;
+    validate_repulsion_strength(repulsion)?;
+    EdgeSamplingCursor::from_positive_interval(1.0, config.negative_sample_rate)?;
+    let n_epochs = config.fit_epochs.map_or_else(
+        || if graph.n_rows <= 10_000 { 100 } else { 30 },
+        |fit_epochs| fit_epochs / 3,
+    );
+    if n_epochs < 2 {
+        return Ok(());
+    }
+
+    let maximum_weight = graph.data.iter().copied().fold(0.0_f32, f32::max);
+    if maximum_weight == 0.0 {
+        return Ok(());
+    }
+    let minimum_weight = maximum_weight / n_epochs as f32;
+    let mut edges = Vec::new();
+    for ((&head, &tail), &weight) in graph.row.iter().zip(&graph.col).zip(&graph.data) {
+        if weight > 0.0 && weight >= minimum_weight {
+            // Round the expected positive count in float32 before deriving
+            // the float64 interval. Division by weight alone can miss a due epoch.
+            let positive_count = n_epochs as f32 * (weight / maximum_weight);
+            let cursor = EdgeSamplingCursor::from_positive_interval(
+                n_epochs as f64 / f64::from(positive_count),
+                config.negative_sample_rate,
+            )?;
+            edges.push((head, tail, cursor));
+        }
+    }
+
+    let fitted_rows: Vec<_> = fitted_embedding
+        .chunks_exact(n_components)
+        .map(|row| (!row.iter().any(|value| value.is_nan())).then_some(row))
+        .collect();
+    let mut rng = Mt19937::new(config.transform_seed);
+    let mut sampler = SerialNegativeSampler::from_head_coordinates(
+        embedding.chunks_exact(n_components).map(|row| row[0]),
+        || rng.next_u32(),
+    );
+
+    let initial_alpha = config.learning_rate / 4.0;
+    let mut alpha = initial_alpha;
+    for epoch in 0..n_epochs {
+        let epoch = epoch as f64;
+        for (head, tail, cursor) in &mut edges {
+            if !cursor.positive_due(epoch)? {
+                continue;
+            }
+            let start = *head * n_components;
+            let current = &mut embedding[start..start + n_components];
+            if current.iter().any(|value| value.is_nan()) {
+                continue;
+            }
+            if let Some(other) = fitted_rows[*tail] {
+                attractive_update_fixed_tail(current, other, a, b, alpha)?;
+            }
+            for _ in 0..cursor.take_negative_samples(epoch)? {
+                let vertex = sampler
+                    .sample_from(*head, graph.n_cols)
+                    .expect("graph head has a negative sampling stream");
+                if let Some(other) = fitted_rows[vertex] {
+                    negative_update_fixed_tail(current, other, a, b, repulsion, alpha)?;
+                }
+            }
+        }
+        alpha = initial_alpha * (1.0 - epoch / n_epochs as f64);
+    }
+    Ok(())
+}
 
 /// Initialize a row-major query embedding from the held-out graph and fitted coordinates.
 ///
@@ -299,6 +507,29 @@ pub fn transform_dense_graph(
     k: usize,
     metric: DistanceMetric,
 ) -> Result<CooGraph, DenseGraphTransformError> {
+    transform_dense_graph_with_cutoff(
+        training,
+        n_training_rows,
+        queries,
+        n_query_rows,
+        n_features,
+        k,
+        metric,
+        f32::INFINITY,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn transform_dense_graph_with_cutoff(
+    training: &[f32],
+    n_training_rows: usize,
+    queries: &[f32],
+    n_query_rows: usize,
+    n_features: usize,
+    k: usize,
+    metric: DistanceMetric,
+    cutoff: f32,
+) -> Result<CooGraph, DenseGraphTransformError> {
     if n_features == 0 {
         return Err(DenseGraphTransformError::NoFeatures);
     }
@@ -357,7 +588,11 @@ pub fn transform_dense_graph(
     for distances in graph.data.chunks_exact_mut(k) {
         let sigma = transform_scale(distances, target).max(minimum_scale);
         for distance in distances {
-            *distance = membership(*distance, 0.0, sigma);
+            *distance = if *distance >= cutoff {
+                0.0
+            } else {
+                membership(*distance, 0.0, sigma)
+            };
         }
     }
     Ok(graph)

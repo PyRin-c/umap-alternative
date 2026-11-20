@@ -11,7 +11,9 @@ use std::fmt;
 use crate::neighbors::{DistanceMetric, KnnError, Neighbor};
 use crate::rng::{Mt19937, draw_negative_seed, sample_absolute_vertex};
 
+mod projection;
 mod query;
+pub use projection::training_projection_leaves;
 pub use query::DenseApproximateQueryIndex;
 
 const SMALL_DATA_LIMIT: usize = 4096;

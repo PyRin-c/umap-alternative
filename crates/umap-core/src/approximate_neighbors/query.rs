@@ -2,9 +2,9 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::num::NonZeroUsize;
 
+use super::projection::{partition_rows, prepared_margin, projection_pivots};
 use super::{
     ApproximateSearchError, DenseRows, RankedNeighbors, Tree, approximate_squared_euclidean,
-    reduce_4_lanes, reduce_32_lanes,
 };
 use crate::neighbors::{DistanceMetric, Neighbor};
 use crate::rng::{Mt19937, draw_negative_seed, sample_absolute_vertex};
@@ -385,7 +385,7 @@ fn prepared_leaf<'a>(
     let Tree::Split { a, b, left, right } = tree else {
         return tree.leaf(data, DistanceMetric::Euclidean, query);
     };
-    let margin = projection_margin(data.row(*a), data.row(*b), query);
+    let margin = prepared_margin(data.row(*a), data.row(*b), query);
     let go_left = if !margin.is_finite() {
         return tree.leaf(data, DistanceMetric::Euclidean, query);
     } else if margin.abs() <= 1.0e-8 {
@@ -394,39 +394,6 @@ fn prepared_leaf<'a>(
         margin > 0.0
     };
     prepared_leaf(if go_left { left } else { right }, data, query, rng)
-}
-
-fn projection_margin(left: &[f32], right: &[f32], query: &[f32]) -> f32 {
-    // Round each centered product before accumulating the intercept in f64.
-    let offset = left.iter().zip(right).fold(0.0_f64, |offset, (&a, &b)| {
-        offset - f64::from((a - b) * ((a + b) * 0.5))
-    });
-
-    let add = |index: usize, accum| (left[index] - right[index]).mul_add(query[index], accum);
-    let wide_end = query.len() / 32 * 32;
-    let mut margin = offset as f32;
-    if wide_end != 0 {
-        let mut wide = [0.0; 32];
-        wide[0] = margin;
-        for start in (0..wide_end).step_by(32) {
-            for (lane, accum) in wide.iter_mut().enumerate() {
-                *accum = add(start + lane, *accum);
-            }
-        }
-        margin = reduce_32_lanes(&wide);
-    }
-    let block_end = query.len() / 4 * 4;
-    let mut lanes = [margin, 0.0, 0.0, 0.0];
-    for start in (wide_end..block_end).step_by(4) {
-        for (lane, accum) in lanes.iter_mut().enumerate() {
-            *accum = add(start + lane, *accum);
-        }
-    }
-    margin = reduce_4_lanes(&lanes);
-    for i in block_end..query.len() {
-        margin = add(i, margin);
-    }
-    margin
 }
 
 fn build_word_tree(
@@ -440,26 +407,16 @@ fn build_word_tree(
     if rows.len() <= leaf_size || depth == 0 {
         return Ok(Tree::Leaf(rows));
     }
-    let &[first, second] = words
+    let &pair = words
         .get(slot)
         .ok_or(ApproximateSearchError::ProjectionWordsExhausted)?;
-    let first = (first % rows.len() as u64) as usize;
-    let second = (second % (rows.len() - 1) as u64) as usize;
-    let a = rows[first];
-    let b = rows[second + usize::from(second >= first)];
+    let (a, b) = projection_pivots(&rows, pair);
 
     let metric = DistanceMetric::Euclidean;
-    let mut cursor = 0;
-    let mut boundary = rows.len();
-    while cursor < boundary {
-        let point = data.row(rows[cursor]);
-        if metric.distance(point, data.row(a)) <= metric.distance(point, data.row(b)) {
-            cursor += 1;
-        } else {
-            boundary -= 1;
-            rows.swap(cursor, boundary);
-        }
-    }
+    let boundary = partition_rows(&mut rows, |row| {
+        let point = data.row(row);
+        metric.distance(point, data.row(a)) <= metric.distance(point, data.row(b))
+    });
     if boundary == 0 || boundary == rows.len() {
         return Ok(Tree::Leaf(rows));
     }

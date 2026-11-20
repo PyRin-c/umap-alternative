@@ -20,7 +20,11 @@ int main(void) {
     status = umap_capi_csr_graph_view(graph, &view);
     if (status != UMAP_CAPI_STATUS_OK || view.n_rows != 2 ||
         view.n_cols != 2 || view.indptr_len != 3 ||
-        view.indices_len != view.data_len) {
+        view.indices_len != 2 || view.data_len != 2 ||
+        !view.indptr || !view.indices || !view.data ||
+        view.indptr[0] != 0 || view.indptr[1] != 1 || view.indptr[2] != 2 ||
+        view.indices[0] != 1 || view.indices[1] != 0 ||
+        view.data[0] != 1.0f || view.data[1] != 1.0f) {
         (void)umap_capi_csr_graph_release(graph);
         return 2;
     }

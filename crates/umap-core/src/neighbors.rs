@@ -79,9 +79,9 @@ impl std::error::Error for KnnError {}
 /// row, including the query itself, is considered as a candidate, so a valid
 /// `k` is in `1..=n_rows`.
 ///
-/// Distances are computed from the `f32` inputs with `f64` subtraction,
-/// multiplication, accumulation (in feature order), and square root, then
-/// rounded to `f32` for the returned neighbor record. Ties are ordered
+/// Distances are computed from the `f32` inputs with `f32` subtraction and
+/// squaring, followed by `f64` accumulation (in feature order) and square
+/// root, then rounded to `f32` for the returned neighbor record. Ties are ordered
 /// deterministically by ascending candidate row index after [`f32::total_cmp`]
 /// distance ordering. Matrix values must be finite; reject non-finite values
 /// rather than returning an undefined distance.
@@ -102,8 +102,9 @@ pub fn exhaustive_knn(
 /// row, including the query itself, is considered as a candidate, so a valid
 /// `k` is in `1..=n_rows`.
 ///
-/// Euclidean distances use `f64` subtraction, multiplication, accumulation
-/// (in feature order), and square root before rounding to `f32`.  Manhattan
+/// Euclidean distances use `f32` subtraction and squaring, followed by `f64`
+/// accumulation (in feature order) and square root before rounding to `f32`.
+/// Manhattan
 /// distances sum the absolute `f64` coordinate differences, and Chebyshev
 /// distances select the largest absolute `f64` coordinate difference; both are
 /// rounded to `f32` for the returned neighbor record. Ties are ordered
@@ -182,8 +183,8 @@ fn euclidean_distance(left: &[f32], right: &[f32]) -> f32 {
         .iter()
         .zip(right)
         .fold(0.0_f64, |sum, (&left_value, &right_value)| {
-            let difference = f64::from(left_value) - f64::from(right_value);
-            sum + difference * difference
+            let difference = left_value - right_value;
+            sum + f64::from(difference * difference)
         });
     squared_sum.sqrt() as f32
 }
@@ -253,6 +254,14 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn rounds_coordinate_products_before_f64_accumulation() {
+        let data = [0.12_f32, 0.03, 0.29, 0.18];
+        let neighbors = exhaustive_knn(&data, 2, 2, 2).expect("valid matrix");
+        assert_eq!(neighbors[0][1].distance.to_bits(), 0x3e68_2827);
+        assert_eq!(neighbors[1][1].distance.to_bits(), 0x3e68_2827);
     }
 
     #[test]

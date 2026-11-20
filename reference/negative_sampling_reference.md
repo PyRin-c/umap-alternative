@@ -122,8 +122,8 @@ the fit. Each of `0xfffffffd`, `0xfffffffe`, and `0xffffffff` advances to
 cursor 5 and produces exactly the same embedding bits as its skip control.
 The resulting RNG state in every boundary case also matches the public NumPy
 call `randint(-2147483647, 2147483646, size=3)` on a copy of the same initial
-state. This identifies a compatible rejection width of `4294967293` raw
-values, while the numerical offset of the accepted values remains open.
+state. The boundary measurement constrains the rejection width to `4294967293`
+raw values. The accepted-value offset requires a separate test.
 
 With `init="random"`, seed 42 advances by 27 raw words. An explicit init
 made with `RandomState(42).uniform(-10, 10, (6, 2)).astype(float32)` starts
@@ -135,7 +135,7 @@ for random init and its advanced control. The evidence puts the three accepted
 words after the 24 raw words used by the public uniform initialization in
 this case.
 
-The exact seed-word transformation, incorporation of the initial coordinate,
-and generator recurrence remain open. The probes establish a behavioral
-stream per head in the tested schedule, with no observation of its storage
-or of initialization paths such as spectral or duplicate-row jitter.
+These probes establish a behavioral stream per head in the tested schedule.
+The follow-up recovers full signed words across three draws and compares
+seed transforms, coordinate encodings, and recurrences against held-out
+measurements. [Negative stream reconstruction](negative_stream_reference.md)

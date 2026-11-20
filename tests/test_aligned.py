@@ -93,6 +93,23 @@ def test_joint_optimisation_uses_the_window_and_regularisation():
     np.testing.assert_array_equal(eighth_epoch, fit(8))
 
 
+@pytest.mark.parametrize("name", [
+    "epoch-2-weight-0.0", "epoch-2-weight-0.01",
+    "epoch-8-weight-0.0", "epoch-8-weight-0.01", "epoch-8-weight-0.3",
+    "zero-window-unweighted", "zero-window-weighted", "single-window-first-edge", "single-window",
+    "batch-partial-2", "batch-partial-8", "batch-duplicate_target-2", "batch-duplicate_target-8",
+    "batch-all_but_last-window-1-epochs-8", "batch-include_last-window-2-epochs-8",
+])
+def test_batch_trajectory(name):
+    expected = PUBLIC["cases"][name]
+    data, links = inputs(expected["family"], expected["relation_group"])
+    model = AlignedUMAP(**(PUBLIC["settings"] | expected["overrides"]))
+    result = model.fit_transform(data, relations=links)
+    assert_graphs(model, expected["graphs"])
+    for actual, bits in zip(result, expected["embeddings"], strict=True):
+        assert_layout(actual, bits)
+
+
 @pytest.mark.parametrize("name", ["update-0", "update-2", "update-8", "update-partial-0"])
 def test_append_from_public_frozen_layouts(name):
     data, relations = inputs()

@@ -82,14 +82,31 @@ repulsion strength, and negative rate. Varying the corresponding mapper
 parameters left the positive-epoch checkpoints unchanged when their graphs
 were identical.
 
-An alignment weight is the Jaccard overlap of the two neighborhoods,
-restricted to rows linked by the composed relation. The weight decays by
-`exp(1 - abs(slice_offset))`. Changing stored membership values while
-keeping the neighborhood support fixed left the isolated update unchanged.
-The epoch shuffle uses a separate MT19937 stream seeded from the magnitude
-of the first negative-stream lane. The batch negative stream starts after
-the spectral starting blocks. The append stream starts directly from
+The overlap calculation uses the two neighborhoods restricted to rows
+linked by the composed relation. Each mapped source neighbor contributes
+to the intersection count when its destination appears in the other
+neighborhood, including repeated destinations. Two empty restricted
+neighborhoods have overlap 1. The weight decays by
+`exp(1 - abs(slice_offset))` and is stored in float32. Changing stored
+membership values with fixed neighborhood support left the isolated
+update unchanged.
+
+At each epoch, the optimizer shuffles the original slice order with a
+separate MT19937 stream seeded from the magnitude of the current first
+negative-stream lane. Each stored edge position is visited in that slice
+order before advancing to the next position. Edges whose timers are due
+advance the shared negative stream. The batch stream starts after the
+spectral starting blocks. The append stream starts directly from
 `transform_seed`.
+
+The tail update in a joint fit reuses the attraction coefficient and
+reads the head coordinate after its update. Relation terms also read
+live coordinates, starting at the first due edge. The update clips the
+base gradient and clips the sum again after adding the relation terms.
+For a slice at index `s` with window `w`, the optimizer considers
+earlier slices starting at `max(0, s - w)` and later slices ending
+before `min(s + w, n_slices - 1)`. Window zero therefore has no
+alignment term and window one uses the preceding slice.
 
 Append initialization copies linked coordinates from the preceding slice.
 The last source in insertion order supplies a duplicated destination.
@@ -107,17 +124,53 @@ coordinate scales, neighborhood overlap, temporal decay, and both unlinked
 initialization paths. The isolated append arithmetic matched to one float32
 ULP. Partial and seeded unlinked append initialization matched exactly.
 
-### Residuals
+### Reconstructed batch checkpoints
 
-The positive-epoch joint fit is reproducible and responds to the window and
-regularization. Its coordinate trajectory differs from the public wheel.
-In the three-slice reference with regularization 0.01, the installed
-wheels matched 6 of 54 coordinates at 2 epochs and 0 of 54 at 8 epochs.
-Maximum absolute-coordinate differences were 3.1272917 and 5.0714192 on
-both platforms. The isolated probes identify the shared seed and advance
-counts, while the discrepancy in the joint updates remains unresolved.
-A positive-epoch append inherits any differences already present in its
-frozen batch layouts.
+On both Windows and Ubuntu WSL, the three-slice fit at regularization
+0.01 matches all 54 coordinate bits at each of 2 and 8 epochs. The
+previous maxima were 3.1272917 and 5.0714192, with 6 and 0 exact
+coordinates, respectively. The unweighted fits, windows zero and one,
+and the partial and repeated-destination batch cases match 54/54 bits
+per checkpoint.
+
+The first due edge and the eight-epoch fit distinguish the following
+alternatives in the independent replay. The reconstructed sequence
+matches every bit of these checkpoints.
+
+| Replay change | Checkpoint | Exact bits | Max absolute difference |
+| --- | --- | ---: | ---: |
+| Finish each slice before the next | 2 epochs, weight 0 | 6/54 | 4.0765376 |
+| Interleave by due-edge rank | 2 epochs, weight 0 | 6/54 | 4.0078206 |
+| Negate the head increment for the tail | 2 epochs, weight 0 | 6/54 | 4.2444468 |
+| Sort the deliberately reversed CSR columns | 2 epochs, 5/6/7 rows, weight 0 | 24/36 | 0.0159810 |
+| Keep one fixed permutation | 8 epochs, weight 0 | 0/54 | 3.5987597 |
+| Advance a persistent shuffle RNG | 8 epochs, weight 0 | 0/54 | 3.1605763 |
+| Shuffle the previous epoch's order | 8 epochs, weight 0 | 0/54 | 2.0574889 |
+| Read epoch-start relation coordinates | 2 epochs, weight 0.01 | 6/54 | 0.0768521 |
+| Delay alignment past the first due edges | 2 epochs, weight 0.01 | 6/54 | 0.2739663 |
+
+The storage-order probe replaces the public mapper graphs through
+the public `UMAP.fit` method. It keeps the sparse support and
+memberships fixed while reversing the stored columns of each row.
+The other alternatives use public fits and layout checkpoints with
+the original graphs.
+
+### Remaining differences
+
+At regularization 0.3 the base fit matches 53/54 bits at 2 epochs,
+with a maximum difference of one float32 ULP (2.3841858e-7), and
+54/54 at 8 epochs. Selected alternate seeds and identity relations
+also retain small arithmetic differences. These differences persist
+in a replay using fused multiply-add for the final coordinate update.
+
+The six-row boundary fixture leaves row 5 beyond the highest index
+named by either relation. Window one matches 36/36 bits at 8 epochs.
+With window two, the differences occur in the last slice. The replay
+matches 29/36 bits at 2 epochs and 24/36 at 8 epochs, with maxima
+0.0801959 and 0.5040512 on both platforms. Linking row 5 while leaving
+row 4 unlinked restores 36/36 at 8 epochs. This suggests an interaction
+between the index extent of the relations and the composed offsets.
+A flattened-index replay with the inferred extent still diverges.
 
 The public wheel returns a Numba typed list. This implementation uses a
 Python list of float32 NumPy arrays. Its graph-mode mappers expose the fuzzy

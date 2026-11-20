@@ -27,7 +27,7 @@ pub struct AlignedLayoutConfig {
 struct Anchor {
     slice: usize,
     row: usize,
-    weight: f64,
+    weight: f32,
 }
 
 struct Edge {
@@ -90,22 +90,33 @@ fn weights_for_pair(
         let Some(target_row) = target_row else {
             continue;
         };
-        let left: HashSet<_> = row_indices(source, source_row)
-            .iter()
-            .filter_map(|&row| mapping[row])
-            .collect();
         let right: HashSet<_> = row_indices(target, target_row)
             .iter()
             .copied()
             .filter(|row| targets.contains(row))
             .collect();
-        let shared = left.intersection(&right).count();
-        if shared > 0 {
-            let union = left.len() + right.len() - shared;
+        let mut left_count = 0;
+        let mut shared = 0;
+        // Count every mapped source neighbor, including repeated destinations.
+        for neighbor in row_indices(source, source_row)
+            .iter()
+            .filter_map(|&row| mapping[row])
+        {
+            left_count += 1;
+            shared += usize::from(right.contains(&neighbor));
+        }
+        let union = left_count + right.len() - shared;
+        if shared > 0 || union == 0 {
+            let overlap = if union == 0 {
+                // Both restricted neighborhoods are empty.
+                1.0
+            } else {
+                shared as f64 / union as f64
+            };
             rows[source_row].push(Anchor {
                 slice: target_index,
                 row: target_row,
-                weight: decay * shared as f64 / union as f64,
+                weight: (decay * overlap) as f32,
             });
         }
     }
@@ -135,10 +146,8 @@ fn alignment_anchors(
     for i in config.first_moving..graphs.len() {
         let mut rows = vec![Vec::new(); graphs[i].n_rows];
         let start = i.saturating_sub(config.window);
-        let end = i
-            .saturating_add(config.window)
-            .saturating_add(1)
-            .min(graphs.len());
+        // The forward sweep excludes the later window boundary and the last slice.
+        let end = i.saturating_add(config.window).min(graphs.len() - 1);
         let identity: Vec<_> = (0..graphs[i].n_rows).map(Some).collect();
         if config.regularisation != 0.0 {
             let mut mapping = identity.clone();
@@ -195,7 +204,7 @@ fn alignment_gradient(
     anchors.iter().fold(0.0, |sum, anchor| {
         let target = layouts[anchor.slice][anchor.row * config.n_components + component];
         if target.is_finite() {
-            sum + f64::from(target - coordinate) * anchor.weight * config.regularisation
+            sum + f64::from(target - coordinate) * f64::from(anchor.weight) * config.regularisation
         } else {
             sum
         }
@@ -227,12 +236,16 @@ fn update_edge(
         let head_regularisation =
             alignment_gradient(layouts, &anchors[edge.head], component, current, config);
         layouts[slice][head + component] =
-            (f64::from(current) + alpha * (base + head_regularisation)) as f32;
+            (f64::from(current) + alpha * (base + head_regularisation).clamp(-4.0, 4.0)) as f32;
         if config.first_moving == 0 {
             let tail_regularisation =
                 alignment_gradient(layouts, &anchors[edge.tail], component, other, config);
-            layouts[slice][tail + component] =
-                (f64::from(other) + alpha * (-base + tail_regularisation)) as f32;
+            // The tail reads the updated head while reusing the edge coefficient.
+            let updated_head = layouts[slice][head + component];
+            let tail_base = (factor * f64::from(other - updated_head)).clamp(-4.0, 4.0);
+            layouts[slice][tail + component] = (f64::from(other)
+                + alpha * (tail_base + tail_regularisation).clamp(-4.0, 4.0))
+                as f32;
         }
     }
 
@@ -254,7 +267,7 @@ fn update_edge(
             let regularisation =
                 alignment_gradient(layouts, &anchors[edge.head], component, current, config);
             layouts[slice][head + component] =
-                (f64::from(current) + alpha * (base + regularisation)) as f32;
+                (f64::from(current) + alpha * (base + regularisation).clamp(-4.0, 4.0)) as f32;
         }
     }
 }
@@ -350,27 +363,32 @@ pub fn optimize_aligned_layout(
     let mut alpha = 1.0;
     let mut order = (0..graphs.len()).collect::<Vec<_>>();
     let mut shuffle_rng = shuffled_slice_order(&mut order, seed[0]);
+    // Visit the same stored edge position across slices before advancing.
+    let edge_count = schedules.iter().map(Vec::len).max().unwrap_or(0);
     for epoch in 1..config.n_epochs {
-        order
-            .iter_mut()
-            .enumerate()
-            .for_each(|(i, slice)| *slice = i);
+        order.clear();
+        order.extend(0..graphs.len());
         shuffle_rng = shuffled_slice_order(&mut order, seed[0]);
-        for slice in order.iter().copied().filter(|&i| i >= config.first_moving) {
-            let moving = slice - config.first_moving;
-            for edge in &mut schedules[moving] {
-                if let Some(count) = edge.take_samples(epoch as f64) {
-                    update_edge(
-                        layouts,
-                        &anchors[moving],
-                        slice,
-                        edge,
-                        count,
-                        alpha,
-                        &mut seed,
-                        config,
-                    );
-                }
+        order.retain(|&slice| slice >= config.first_moving);
+        for position in 0..edge_count {
+            for &slice in &order {
+                let moving = slice - config.first_moving;
+                let Some(edge) = schedules[moving].get_mut(position) else {
+                    continue;
+                };
+                let Some(count) = edge.take_samples(epoch as f64) else {
+                    continue;
+                };
+                update_edge(
+                    layouts,
+                    &anchors[moving],
+                    slice,
+                    edge,
+                    count,
+                    alpha,
+                    &mut seed,
+                    config,
+                );
             }
         }
         alpha = 1.0 - epoch as f64 / config.n_epochs as f64;

@@ -118,6 +118,10 @@ def capture():
     ]
     data = {"base": [first, second, third]}
     data["holdout"], holdout_groups = family(491, 14, 4, 3, 5)
+    data["relation_extent"] = [
+        np.random.RandomState(seed).normal(size=(6, 3)).astype(np.float32)
+        for seed in (19, 20, 21)
+    ]
     relation_groups = {
         "complete": [r_ab, r_bc],
         "identity": [{i: i for i in range(9)}, {i: i for i in range(8)}],
@@ -127,6 +131,8 @@ def capture():
         "long": [r_ab, r_bc, {}],
         "duplicate_target": [r_ab | {4: r_ab[2]}, r_bc],
         "holdout": holdout_groups,
+        "all_but_last": [dict(enumerate(range(5))) for _ in range(2)],
+        "include_last": [dict(enumerate(range(4))) | {5: 5} for _ in range(2)],
     }
     base_settings = dict(
         n_neighbors=4, n_components=2, a=1.7, b=0.9, random_state=42,
@@ -220,6 +226,22 @@ def capture():
             expected = after["embeddings"][-1]
             assert bits(replay) == expected, name
             initial_update_bits[name] = replay.size
+
+    fit("zero-window-unweighted", n_epochs=8, alignment_window_size=0, alignment_regularisation=0.0)
+    fit("zero-window-weighted", n_epochs=8, alignment_window_size=0, alignment_regularisation=0.3)
+    fit("single-window-first-edge", n_epochs=2, alignment_window_size=1)
+    for mode in ("partial", "duplicate_target"):
+        for epochs in (2, 8):
+            fit(f"batch-{mode}-{epochs}", group=mode, n_epochs=epochs)
+    for group, window, epochs in (
+        ("all_but_last", 1, 8), ("all_but_last", 2, 2), ("all_but_last", 2, 8),
+        ("include_last", 2, 8),
+    ):
+        fit(
+            f"batch-{group}-window-{window}-epochs-{epochs}", group=group,
+            family_name="relation_extent", n_neighbors=3, transform_seed=37,
+            alignment_window_size=window, n_epochs=epochs,
+        )
 
     # Replay from the captured adjacency, independently of the estimator.
     counts = {}

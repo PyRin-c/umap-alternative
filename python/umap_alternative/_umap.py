@@ -395,6 +395,9 @@ class UMAP(BaseEstimator, TransformerMixin):
         """Fit the fuzzy graph and, in embedding mode, the training layout."""
 
         self._validate_mode()
+        return self._fit(X, y, embedding_mode=self.transform_mode == "embedding")
+
+    def _fit(self, X, y, *, embedding_mode):
         density_options = self._density_options()
         densmap = density_options if getattr(self, "densmap", False) else None
         sparse = issparse(X)
@@ -408,7 +411,6 @@ class UMAP(BaseEstimator, TransformerMixin):
 
         precomputed = metric == "precomputed"
         angular = not sparse and metric in _ANGULAR_METRICS
-        embedding_mode = self.transform_mode == "embedding"
         if sparse:
             if precomputed:
                 raise TypeError("sparse input is not supported for metric='precomputed'")

@@ -25,6 +25,12 @@ uv run --locked pytest
 
 ## Python Wheel
 
+`from umap_alternative import ParametricUMAP` で Keras を使った埋め込みを学習できます。
+複数行の学習には TensorFlow と Keras が必要です。ライブラリのインポート時には読み込みません。
+`encoder` と `decoder` には Keras モデルを指定できます。`parametric_reconstruction=True`
+の場合、`inverse_transform` は学習済みデコーダを使います。
+[Windows CPU での検証結果](reference/parametric_reference.md)
+
 ```sh
 uv run --locked maturin build --release --locked --interpreter python
 ```

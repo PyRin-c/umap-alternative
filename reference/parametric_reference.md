@@ -131,7 +131,52 @@ Keras artifacts without `model.pkl`. Estimator reload then raised
 `FileNotFoundError`. Keras could load the standalone encoder and decoder
 artifacts and reproduce the same 6/6 and 9/9 bits.
 
-Remaining scope includes a Python estimator or backend adapter, shuffled
-batch and negative RNG replay, optimizer parity across multiple steps,
-default architectures, landmark losses, large-data defaults, and full
-estimator persistence after multi-row training.
+## Installed wheel comparison
+
+The base wheel exports `ParametricUMAP` and `load_ParametricUMAP` without
+loading TensorFlow or Keras. To compare training and inference, install a
+locally built wheel into the pinned environment above and run the comparison.
+
+```powershell
+uv pip install --no-deps --python $parametricPython <path-to-wheel>
+& $parametricPython -I reference/compare_parametric_wheel.py
+```
+
+The estimator uses the PyO3 positive-edge pool and preserves the graph's
+directed repeat counts. In the seeded CPU probes, a NumPy `RandomState`
+permutation of the expanded pool matched the unshuffled period. The repeated
+pool then passed through TensorFlow's shuffle with a 10,000-element buffer.
+When the step count rounds to zero, the adapter passes `steps_per_epoch=None`
+and bounds the dataset to one full batch per pass.
+The first five shuffled positive batches matched. The negative sampler
+permuted indices into repeated tail embeddings using a Keras `SeedGenerator`.
+The first permutation matched for seeds 42 and 7 in the four-positive,
+two-negatives-per-positive probe.
+
+The default encoder flattens each input and applies three 100-unit ReLU
+layers followed by a linear embedding layer. With reconstruction enabled,
+the default decoder applies three 100-unit ReLU layers, produces linear
+reconstruction logits, and reshapes them to the input dimensions. The
+training model uses Adam with learning rate `0.001` and gradient clip value
+`4.0`. The default reconstruction loss uses binary cross entropy from logits.
+
+| Training probe | Absolute loss difference | Encoder weights | Decoder weights | Fitted coordinates |
+| --- | ---: | ---: | ---: | ---: |
+| One positive-only step | 0 | 50/50 | | 64/64 |
+| One step with two negatives per positive | 0 | 44/50 | | 0/64 |
+| One step with reconstruction | 0 | 50/50 | 51/51 | 64/64 |
+| One step with encoder reconstruction gradients | 0 | 48/50 | 51/51 | 64/64 |
+| Five positive-only steps | 5.96e-8 | 48/50 | | 64/64 |
+
+Weights and coordinates count matching float32 bits. The single negative
+step differed by at most 1.28e-6 in fitted coordinates. Across the full
+trainable fixture, the wheel matched 5/162 output bits. The largest absolute
+difference was 3.38e-5 for fitted coordinates and 2.22e-5 for the decoder
+inverse. Full training parity, landmark losses and large-data defaults
+remain open.
+
+The wheel reproduced the frozen inference and persistence observations above.
+Singleton saves can be loaded with `load_ParametricUMAP`. Multi-row saves
+write the Keras artifacts and raise `NotImplementedError`. Only singleton
+saves write the estimator's `model.pkl` file. The standalone Keras encoder
+and decoder files from either fit can be loaded with Keras.

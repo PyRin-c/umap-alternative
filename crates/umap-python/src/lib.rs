@@ -23,6 +23,7 @@ use umap_core::inverse::{
     fit_dense_inverse_scales_with_options, inverse_transform_dense,
 };
 use umap_core::neighbors::DistanceMetric;
+use umap_core::parametric::prepare_parametric_edges;
 use umap_core::rng::Mt19937;
 use umap_core::sparse::fit_sparse_graph_with_options;
 use umap_core::transform::{
@@ -40,6 +41,32 @@ type GraphEmbeddingComponents = ((usize, usize), Vec<f32>, RngState, Vec<Vec<f32
 type RadiusInput = (Vec<f32>, usize, String);
 type DensityInput = ((f64, f64, f64), RadiusInput);
 type AlignedEmbeddingComponents = (Vec<Vec<f32>>, Option<RngState>);
+type ParametricEdgeComponents = (Vec<(usize, usize, usize)>, usize);
+
+#[pyfunction]
+fn _prepare_parametric_edges(
+    py: Python<'_>,
+    graph: CsrComponents,
+    n_epochs: usize,
+) -> PyResult<ParametricEdgeComponents> {
+    let ((n_rows, n_cols), indptr, indices, data) = graph;
+    let graph = CsrGraph {
+        n_rows,
+        n_cols,
+        indptr,
+        indices,
+        data,
+    };
+    let pool = py
+        .detach(|| prepare_parametric_edges(&graph, n_epochs))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let edges = pool
+        .edges()
+        .iter()
+        .map(|edge| (edge.head, edge.tail, edge.repeats))
+        .collect();
+    Ok((edges, pool.total_repeats()))
+}
 
 /// Compute the log inputs for original and embedding radius diagnostics.
 #[pyfunction]
@@ -747,6 +774,7 @@ fn _inverse_transform_dense_embedding(
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", umap_core::VERSION)?;
     module.add_function(wrap_pyfunction!(_optimize_aligned_layout, module)?)?;
+    module.add_function(wrap_pyfunction!(_prepare_parametric_edges, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_graph_with_cutoff, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_sparse_graph, module)?)?;

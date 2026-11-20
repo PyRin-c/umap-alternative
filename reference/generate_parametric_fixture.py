@@ -59,13 +59,16 @@ def dense_model(tf, name, n_features, n_outputs, seed, input_layer=None, activat
     return tf.keras.Model(inputs, values, name=name)
 
 
-def capture() -> dict:
+def capture(*, use_wheel=False) -> dict:
     configure_reference_environment()
 
     import numpy as np
     import tensorflow as tf
-    from umap import ParametricUMAP
-    from umap.parametric_umap import load_ParametricUMAP
+    if use_wheel:
+        from umap_alternative import ParametricUMAP, load_ParametricUMAP
+    else:
+        from umap import ParametricUMAP
+        from umap.parametric_umap import load_ParametricUMAP
 
     tf.keras.utils.set_random_seed(42)
     tf.config.experimental.enable_op_determinism()
@@ -119,17 +122,17 @@ def capture() -> dict:
     return report
 
 
-def observe(operation, summarize=lambda value: value):
+def observe(operation, summarize=lambda value: value, *, include_exception_message=True):
     with warnings.catch_warnings(record=True) as captured, contextlib.redirect_stdout(io.StringIO()):
         warnings.simplefilter("always")
         try:
             value = operation()
         except Exception as exc:
-            result = {
-                "status": "error",
-                "type": type(exc).__name__,
-                "message": str(exc).splitlines()[0] if str(exc) else "",
-            }
+            result = {"status": "error", "type": type(exc).__name__}
+            if include_exception_message:
+                message = str(exc)
+                if not any(token in message.lower() for token in ("jit", "xla", "graph execution error")):
+                    result["message"] = message.splitlines()[0] if message else ""
         else:
             result = {"status": "ok", "result": summarize(value)}
     result["warnings"] = sorted({item.category.__name__ for item in captured})

@@ -19,12 +19,15 @@ observe = REFERENCE["observe"]
 dense_model = REFERENCE["dense_model"]
 
 
-def capture():
+def capture(*, use_wheel=False, include_training_bits=False):
     REFERENCE["configure_reference_environment"]()
     import numpy as np
     import tensorflow as tf
-    from umap import ParametricUMAP, UMAP
-    from umap.parametric_umap import load_ParametricUMAP
+    if use_wheel:
+        from umap_alternative import ParametricUMAP, UMAP, load_ParametricUMAP
+    else:
+        from umap import ParametricUMAP, UMAP
+        from umap.parametric_umap import load_ParametricUMAP
 
     tf.config.experimental.enable_op_determinism()
     tf.get_logger().setLevel("ERROR")
@@ -61,13 +64,15 @@ def capture():
                 return tf.identity(inputs)
 
     class FirstBatch(tf.keras.callbacks.Callback):
-        def __init__(self, encoder_calls, decoder_calls, zero_rate):
+        def __init__(self, encoder_calls, decoder_calls, zero_rate, stop_after):
             super().__init__()
             self.encoder_calls = encoder_calls
             self.decoder_calls = decoder_calls
             self.zero_rate = zero_rate
             self.training_params = None
             self.loss = None
+            self.losses = []
+            self.stop_after = stop_after
 
         def on_train_begin(self, logs=None):
             self.training_params = dict(self.params)
@@ -79,13 +84,16 @@ def capture():
 
         def on_train_batch_end(self, batch, logs=None):
             self.loss = float(logs["loss"])
+            self.losses.append(self.loss)
+            if len(self.losses) < self.stop_after:
+                return
             self.encoder_batch = self.encoder_calls[self.first_encoder_call :]
             self.decoder_batch = self.decoder_calls[self.first_decoder_call :]
             self.model.stop_training = True
 
     def make_estimator(
         *, n_epochs=10, batch_size=4, negative_sample_rate=0, reconstruct=False,
-        learning=True, trace=True, freeze=False, sigmoid=False, **options
+        learning=True, trace=True, freeze=False, sigmoid=False, stop_after=1, **options
     ):
         tf.keras.utils.set_random_seed(42)
         encoder_calls, decoder_calls = [], []
@@ -100,7 +108,7 @@ def capture():
             encoder.trainable = False
             if decoder is not None:
                 decoder.trainable = False
-        first_batch = FirstBatch(encoder_calls, decoder_calls, zero_rate=not learning)
+        first_batch = FirstBatch(encoder_calls, decoder_calls, not learning, stop_after)
         estimator = ParametricUMAP(
             **graph_options,
             n_components=2,
@@ -119,15 +127,18 @@ def capture():
         )
         return estimator, encoder, decoder, first_batch
 
-    def training_pairs(callback, inputs):
-        assert len(callback.encoder_batch) == 2, len(callback.encoder_batch)
+    def training_pairs(encoder_batch, inputs):
+        assert len(encoder_batch) == 2, len(encoder_batch)
         rows = {tuple(row): index for index, row in enumerate(inputs)}
-        heads, tails = ([rows[tuple(row)] for row in batch] for batch in callback.encoder_batch)
+        heads, tails = ([rows[tuple(row)] for row in batch] for batch in encoder_batch)
         return list(zip(heads, tails, strict=True))
 
     def logits(head, tail):
         distance = np.linalg.norm(head - tail, axis=1)
         return -np.log1p(np.float32(1.5) * distance ** np.float32(1.5))
+
+    def weight_bits(model):
+        return [value.ravel().view(np.uint32).tolist() for value in model.get_weights()]
 
     def layout_and_reconstruction():
         report, embeddings = {}, {}
@@ -155,7 +166,7 @@ def capture():
             fit = observe(lambda: estimator.fit_transform(unit_points), lambda values: compare(values, baseline))
             assert fit["status"] == "ok", (name, fit)
             embeddings[name] = estimator.embedding_
-            pairs = training_pairs(callback, unit_points)
+            pairs = training_pairs(callback.encoder_batch, unit_points)
             heads, tails = np.asarray(pairs).T
             head, tail = baseline[heads], baseline[tails]
             positives = np.logaddexp(0, -logits(head, tail))
@@ -166,6 +177,11 @@ def capture():
                 "loss": callback.loss,
                 "positive_layout_candidate": float(positives.mean()),
             }
+            if include_training_bits:
+                record["coordinate_bits"] = estimator.embedding_.ravel().view(np.uint32).tolist()
+                record["encoder_weight_bits"] = weight_bits(encoder)
+                if decoder is not None:
+                    record["decoder_weight_bits"] = weight_bits(decoder)
             rate = settings.get("negative_sample_rate", 0)
             if rate:
                 repeated_head = np.repeat(head, rate, axis=0)
@@ -247,7 +263,7 @@ def capture():
             fit = observe(lambda: estimator.fit(inputs), lambda value: value is estimator)
         assert fit["status"] == "ok", (n_rows, n_epochs, fit)
         assert len(shuffle_calls) == 1, (n_rows, n_epochs, shuffle_calls)
-        pairs = training_pairs(callback, inputs)
+        pairs = training_pairs(callback.encoder_batch, inputs)
         assert len(pairs) == 2 * total_expected, (n_rows, n_epochs, len(pairs))
         cycle = pairs[:total_expected]
         assert cycle == pairs[total_expected:], (n_rows, n_epochs, total_expected)
@@ -300,7 +316,7 @@ def capture():
             )
             entry = {"rows": rows, "n_epochs": epochs, "batch_size": batch, "fit_transform": fit}
             if callback.loss is not None:
-                pairs = training_pairs(callback, inputs)
+                pairs = training_pairs(callback.encoder_batch, inputs)
                 graph = estimator.graph_.tocsr()
                 assert all(graph[head, tail] > 0 for head, tail in pairs), name
                 entry["observed_batch_size"] = len(pairs)
@@ -331,7 +347,7 @@ def capture():
                             lambda: model.inverse_transform(latents),
                             lambda values: compare(values, inverse),
                         )
-                else:
+                elif "message" in loaded:
                     loaded["message"] = loaded["message"].replace(repr(folder)[1:-1], "<save-dir>")
                 entry["load"] = loaded
                 if (path / "encoder.keras").is_file():
@@ -400,7 +416,7 @@ def capture():
                 report[f"reconstruction={reconstruct},rows={n_rows}"] = entry
         return report
 
-    return {
+    report = {
         "edge_periods": {
             "unit_only": edge_period(8, 1, 10),
             "fractional": edge_period(8, 2, 32),
@@ -414,6 +430,21 @@ def capture():
         "losses": layout_and_reconstruction(),
         "inference": inference_and_persistence(),
     }
+    if include_training_bits:
+        estimator, encoder, _, callback = make_estimator(stop_after=5)
+        fit = observe(lambda: estimator.fit(unit_points), lambda model: model is estimator,
+                      include_exception_message=False)
+        assert fit["status"] == "ok", fit.get("type")
+        report["five_positive_batches"] = {
+            "losses": callback.losses,
+            "batches": [
+                training_pairs(callback.encoder_batch[i : i + 2], unit_points)
+                for i in range(0, len(callback.encoder_batch), 2)
+            ],
+            "coordinate_bits": estimator.embedding_.ravel().view(np.uint32).tolist(),
+            "encoder_weight_bits": weight_bits(encoder),
+        }
+    return report
 
 
 def main():

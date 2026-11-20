@@ -17,7 +17,7 @@ FIXTURE = json.loads(
 SUPPORTED_CASES = [
     name
     for name, case in FIXTURE["cases"].items()
-    if case["metric"] in ("euclidean", "manhattan", "chebyshev") and case["variant"] != "dense"
+    if case["metric"] != "precomputed" and case["variant"] != "dense"
 ]
 
 
@@ -262,8 +262,6 @@ def test_failed_sparse_refits_preserve_fitted_graph_and_transform_state():
 
 def test_unimplemented_sparse_paths_fail_explicitly():
     matrix = fixture_input("features", "csr")
-    with pytest.raises(NotImplementedError, match="metric='cosine'"):
-        graph_model(metric="cosine").fit(matrix)
     with pytest.raises(TypeError, match="CSR, CSC, or COO"):
         graph_model().fit(matrix.tolil())
     model = graph_model().fit(matrix)

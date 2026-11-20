@@ -98,19 +98,28 @@ the pinned versions.
 ## Python estimator coverage
 
 `UMAP(transform_mode="graph").fit` and `fit_transform` use the exhaustive Rust
-CSR feature path for unsupervised Euclidean, Manhattan, and Chebyshev fits.
+CSR feature path for unsupervised Euclidean, Manhattan, Chebyshev, and cosine fits.
 The Python tests match the fixture's CSR shape, pointer and column order, and
-every float32 weight bit for the 15 supported feature cases and the canonical
-Euclidean holdout.
+every float32 weight bit for 20 feature cases and two additional holdouts.
 
 CSR, CSC, and COO matrices and arrays are validated before conversion and
-canonicalized without changing the original values, coordinates, pointers, or
-storage order. Duplicate coordinates are summed and columns are sorted. For
-compressed inputs, values are cast to float32 before summation. COO conversion
+converted without changing the original values, coordinates, pointers, or
+storage order. For Euclidean, Manhattan, and Chebyshev, columns are sorted
+and duplicates are summed. Compressed inputs are cast to float32 before
+summation. COO conversion
 sums in the original dtype before casting to float32. A public API probe using
 float64 duplicate values `[1e8, 1, -1e8]` at the same coordinate produced the
 same graph as a single zero there for CSR and CSC, and as a single one for COO.
 Malformed storage and nonfinite normalized values raise `ValueError`.
+
+Cosine preserves repeated entries in compressed rows when sorting. Each
+stored value contributes its float32 square to a float64 norm sum. After
+the float64 square root and division, the normalized values round to
+float32. The dot product accumulates float32 products over the common
+columns, including each pair of entries when a column repeats. Off-diagonal
+distances are `1 - dot`, clipped to `[0, 2]`, and the diagonal is zero. The
+Rust tests compare canonical CSR, repeated CSR, and a second canonical
+input. The Python tests exercise CSR, CSC, and COO conversion.
 
 Empty rows are allowed. A singleton `fit` has no `graph_`, and its
 `fit_transform` raises `AttributeError`. The Rust search ranks ties by
@@ -120,7 +129,7 @@ itself. An all-zero 4-by-2 matrix with `n_neighbors=2` therefore raises
 on this input. Three identical rows among four with `n_neighbors=2` also
 raise `ValueError` when the third row loses its self neighbor.
 
-Sparse precomputed distances, cosine, supervised sparse fits, sparse
+Sparse precomputed distances, supervised sparse fits, sparse
 embeddings, and transforms with sparse training data or queries remain
 outside this implementation.
 
@@ -140,4 +149,4 @@ The generator sets `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`,
 sets `n_jobs=1`, and gives each process a fresh temporary Numba cache.
 The two processes produced byte-identical JSON.
 
-SHA-256 `7f34ad6a771e765faa46b2861bca0168f1dcb194d2b4f16ba3a85fd83d6d94a7`
+SHA-256 `c7341365017d89bc442943b402038963bc4e2fd1414a54bac736cee35c6a2417`

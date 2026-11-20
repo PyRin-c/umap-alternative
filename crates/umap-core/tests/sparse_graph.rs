@@ -4,7 +4,7 @@ use serde::Deserialize;
 use umap_core::fuzzy_graph::{CsrGraph, GraphError};
 use umap_core::neighbors::{DistanceMetric, Neighbor};
 use umap_core::sparse::{
-    SparseGraphFitError, SparseKnnError, exhaustive_csr_knn, fit_sparse_graph,
+    SparseDistanceMetric, SparseGraphFitError, SparseKnnError, exhaustive_csr_knn, fit_sparse_graph,
 };
 
 use DistanceMetric::{Chebyshev, Euclidean, Manhattan};
@@ -256,29 +256,40 @@ struct CsrRecord {
 #[derive(Deserialize)]
 struct Case {
     input: String,
+    variant: String,
     graph: Option<CsrRecord>,
 }
 
 #[test]
-fn canonical_feature_graphs_match_public_support_and_weight_bits() {
+fn sparse_feature_graphs_match_public_support_and_weight_bits() {
     let fixture: Fixture = serde_json::from_str(PUBLIC_FIXTURE).expect("valid public fixture");
     for (name, metric) in [
-        ("features_csr_euclidean", Euclidean),
-        ("features_csr_manhattan", Manhattan),
-        ("features_csr_chebyshev", Chebyshev),
-        ("holdout_csr_euclidean", Euclidean),
+        ("features_csr_euclidean", Euclidean.into()),
+        ("features_csr_manhattan", Manhattan.into()),
+        ("features_csr_chebyshev", Chebyshev.into()),
+        ("holdout_csr_euclidean", Euclidean.into()),
+        ("features_csr_cosine", SparseDistanceMetric::Cosine),
+        ("features_split_csr_cosine", SparseDistanceMetric::Cosine),
+        ("holdout_csr_cosine", SparseDistanceMetric::Cosine),
     ] {
         let case = &fixture.cases[name];
         let csr = &fixture.inputs[&case.input];
-        let values: Vec<_> = csr
+        let mut values: Vec<_> = csr
             .data_bits_uint32
             .iter()
             .copied()
             .map(f32::from_bits)
             .collect();
+        let mut indptr = csr.indptr.clone();
+        let mut indices = csr.indices.clone();
+        if case.variant == "split_csr" {
+            indptr.iter_mut().for_each(|offset| *offset *= 2);
+            indices = indices.iter().flat_map(|&index| [index; 2]).collect();
+            values = values.iter().flat_map(|value| [value * 0.5; 2]).collect();
+        }
         let actual = fit_sparse_graph(
-            &csr.indptr,
-            &csr.indices,
+            &indptr,
+            &indices,
             &values,
             csr.shape[0],
             csr.shape[1],
@@ -292,6 +303,34 @@ fn canonical_feature_graphs_match_public_support_and_weight_bits() {
         assert_eq!(actual.indices, expected.indices, "{name}");
         let bits: Vec<_> = actual.data.iter().map(|value| value.to_bits()).collect();
         assert_eq!(bits, expected.data_bits_uint32, "{name}");
+    }
+}
+
+#[test]
+fn sparse_cosine_distinguishes_zero_norm_and_opposite_rows() {
+    let values = [3.0, 6.0, -6.0, -0.0, f32::from_bits(1), f32::MAX];
+    let indptr = [0, 1, 2, 3, 3, 4, 5, 6];
+    let neighbors = exhaustive_csr_knn(
+        &indptr,
+        &[0; 6],
+        &values,
+        7,
+        1,
+        7,
+        SparseDistanceMetric::Cosine,
+    )
+    .expect("valid CSR features");
+
+    for (row, neighbors) in neighbors.iter().enumerate() {
+        for neighbor in neighbors {
+            let distance: f32 = match (row, neighbor.index) {
+                (left, right) if left == right => 0.0,
+                (0, 1) | (1, 0) => 0.0,
+                (0 | 1, 2) | (2, 0 | 1) => 2.0,
+                _ => 1.0,
+            };
+            assert_eq!(neighbor.distance.to_bits(), distance.to_bits());
+        }
     }
 }
 

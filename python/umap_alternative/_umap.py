@@ -56,7 +56,7 @@ def _check_sparse_indices(indices, n_entries, axis_size):
         raise ValueError("sparse indices are out of bounds")
 
 
-def _canonical_sparse_features(X):
+def _sparse_features(X, *, preserve_duplicates):
     if X.format not in ("csr", "csc", "coo"):
         raise TypeError("sparse graph fitting requires SciPy CSR, CSC, or COO input")
     if X.ndim != 2:
@@ -92,7 +92,11 @@ def _canonical_sparse_features(X):
         data = check_array(data, dtype=np.float32, ensure_2d=False, ensure_min_samples=0)
         constructor = csr_matrix if compressed_rows else csc_matrix
         csr = constructor((data, indices, offsets), shape=X.shape, copy=True).tocsr()
-    csr.sum_duplicates()
+    if preserve_duplicates:
+        # Cosine normalizes compressed rows with their stored values intact.
+        csr.sort_indices()
+    else:
+        csr.sum_duplicates()
     return check_array(csr, dtype=np.float32, accept_sparse="csr")
 
 
@@ -102,7 +106,8 @@ class UMAP(BaseEstimator, TransformerMixin):
     With ``transform_mode="graph"``, ``fit_transform`` returns the fuzzy
     simplicial-set graph as a float32 SciPy CSR matrix. Unsupervised feature
     fits accept dense input and SciPy CSR, CSC, or COO input for Euclidean,
-    Manhattan, and Chebyshev. Sparse storage is normalized on a copy.
+    Manhattan, and Chebyshev. Sparse features also accept cosine. Sparse
+    storage is normalized on a copy, preserving repeated CSR entries for cosine.
     Zero-distance ties that exclude a row's self neighbor raise ``ValueError``.
     A singleton graph fit has no ``graph_``.
     Graph ``transform`` requires dense features for both training and queries.
@@ -180,7 +185,7 @@ class UMAP(BaseEstimator, TransformerMixin):
 
         self._validate_mode()
         sparse = issparse(X)
-        self._validate_metric(sparse=sparse)
+        metric = self._validate_metric(sparse=sparse)
         if self.set_op_mix_ratio != 1.0:
             raise NotImplementedError(
                 "set_op_mix_ratio values other than 1.0 are not implemented"
@@ -195,7 +200,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         if n_neighbors <= 1:
             raise ValueError("n_neighbors must be greater than 1")
 
-        precomputed = self.metric == "precomputed"
+        precomputed = metric == "precomputed"
         embedding_mode = self.transform_mode == "embedding"
         if sparse:
             if precomputed:
@@ -213,7 +218,7 @@ class UMAP(BaseEstimator, TransformerMixin):
                 "supervised fitting with metric='precomputed' is not implemented"
             )
         if sparse:
-            X_checked = _canonical_sparse_features(X)
+            X_checked = _sparse_features(X, preserve_duplicates=metric == "cosine")
         else:
             X_checked = check_array(
                 X,
@@ -226,7 +231,6 @@ class UMAP(BaseEstimator, TransformerMixin):
                 ensure_min_features=1,
             )
         n_rows, n_features = X_checked.shape
-        metric = self.metric if precomputed else _METRIC_ALIASES[self.metric.lower()]
         transform_fit = None if precomputed else (X_checked, metric)
         if precomputed:
             if n_rows != n_features:
@@ -506,16 +510,20 @@ class UMAP(BaseEstimator, TransformerMixin):
         return initial.ravel().tolist()
 
     def _validate_metric(self, *, sparse):
-        if sparse and isinstance(self.metric, str) and self.metric.lower() == "cosine":
-            raise NotImplementedError("metric='cosine' is not implemented for sparse graph fitting")
         if callable(self.metric):
             raise NotImplementedError(
                 "callable metrics are not implemented by the dense graph path"
             )
-        if not isinstance(self.metric, str) or (
-            self.metric != "precomputed" and self.metric.lower() not in _METRIC_ALIASES
-        ):
+        if not isinstance(self.metric, str):
             raise ValueError("metric is neither callable nor a recognised string")
+        if self.metric == "precomputed":
+            return self.metric
+        name = self.metric.lower()
+        if sparse and name == "cosine":
+            return name
+        if name not in _METRIC_ALIASES:
+            raise ValueError("metric is neither callable nor a recognised string")
+        return _METRIC_ALIASES[name]
 
     def _categorical_labels(self, y, n_rows):
         if not isinstance(self.target_metric, str) or self.target_metric != "categorical":

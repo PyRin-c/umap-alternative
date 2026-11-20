@@ -312,12 +312,13 @@ def capture_cases(features, holdout, precomputed) -> tuple[dict, dict]:
                 "input": "features", "variant": variant, "metric": metric, **result
             }
 
-    cases["holdout_csr_euclidean"] = {
-        "input": "holdout",
-        "variant": "csr",
-        "metric": "euclidean",
-        **fit_graph(holdout.copy(), "euclidean"),
-    }
+    for metric in ("euclidean", "cosine"):
+        cases[f"holdout_csr_{metric}"] = {
+            "input": "holdout",
+            "variant": "csr",
+            "metric": metric,
+            **fit_graph(holdout.copy(), metric),
+        }
     for variant, matrix in precomputed_variants(precomputed).items():
         cases[f"precomputed_{variant}"] = {
             "input": "precomputed",
@@ -353,6 +354,7 @@ def capture_cases(features, holdout, precomputed) -> tuple[dict, dict]:
         ("features_csr_chebyshev", feature_distances["chebyshev"]),
         ("features_csr_cosine", cosine_distances(features)),
         ("features_split_csr_cosine", cosine_distances(variants["split_csr"])),
+        ("holdout_csr_cosine", cosine_distances(holdout)),
     ):
         expected = cases[case]["graph"]
         assert fit_graph(matrix, "precomputed")["graph"] == expected, case

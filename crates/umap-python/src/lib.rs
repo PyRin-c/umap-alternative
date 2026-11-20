@@ -8,7 +8,7 @@ use umap_core::embedding::{
 use umap_core::fit::{fit_dense_categorical_graph, fit_dense_graph, fit_precomputed_graph};
 use umap_core::fuzzy_graph::CsrGraph;
 use umap_core::neighbors::DistanceMetric;
-use umap_core::sparse::fit_sparse_graph;
+use umap_core::sparse::{SparseDistanceMetric, fit_sparse_graph};
 use umap_core::transform::{CooGraph, transform_dense_graph};
 
 type CsrComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
@@ -56,7 +56,7 @@ fn _fit_dense_graph(
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
-/// Fit a fuzzy graph from canonical CSR features and return its CSR data.
+/// Fit a fuzzy graph from sorted CSR features and return its CSR data.
 #[pyfunction]
 fn _fit_sparse_graph(
     py: Python<'_>,
@@ -67,7 +67,11 @@ fn _fit_sparse_graph(
     k: usize,
     metric: &str,
 ) -> PyResult<CsrComponents> {
-    let metric = parse_metric(metric)?;
+    let metric = if metric.eq_ignore_ascii_case("cosine") {
+        SparseDistanceMetric::Cosine
+    } else {
+        parse_metric(metric)?.into()
+    };
     let (n_rows, n_features) = shape;
     py.detach(|| fit_sparse_graph(&indptr, &indices, &data, n_rows, n_features, k, metric))
         .map(csr_components)

@@ -1,10 +1,25 @@
-//! Exhaustive neighbor search and fuzzy graph fitting for CSR feature matrices.
+//! Exhaustive neighbor search and fuzzy graph fitting for sorted CSR feature matrices.
 
 use std::cmp::Ordering;
 use std::fmt;
 
 use crate::fuzzy_graph::{CsrGraph, GraphError, fuzzy_simplicial_set};
 use crate::neighbors::{DistanceMetric, Neighbor, collect_neighbors};
+
+/// Distance metrics for exhaustive sparse feature search.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SparseDistanceMetric {
+    /// A metric shared with dense neighbor search.
+    Dense(DistanceMetric),
+    /// One minus the dot product of L2-normalized rows, clipped to `0..=2`.
+    Cosine,
+}
+
+impl From<DistanceMetric> for SparseDistanceMetric {
+    fn from(metric: DistanceMetric) -> Self {
+        Self::Dense(metric)
+    }
+}
 
 /// Input validation failures for [`exhaustive_csr_knn`].
 #[derive(Clone, Debug, PartialEq)]
@@ -37,7 +52,7 @@ pub enum SparseKnnError {
         column: usize,
         n_features: usize,
     },
-    /// Stored column indices must increase strictly within each row.
+    /// Stored column indices must be sorted, and may only repeat for cosine distance.
     UnorderedColumnIndices {
         row: usize,
         position: usize,
@@ -143,15 +158,15 @@ impl std::error::Error for SparseGraphFitError {
     }
 }
 
-/// Find the `k` nearest rows for every row of a canonical CSR feature matrix.
+/// Find the `k` nearest rows for every row of a sorted CSR feature matrix.
 ///
 /// `indptr` contains `n_rows + 1` nondecreasing offsets, starting at zero and
-/// ending at `indices.len() == data.len()`. Each row has strictly ascending
-/// column indices less than `n_features`. Stored values must be finite.
-/// Missing entries represent zero, and empty rows and explicit signed zeros
-/// are allowed. Callers must sort and combine duplicate columns before using
-/// this API. Compatibility with public noncanonical input behavior and sparse
-/// precomputed-distance semantics is outside this feature-matrix contract.
+/// ending at `indices.len() == data.len()`. Each row has ascending column
+/// indices less than `n_features`. Stored values must be finite. Missing
+/// entries represent zero, and empty rows and explicit signed zeros are
+/// allowed. Cosine distance uses stored values separately when normalizing
+/// rows with repeated columns. For the other metrics, combine duplicate
+/// columns before calling this API.
 ///
 /// Distances use a two-pointer merge in ascending column order, visiting only
 /// stored coordinates. Euclidean distances sum squared `f64` differences,
@@ -159,6 +174,11 @@ impl std::error::Error for SparseGraphFitError {
 /// sum absolute `f64` differences, and Chebyshev distances take their maximum.
 /// Both round the final result to `f32`. Computed distances can overflow to
 /// positive infinity.
+///
+/// For cosine distance, each row is normalized once. The norm uses float32
+/// squares and a float64 sum and square root. The normalized values, dot
+/// products and distances use float32. A zero-norm row is left unchanged,
+/// and each row's distance to itself is exactly zero.
 ///
 /// Every row is considered as a candidate, including the query itself, and
 /// `k` must be in `1..=n_rows`. As in the dense search, rows are ranked by
@@ -170,8 +190,9 @@ pub fn exhaustive_csr_knn(
     n_rows: usize,
     n_features: usize,
     k: usize,
-    metric: DistanceMetric,
+    metric: impl Into<SparseDistanceMetric>,
 ) -> Result<Vec<Vec<Neighbor>>, SparseKnnError> {
+    let metric = metric.into();
     if n_rows.checked_add(1) != Some(indptr.len()) || indices.len() != data.len() {
         return Err(SparseKnnError::InvalidShape {
             n_rows,
@@ -217,7 +238,10 @@ pub fn exhaustive_csr_knn(
                     n_features,
                 });
             }
-            if position > start && indices[position - 1] >= column {
+            if position > start
+                && (indices[position - 1] > column
+                    || (indices[position - 1] == column && metric != SparseDistanceMetric::Cosine))
+            {
                 return Err(SparseKnnError::UnorderedColumnIndices {
                     row,
                     position,
@@ -232,6 +256,9 @@ pub fn exhaustive_csr_knn(
         }
     }
 
+    let normalized_data =
+        (metric == SparseDistanceMetric::Cosine).then(|| normalize_sparse_rows(indptr, data));
+    let data = normalized_data.as_deref().unwrap_or(data);
     let row_at = |row| {
         let entries = indptr[row]..indptr[row + 1];
         CsrRow {
@@ -243,12 +270,18 @@ pub fn exhaustive_csr_knn(
         let query = row_at(query_index);
         candidates.extend((0..n_rows).map(|index| Neighbor {
             index,
-            distance: sparse_distance(query, row_at(index), metric),
+            distance: match metric {
+                SparseDistanceMetric::Dense(metric) => {
+                    sparse_distance(query, row_at(index), metric)
+                }
+                SparseDistanceMetric::Cosine if query_index == index => 0.0,
+                SparseDistanceMetric::Cosine => sparse_cosine_distance(query, row_at(index)),
+            },
         }));
     }))
 }
 
-/// Fit a square fuzzy graph from a canonical CSR feature matrix.
+/// Fit a square fuzzy graph from a sorted CSR feature matrix.
 ///
 /// The input and `k` follow [`exhaustive_csr_knn`]. The graph is canonical CSR
 /// with strictly ascending columns per row and no diagonal entries. Graph
@@ -262,7 +295,7 @@ pub fn fit_sparse_graph(
     n_rows: usize,
     n_features: usize,
     k: usize,
-    metric: DistanceMetric,
+    metric: impl Into<SparseDistanceMetric>,
 ) -> Result<CsrGraph, SparseGraphFitError> {
     let neighbors = exhaustive_csr_knn(indptr, indices, data, n_rows, n_features, k, metric)
         .map_err(SparseGraphFitError::Knn)?;
@@ -273,6 +306,51 @@ pub fn fit_sparse_graph(
 struct CsrRow<'a> {
     columns: &'a [usize],
     values: &'a [f32],
+}
+
+fn normalize_sparse_rows(indptr: &[usize], data: &[f32]) -> Vec<f32> {
+    let mut normalized = data.to_vec();
+    for offsets in indptr.windows(2) {
+        let row = &mut normalized[offsets[0]..offsets[1]];
+        let squared_norm = row
+            .iter()
+            .fold(0.0_f64, |sum, &value| sum + f64::from(value * value));
+        if squared_norm > 0.0 {
+            let norm = squared_norm.sqrt();
+            for value in row {
+                *value = (f64::from(*value) / norm) as f32;
+            }
+        }
+    }
+    normalized
+}
+
+fn sparse_cosine_distance(left: CsrRow<'_>, right: CsrRow<'_>) -> f32 {
+    let (mut left_position, mut right_position) = (0, 0);
+    let mut dot = 0.0_f32;
+    while let (Some(left_column), Some(right_column)) = (
+        left.columns.get(left_position),
+        right.columns.get(right_position),
+    ) {
+        match left_column.cmp(right_column) {
+            Ordering::Less => left_position += 1,
+            Ordering::Greater => right_position += 1,
+            Ordering::Equal => {
+                let mut right_end = right_position + 1;
+                while right.columns.get(right_end) == Some(right_column) {
+                    right_end += 1;
+                }
+                while left.columns.get(left_position) == Some(left_column) {
+                    for &right_value in &right.values[right_position..right_end] {
+                        dot += left.values[left_position] * right_value;
+                    }
+                    left_position += 1;
+                }
+                right_position = right_end;
+            }
+        }
+    }
+    (1.0 - dot).clamp(0.0, 2.0)
 }
 
 fn sparse_distance(left: CsrRow<'_>, right: CsrRow<'_>, metric: DistanceMetric) -> f32 {

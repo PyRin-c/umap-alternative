@@ -1,0 +1,132 @@
+{
+  "api": "https://umap-learn.readthedocs.io/en/latest/api.html#umap.umap_.find_ab_params",
+  "environment": {
+    "platform": "Windows",
+    "machine": "AMD64",
+    "python_implementation": "CPython",
+    "python_version": "3.13.12",
+    "numpy": "2.5.5",
+    "scipy": "1.18.1",
+    "umap-learn": "0.6.0"
+  },
+  "samples": [
+    {
+      "spread": 1.0,
+      "min_dist": 0.0,
+      "bits": [
+        4611383414355364244,
+        4605295365281739605
+      ],
+      "warnings": []
+    },
+    {
+      "spread": 1.0,
+      "min_dist": 5e-324,
+      "bits": [
+        4611383414355364244,
+        4605295365281739605
+      ],
+      "warnings": []
+    },
+    {
+      "spread": 1.0,
+      "min_dist": 0.1,
+      "bits": [
+        4609780741154936652,
+        4606237211220426671
+      ],
+      "warnings": []
+    },
+    {
+      "spread": 1.0,
+      "min_dist": 0.9999999999999999,
+      "bits": [
+        4592949291739412190,
+        4611367330870030835
+      ],
+      "warnings": []
+    },
+    {
+      "spread": 1.0,
+      "min_dist": 1.0,
+      "bits": [
+        4592949291743211275,
+        4611367330868316695
+      ],
+      "warnings": []
+    },
+    {
+      "spread": 0.5,
+      "min_dist": 0.2,
+      "bits": [
+        4616387992111822914,
+        4608184755248508219
+      ],
+      "warnings": []
+    },
+    {
+      "spread": 2.0,
+      "min_dist": 0.19,
+      "bits": [
+        4602035438786631343,
+        4606188982530511643
+      ],
+      "warnings": []
+    },
+    {
+      "spread": 3.7,
+      "min_dist": 0.987,
+      "bits": [
+        4589312743765094008,
+        4607523804556418557
+      ],
+      "warnings": [
+        "RuntimeWarning"
+      ]
+    },
+    {
+      "spread": 0.37,
+      "min_dist": 0.11,
+      "bits": [
+        4621294049531695408,
+        4607674526054813713
+      ],
+      "warnings": []
+    },
+    {
+      "spread": 0.04,
+      "min_dist": 0.039,
+      "bits": [
+        4672713883311520172,
+        4611223205985234292
+      ],
+      "warnings": [
+        "RuntimeWarning",
+        "RuntimeWarning",
+        "RuntimeWarning"
+      ]
+    },
+    {
+      "spread": 13.0,
+      "min_dist": 0.7,
+      "bits": [
+        4582180165952681461,
+        4605796086930970375
+      ],
+      "warnings": [
+        "RuntimeWarning"
+      ]
+    },
+    {
+      "spread": 1e-10,
+      "min_dist": 0.0,
+      "bits": [
+        4607182418800017408,
+        4607182418800017408
+      ],
+      "warnings": [
+        "OptimizeWarning"
+      ]
+    }
+  ]
+}

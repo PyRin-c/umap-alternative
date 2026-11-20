@@ -115,6 +115,32 @@ impl<'a> DenseApproximateQueryIndex<'a> {
         self
     }
 
+    /// Prepare one Euclidean tree from pairs of unsigned projection words.
+    ///
+    /// The root uses slot zero. The children of slot `i` use slots
+    /// `2 * i + 1` and `2 * i + 2`. A leaf at capacity or the depth limit
+    /// leaves its slot unused and preserves the sibling's position.
+    ///
+    /// Equal distances follow the left branch. A degenerate split becomes
+    /// a leaf. Supply the words for the desired tree, since training and
+    /// prepared-query pivots can differ.
+    pub fn with_projection_words(
+        mut self,
+        words: &[[u64; 2]],
+        leaf_size: NonZeroUsize,
+        max_depth: u8,
+    ) -> Result<Self, ApproximateSearchError> {
+        self.tree = Some(build_word_tree(
+            self.data,
+            (0..self.data.n_rows).collect(),
+            leaf_size.get(),
+            max_depth,
+            words,
+            0,
+        )?);
+        Ok(self)
+    }
+
     /// Search the supplied graph using a squared-distance priority queue.
     ///
     /// The entry stream restarts at the beginning of each call and advances
@@ -268,6 +294,63 @@ impl<'a> DenseApproximateQueryIndex<'a> {
     }
 }
 
+fn build_word_tree(
+    data: DenseRows<'_>,
+    mut rows: Vec<usize>,
+    leaf_size: usize,
+    depth: u8,
+    words: &[[u64; 2]],
+    slot: usize,
+) -> Result<Tree, ApproximateSearchError> {
+    if rows.len() <= leaf_size || depth == 0 {
+        return Ok(Tree::Leaf(rows));
+    }
+    let &[first, second] = words
+        .get(slot)
+        .ok_or(ApproximateSearchError::ProjectionWordsExhausted)?;
+    let first = (first % rows.len() as u64) as usize;
+    let second = (second % (rows.len() - 1) as u64) as usize;
+    let a = rows[first];
+    let b = rows[second + usize::from(second >= first)];
+
+    let metric = DistanceMetric::Euclidean;
+    let mut cursor = 0;
+    let mut boundary = rows.len();
+    while cursor < boundary {
+        let point = data.row(rows[cursor]);
+        if metric.distance(point, data.row(a)) <= metric.distance(point, data.row(b)) {
+            cursor += 1;
+        } else {
+            boundary -= 1;
+            rows.swap(cursor, boundary);
+        }
+    }
+    if boundary == 0 || boundary == rows.len() {
+        return Ok(Tree::Leaf(rows));
+    }
+    let right = rows.split_off(boundary);
+    Ok(Tree::Split {
+        a,
+        b,
+        left: Box::new(build_word_tree(
+            data,
+            rows,
+            leaf_size,
+            depth - 1,
+            words,
+            2 * slot + 1,
+        )?),
+        right: Box::new(build_word_tree(
+            data,
+            right,
+            leaf_size,
+            depth - 1,
+            words,
+            2 * slot + 2,
+        )?),
+    })
+}
+
 // The farthest retained candidate is at the root. On equal child keys the
 // left child is selected, and a replacement stops above an equal key.
 fn sift_down(heap: &mut [Neighbor], replacement: Neighbor) {
@@ -288,3 +371,7 @@ fn sift_down(heap: &mut [Neighbor], replacement: Neighbor) {
     }
     heap[parent] = replacement;
 }
+
+#[cfg(test)]
+#[path = "projection_words_tests.rs"]
+mod projection_words_tests;

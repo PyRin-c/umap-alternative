@@ -1,5 +1,8 @@
 # Approximate projection probes and Euclidean distance bits
 
+The follow-up recovers the unsigned root and child words and replays the
+in-place partition order. [Projection word reference](projection_words_reference.md)
+
 The baseline is integrated `bd6794e`. The Windows probe reuses the
 construction inputs for caller seeds 42 and 73 and adds seeds 0 and 19 at
 both 4,095 and 4,096 rows. It calls the published `NNDescent` constructor,

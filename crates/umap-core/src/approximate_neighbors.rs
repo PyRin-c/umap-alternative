@@ -53,6 +53,8 @@ pub enum ApproximateSearchError {
     InvalidSeed { position: usize, index: i32 },
     /// A supplied squared distance for a non-self graph edge is invalid.
     InvalidEdgeDistance { position: usize },
+    /// A requested projection split has no pivot words at its slot.
+    ProjectionWordsExhausted,
     /// The metric returned a non-finite distance for a ranked candidate.
     NonFiniteDistance { row: usize, candidate: usize },
 }
@@ -78,6 +80,7 @@ impl fmt::Display for ApproximateSearchError {
                     "invalid squared edge distance at position {position}"
                 )
             }
+            Self::ProjectionWordsExhausted => write!(formatter, "projection pivot words exhausted"),
             Self::NonFiniteDistance { row, candidate } => {
                 write!(
                     formatter,

@@ -150,11 +150,10 @@ def scheduling_controls(search, examples):
     return observations
 
 
-def holdout_cases(umap, search):
+def holdout_cases(umap, search, d=11, seed=73, data_seed=88, query_seed=101):
     for n in (4095, 4096):
-        d, seed = 11, 73
-        data = np.random.default_rng(88).standard_normal((n, d)).astype(np.float32)
-        queries = np.random.default_rng(101).standard_normal((4, d)).astype(np.float32)
+        data = np.random.default_rng(data_seed).standard_normal((n, d)).astype(np.float32)
+        queries = np.random.default_rng(query_seed).standard_normal((4, d)).astype(np.float32)
         for metric in ("euclidean", "cosine", "correlation"):
             params = PARAMETERS | dict(metric=metric, n_neighbors=5, random_state=seed)
             def graph(force):
@@ -170,7 +169,7 @@ def holdout_cases(umap, search):
                 snapshots[str(count)] = ranks(model)
             epsilon = 0.12 if metric == "euclidean" else 0.24
             query_ranks = rank_record(*model.query(queries.copy(), k=5, epsilon=epsilon))
-            name = f"gaussian_{n}_11d_73_{metric}"
+            name = f"gaussian_{n}_{d}d_{seed}_{metric}"
             print(name, flush=True)
             yield name, {
                 "metric": metric, "cutoff": None, "n_rows": n, "n_features": d, "width": 5,

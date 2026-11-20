@@ -1,5 +1,8 @@
 # Dense approximate construction at 4,095 and 4,096 rows
 
+The projection follow-up adds seed and ordering controls and measures the
+next Euclidean arithmetic change. [Approximate projection probes](approximate_pivot_reference.md)
+
 This follow-up compares Rust against `e29f1c6` using the pinned Windows wheel
 and the same measurement harness in both revisions. The reference cases use
 seven Gaussian features, data seed 57 and search seed 42. The holdout uses

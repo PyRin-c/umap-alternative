@@ -109,29 +109,8 @@ impl<'a> DenseApproximateIndex<'a> {
         }
         let mut fit_ranks = RankedNeighbors::with_capacity(n_rows, width)?;
         let k = width.min(n_rows - 1);
-        let tree_count = 5 + ((n_rows as f64).sqrt() / 20.0).round() as usize;
         let rounds = (((n_rows as f64).log2()).round() as usize).max(5);
-        let leaf_size = MIN_LEAF_SIZE.max(k);
-        let mut fill_seed = Mt19937::new(seed);
-        let mut fill_rng = draw_negative_seed(|| fill_seed.next_u32());
-        let mut rng = Mt19937::new(seed);
-        let mut ranks = vec![Vec::new(); n_rows];
-        let projection_metric = projection_metric(metric);
-        let mut trees = (0..tree_count.min(64)).map(|_| {
-            Tree::build(
-                data,
-                projection_metric,
-                (0..n_rows).collect(),
-                leaf_size,
-                &mut rng,
-            )
-        });
-        let tree = trees.next().expect("positive tree count");
-        tree.seed(data, metric, &mut ranks, k)?;
-        for other in trees {
-            other.seed(data, metric, &mut ranks, k)?;
-        }
-        fill_missing(data, metric, &mut ranks, k, &mut fill_rng)?;
+        let (tree, mut ranks) = seed_forest(data, metric, k, seed)?;
         refine(data, metric, &mut ranks, k, rounds)?;
         let edges = incident(&ranks);
         for (row, rank) in ranks.iter().enumerate() {
@@ -216,6 +195,38 @@ impl<'a> DenseApproximateIndex<'a> {
         }
         Ok(result)
     }
+}
+
+fn seed_forest(
+    data: DenseRows<'_>,
+    metric: DistanceMetric,
+    k: usize,
+    seed: u32,
+) -> Result<(Tree, Vec<Vec<Neighbor>>), ApproximateSearchError> {
+    let n_rows = data.n_rows;
+    let tree_count = 5 + ((n_rows as f64).sqrt() / 20.0).round() as usize;
+    let leaf_size = MIN_LEAF_SIZE.max(k);
+    let mut fill_seed = Mt19937::new(seed);
+    let mut fill_rng = draw_negative_seed(|| fill_seed.next_u32());
+    let mut rng = Mt19937::new(seed);
+    let mut ranks = vec![Vec::new(); n_rows];
+    let projection_metric = projection_metric(metric);
+    let mut trees = (0..tree_count.min(64)).map(|_| {
+        Tree::build(
+            data,
+            projection_metric,
+            (0..n_rows).collect(),
+            leaf_size,
+            &mut rng,
+        )
+    });
+    let tree = trees.next().expect("positive tree count");
+    tree.seed(data, metric, &mut ranks, k)?;
+    for other in trees {
+        other.seed(data, metric, &mut ranks, k)?;
+    }
+    fill_missing(data, metric, &mut ranks, k, &mut fill_rng)?;
+    Ok((tree, ranks))
 }
 
 /// Isolate refinement from seed generation using supplied row-major indices.
@@ -340,11 +351,67 @@ fn checked_distance(
     row: usize,
     candidate: usize,
 ) -> Result<f32, ApproximateSearchError> {
-    let distance = metric.distance(left, right);
+    let distance = match metric {
+        DistanceMetric::Euclidean => approximate_euclidean(left, right),
+        _ => metric.distance(left, right),
+    };
     if !distance.is_finite() {
         return Err(ApproximateSearchError::NonFiniteDistance { row, candidate });
     }
     Ok(if distance > 0.0 { distance } else { 0.0 })
+}
+
+// The approximate Euclidean wheel path first rounds the feature difference
+// to f32. Its square accumulation has 32-coordinate blocks, four-coordinate
+// blocks, then a scalar tail. Keep the horizontal reduction order explicit.
+fn approximate_euclidean(left: &[f32], right: &[f32]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("avx") && std::is_x86_feature_detected!("fma") {
+        // SAFETY: the runtime check covers both enabled target features.
+        return unsafe { approximate_euclidean_fma(left, right) };
+    }
+    approximate_euclidean_portable(left, right)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx,fma")]
+fn approximate_euclidean_fma(left: &[f32], right: &[f32]) -> f32 {
+    approximate_euclidean_portable(left, right)
+}
+
+#[inline(always)]
+fn approximate_euclidean_portable(left: &[f32], right: &[f32]) -> f32 {
+    debug_assert_eq!(left.len(), right.len());
+    let (blocks_left, left) = left.as_chunks::<32>();
+    let (blocks_right, right) = right.as_chunks::<32>();
+    let mut sum = 0.0;
+    if !blocks_left.is_empty() {
+        let mut wide = [0.0; 32];
+        for (left, right) in blocks_left.iter().zip(blocks_right) {
+            for ((lane, left), right) in wide.iter_mut().zip(left).zip(right) {
+                let delta = left - right;
+                *lane = delta.mul_add(delta, *lane);
+            }
+        }
+        let pair = |i| (wide[i] + wide[i + 8]) + (wide[i + 16] + wide[i + 24]);
+        let cross = |i| pair(i) + pair(i + 4);
+        sum = (cross(0) + cross(2)) + (cross(1) + cross(3));
+    }
+    let (blocks_left, left) = left.as_chunks::<4>();
+    let (blocks_right, right) = right.as_chunks::<4>();
+    let mut lanes = [sum, 0.0, 0.0, 0.0];
+    for (left, right) in blocks_left.iter().zip(blocks_right) {
+        for ((lane, left), right) in lanes.iter_mut().zip(left).zip(right) {
+            let delta = left - right;
+            *lane = delta.mul_add(delta, *lane);
+        }
+    }
+    sum = (lanes[0] + lanes[2]) + (lanes[1] + lanes[3]);
+    for (left, right) in left.iter().zip(right) {
+        let delta = left - right;
+        sum = delta.mul_add(delta, sum);
+    }
+    sum.sqrt()
 }
 
 impl RankedNeighbors {
@@ -623,6 +690,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn approximate_euclidean_preserves_the_four_lane_reduction() {
+        let left = [0x3f14_0085, 0x3f9a_cf41, 0xbe46_3ac3, 0x3e0e_f583].map(f32::from_bits);
+        let right = [0x3f4e_977e, 0x3f71_adfd, 0x3ed8_a165, 0xbd64_49e2].map(f32::from_bits);
+        assert_eq!(
+            approximate_euclidean_portable(&left, &right).to_bits(),
+            0x3f3c_57ce
+        );
+        assert_eq!(approximate_euclidean(&left, &right).to_bits(), 0x3f3c_57ce);
+    }
+
+    #[test]
     fn random_fill_caps_self_retries() {
         let data = DenseRows::training(&[0.0, 1.0], 2, 1).unwrap();
         let mut rows = vec![Vec::new(); 2];
@@ -674,6 +752,142 @@ mod tests {
         training_bits: Vec<u32>,
         left: Vec<bool>,
         expected: Ranks,
+    }
+
+    #[derive(Deserialize)]
+    struct PivotProbes {
+        cases: BTreeMap<String, SeededCase>,
+        #[serde(default)]
+        distance_controls: BTreeMap<usize, DistanceControl>,
+        #[serde(default)]
+        caller_seeds: BTreeMap<u32, CallerSeed>,
+    }
+
+    #[derive(Deserialize)]
+    struct SeededCase {
+        #[serde(flatten)]
+        input: Inputs,
+        snapshots: BTreeMap<usize, Ranks>,
+    }
+
+    #[derive(Deserialize)]
+    struct DistanceControl {
+        data: Vec<u32>,
+        #[serde(flatten)]
+        ranks: Ranks,
+    }
+
+    #[derive(Deserialize)]
+    struct CallerSeed {
+        first_state: [i64; 3],
+        second_state: [i64; 3],
+        scalar: u64,
+    }
+
+    #[test]
+    #[ignore = "requires output from a public construction or pivot probe"]
+    fn measure_native_seed_ranks() {
+        let path = std::env::var_os("APPROXIMATE_SEARCH_OBSERVATIONS").unwrap();
+        let probes: PivotProbes = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert!(!probes.cases.is_empty());
+        for (seed, expected) in probes.caller_seeds {
+            let mut rng = Mt19937::new(seed);
+            assert_eq!(draw_negative_seed(|| rng.next_u32()), expected.first_state);
+            assert_eq!(draw_negative_seed(|| rng.next_u32()), expected.second_state);
+            let scalar =
+                (u64::from(rng.next_u32() & 0x3fff_ffff) << 32) | u64::from(rng.next_u32());
+            assert_eq!(scalar, expected.scalar);
+            println!("caller seed {seed}: both signed draws and projection scalar {scalar} match");
+        }
+        for (name, case) in probes.cases {
+            let input = case.input;
+            let values: Vec<_> = input
+                .training_bits
+                .into_iter()
+                .map(f32::from_bits)
+                .collect();
+            let data = DenseRows::training(&values, input.n_rows, input.n_features).unwrap();
+            let metric = match input.metric.as_str() {
+                "euclidean" => DistanceMetric::Euclidean,
+                "cosine" => DistanceMetric::Cosine,
+                "correlation" => DistanceMetric::Correlation,
+                metric => panic!("unknown metric: {metric}"),
+            };
+            let k = input.width;
+            let (_tree, mut native) =
+                seed_forest(data, metric, k, input.seed.unwrap_or(42)).unwrap();
+            for round in [0, 1] {
+                let mut ranks = RankedNeighbors::with_capacity(input.n_rows, k).unwrap();
+                for (row, neighbors) in native.iter().enumerate() {
+                    ranks.extend_training(row, neighbors, k);
+                }
+                let wheel = &case.snapshots[&round];
+                let mut shared = 0;
+                let mut aligned = 0;
+                let mut bits = 0;
+                let mut wide_bits = 0;
+                for (row, columns) in ranks.indices.chunks_exact(k).enumerate() {
+                    let start = row * k;
+                    let expected = &wheel.indices[start..start + k];
+                    for (slot, &col) in columns
+                        .iter()
+                        .enumerate()
+                        .skip(1)
+                        .filter(|(_, col)| **col >= 0)
+                    {
+                        if let Some(position) =
+                            expected.iter().position(|&candidate| candidate == col)
+                        {
+                            shared += 1;
+                            aligned += usize::from(slot == position);
+                            let expected_bits = wheel.bits[start + position];
+                            bits += usize::from(
+                                ranks.distances[start + slot].to_bits() == expected_bits,
+                            );
+                            let wide = metric.distance(data.row(row), data.row(col as usize));
+                            wide_bits += usize::from(wide.to_bits() == expected_bits);
+                        }
+                    }
+                }
+                println!(
+                    "{name} native round {round}: shared {shared}, aligned {aligned}, bits {wide_bits} -> {bits} of {shared}"
+                );
+                if round == 0 {
+                    refine(data, metric, &mut native, k, 1).unwrap();
+                }
+            }
+        }
+
+        for (dimension, control) in probes.distance_controls {
+            let values: Vec<_> = control.data.into_iter().map(f32::from_bits).collect();
+            let n = values.len() / dimension;
+            let data = DenseRows::training(&values, n, dimension).unwrap();
+            let mut wide = 0;
+            let mut validated = 0;
+            for (slot, (&col, &bits)) in control
+                .ranks
+                .indices
+                .iter()
+                .zip(&control.ranks.bits)
+                .enumerate()
+            {
+                let row = slot / n;
+                let (left, right) = (data.row(row), data.row(col as usize));
+                wide +=
+                    usize::from(DistanceMetric::Euclidean.distance(left, right).to_bits() == bits);
+                let selected = approximate_euclidean(left, right).to_bits();
+                assert_eq!(
+                    approximate_euclidean_portable(left, right).to_bits(),
+                    selected
+                );
+                validated += usize::from(selected == bits);
+            }
+            println!(
+                "dimension {dimension}: {wide} -> {validated} exact distance bits of {}",
+                control.ranks.bits.len()
+            );
+            assert_eq!(validated, control.ranks.bits.len(), "dimension {dimension}");
+        }
     }
 
     #[test]

@@ -142,9 +142,9 @@ impl std::error::Error for GraphError {}
 ///
 /// `sum(exp(-max(0, d_ij - rho_i) / sigma_i)) = log2(k)`.
 ///
-/// The scale search evaluates the sum in `f64` with an absolute tolerance of
-/// `1e-5`. The offsets, trial scales, and emitted memberships use `f32`.
-/// If the zero-scale limit exceeds the target, the scale is reduced to
+/// The scale search computes the target and sum in `f64` with an absolute
+/// tolerance of `1e-5`. The offsets, trial scales, and emitted memberships
+/// use `f32`. If the zero-scale limit exceeds the target, the scale is reduced to
 /// `0.001 * max_offset`. Rows with no positive offset use a unit scale, and
 /// all their memberships are one.
 ///
@@ -345,7 +345,7 @@ fn local_offset(row_index: usize, row: &[Neighbor]) -> f32 {
 }
 
 fn distance_scale(row_index: usize, row: &[Neighbor], rho: f32) -> f32 {
-    let target = (row.len() as f32).log2();
+    let target = (row.len() as f64).log2();
     let offsets = row
         .iter()
         .filter(|neighbor| neighbor.index != row_index)
@@ -371,7 +371,7 @@ fn distance_scale(row_index: usize, row: &[Neighbor], rho: f32) -> f32 {
         return 1.0;
     };
 
-    let zero_scale_sum = offsets.iter().filter(|offset| **offset == 0.0).count() as f32;
+    let zero_scale_sum = offsets.iter().filter(|offset| **offset == 0.0).count() as f64;
     if zero_scale_sum > target {
         return (max_offset * 0.001).max(f32::MIN_POSITIVE);
     }
@@ -379,7 +379,6 @@ fn distance_scale(row_index: usize, row: &[Neighbor], rho: f32) -> f32 {
     let mut lower = 0.0_f32;
     let mut upper = f32::INFINITY;
     let mut middle = 1.0_f32;
-    let target = f64::from(target);
 
     for _ in 0..64 {
         // A rounded f32 sum can cross the convergence threshold early.

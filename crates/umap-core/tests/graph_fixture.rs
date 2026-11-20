@@ -150,3 +150,30 @@ fn ties_duplicates_graph_matches_linux_and_windows_bits() {
     let actual = graph_from_fixture(&linux);
     assert_graph_bits(&actual, expected_graph(&linux), &linux.case, &[]);
 }
+
+#[test]
+fn scale_search_matches_reference_bits_at_convergence_boundary() {
+    // The end rows start just inside the tolerance for log2(3).
+    // Rounding the target to f32 moves their sums outside the tolerance.
+    let gap = 0.0625;
+    let separation = f32::from_bits(0x3f19_43c7);
+    let points = [0.0, gap, separation, separation + gap];
+    let neighbors = exhaustive_knn(&points, points.len(), 1, 3).expect("valid neighbors");
+    let graph = fuzzy_simplicial_set(&neighbors).expect("valid graph");
+
+    // Captured from umap-learn 0.6.0's public graph-mode fit_transform
+    // with Euclidean distance, k=3, random initialization, and seed 42.
+    assert_eq!((graph.n_rows, graph.n_cols), (4, 4));
+    assert_eq!(graph.indptr, [0, 2, 5, 8, 10]);
+    assert_eq!(graph.indices, [1, 2, 0, 2, 3, 0, 1, 3, 1, 2]);
+    let unit = 1.0_f32.to_bits();
+    let one_way = 0x3f15_c0c2;
+    let reciprocal = 0x3f53_e74c;
+    let bits: Vec<_> = graph.data.iter().map(|weight| weight.to_bits()).collect();
+    assert_eq!(
+        bits,
+        [
+            unit, one_way, unit, reciprocal, one_way, one_way, reciprocal, unit, one_way, unit,
+        ]
+    );
+}

@@ -1,14 +1,16 @@
 //! Small deterministic layout-update primitives.
 //!
 //! This module contains the attractive part of the UMAP objective for one
-//! edge.  If `q = ||y_i - y_j||^2`, the edge loss is
+//! edge and a deterministic attractive-only epoch scheduler.  If
+//! `q = ||y_i - y_j||^2`, the edge loss is
 //! `log(1 + a * q^b)`.  Its gradient with respect to `y_i` is
 //!
 //! `2 * a * b * q^(b - 1) * (y_i - y_j) / (1 + a * q^b)`.
 //!
 //! The public update functions apply one simultaneous, symmetric gradient
-//! descent step in `f32` arithmetic.  They are intentionally a primitive:
-//! scheduling, edge sampling, and repulsive updates belong to a later layer.
+//! descent step in `f32` arithmetic.  The scheduler below adds only the
+//! public attractive edge-sampling rule; repulsive updates and random
+//! negative sampling remain outside this module.
 
 use std::fmt;
 
@@ -428,6 +430,115 @@ pub fn attractive_update_csr(
     b: f32,
     learning_rate: f32,
 ) -> Result<(), LayoutError> {
+    validate_csr_inputs(embedding, n_components, graph, a, b, learning_rate)?;
+
+    for row in 0..graph.n_rows {
+        for position in graph.indptr[row]..graph.indptr[row + 1] {
+            if graph.data[position] > 0.0 {
+                attractive_update(
+                    embedding,
+                    n_components,
+                    row,
+                    graph.indices[position],
+                    a,
+                    b,
+                    learning_rate,
+                )?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Apply deterministic attractive updates over explicit optimization epochs.
+///
+/// Each positive CSR membership is treated as one directed edge.  Its next
+/// sample is initially due at `1 / weight` and advances by the same interval
+/// after each update, so an edge with weight `w` is sampled at approximately
+/// `w` updates per epoch.  The scheduler traverses CSR rows and columns in
+/// their stored order, uses one shared learning rate for each epoch, and
+/// linearly decays that rate *after* an epoch has been processed:
+///
+/// ```text
+/// alpha <- initial_learning_rate * (1 - epoch / n_epochs)
+/// ```
+///
+/// This ordering follows the public UMAP epoch schedule: with an edge weight
+/// of one, `n_epochs = 1` performs no update (its first due epoch is one),
+/// while `n_epochs = 2` performs one update at the initial learning rate.
+/// `n_epochs = 0` is a validated no-op.  All arithmetic affecting embedding
+/// coordinates uses the [`attractive_update`] `f32` kernel; due times and the
+/// decay fraction use `f64` so schedule precision is independent of the
+/// embedding component count.
+///
+/// This function intentionally implements only attractive updates.  It does
+/// not draw negative samples and does not apply repulsive forces.  The graph
+/// and embedding are validated completely before the first update, but an
+/// arithmetic failure discovered while applying a later edge may follow
+/// earlier successful updates, just like [`attractive_update_csr`].
+pub fn attractive_optimize_csr(
+    embedding: &mut [f32],
+    n_components: usize,
+    graph: &CsrGraph,
+    a: f32,
+    b: f32,
+    learning_rate: f32,
+    n_epochs: usize,
+) -> Result<(), LayoutError> {
+    validate_csr_inputs(embedding, n_components, graph, a, b, learning_rate)?;
+
+    // UMAP's edge sampling interval is n_epochs / (n_epochs * weight), which
+    // simplifies to 1 / weight for every positive weight.  Keeping due times
+    // in f64 also preserves fractional schedules when weights are f32 values.
+    let mut epoch_of_next_sample = graph
+        .data
+        .iter()
+        .map(|&weight| {
+            if weight == 0.0 {
+                f64::INFINITY
+            } else {
+                1.0 / f64::from(weight)
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut alpha = learning_rate;
+    for epoch in 0..n_epochs {
+        let epoch_as_f64 = epoch as f64;
+        for row in 0..graph.n_rows {
+            let start = graph.indptr[row];
+            let end = graph.indptr[row + 1];
+            for (offset, (&index, next_sample)) in graph.indices[start..end]
+                .iter()
+                .zip(epoch_of_next_sample[start..end].iter_mut())
+                .enumerate()
+            {
+                let position = start + offset;
+                if *next_sample <= epoch_as_f64 {
+                    attractive_update(embedding, n_components, row, index, a, b, alpha)?;
+                    let weight = f64::from(graph.data[position]);
+                    *next_sample += 1.0 / weight;
+                }
+            }
+        }
+
+        // The current alpha is used for this whole epoch.  Updating after the
+        // body intentionally makes the first due epoch use the initial rate.
+        alpha = (f64::from(learning_rate) * (1.0 - (epoch_as_f64 / n_epochs as f64))) as f32;
+    }
+
+    Ok(())
+}
+
+fn validate_csr_inputs(
+    embedding: &[f32],
+    n_components: usize,
+    graph: &CsrGraph,
+    a: f32,
+    b: f32,
+    learning_rate: f32,
+) -> Result<(), LayoutError> {
     if n_components == 0 {
         return Err(LayoutError::InvalidShape {
             n_components,
@@ -518,22 +629,6 @@ pub fn attractive_update_csr(
         }
     }
 
-    for row in 0..graph.n_rows {
-        for position in graph.indptr[row]..graph.indptr[row + 1] {
-            if graph.data[position] > 0.0 {
-                attractive_update(
-                    embedding,
-                    n_components,
-                    row,
-                    graph.indices[position],
-                    a,
-                    b,
-                    learning_rate,
-                )?;
-            }
-        }
-    }
-
     Ok(())
 }
 
@@ -577,7 +672,7 @@ fn validate_endpoint(endpoint: &[f32], name: &'static str) -> Result<(), LayoutE
 
 #[cfg(test)]
 mod tests {
-    use super::{LayoutError, attractive_update, attractive_update_pair};
+    use super::{LayoutError, attractive_optimize_csr, attractive_update, attractive_update_pair};
     use crate::fuzzy_graph::CsrGraph;
 
     #[test]
@@ -691,5 +786,68 @@ mod tests {
         // reduce the fixed direct-sweep learning rate.
         assert!((embedding[0] - 0.08).abs() < 1.0e-6);
         assert!((embedding[1] - 1.92).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn attractive_optimizer_delays_first_sample_and_decays_after_epoch() {
+        let graph = CsrGraph {
+            n_rows: 2,
+            n_cols: 2,
+            indptr: vec![0, 1, 1],
+            indices: vec![1],
+            data: vec![1.0],
+        };
+
+        let mut one_epoch = [0.0_f32, 2.0];
+        attractive_optimize_csr(&mut one_epoch, 1, &graph, 1.0, 1.0, 0.1, 1).unwrap();
+        assert_eq!(one_epoch, [0.0, 2.0]);
+
+        let mut scheduled = [0.0_f32, 2.0];
+        attractive_optimize_csr(&mut scheduled, 1, &graph, 1.0, 1.0, 0.1, 3).unwrap();
+
+        let mut expected = [0.0_f32, 2.0];
+        attractive_update(&mut expected, 1, 0, 1, 1.0, 1.0, 0.1).unwrap();
+        let decayed_rate = (0.1_f64 * (1.0 - 1.0_f64 / 3.0)) as f32;
+        attractive_update(&mut expected, 1, 0, 1, 1.0, 1.0, decayed_rate).unwrap();
+        assert_eq!(scheduled, expected);
+    }
+
+    #[test]
+    fn attractive_optimizer_uses_membership_as_sample_frequency() {
+        let graph = CsrGraph {
+            n_rows: 3,
+            n_cols: 3,
+            indptr: vec![0, 2, 2, 2],
+            indices: vec![1, 2],
+            data: vec![1.0, 0.5],
+        };
+        let mut embedding = [0.0_f32, 2.0, 4.0];
+
+        // The unit edge is due at epoch one.  The half-weight edge is due at
+        // epoch two, so it must remain untouched in a two-epoch run.
+        attractive_optimize_csr(&mut embedding, 1, &graph, 1.0, 1.0, 0.1, 2).unwrap();
+
+        assert!((embedding[0] - 0.08).abs() < 1.0e-6);
+        assert!((embedding[1] - 1.92).abs() < 1.0e-6);
+        assert_eq!(embedding[2], 4.0);
+    }
+
+    #[test]
+    fn attractive_optimizer_validates_before_modifying_embedding() {
+        let graph = CsrGraph {
+            n_rows: 2,
+            n_cols: 2,
+            indptr: vec![0, 2, 2],
+            indices: vec![1, 1],
+            data: vec![1.0, 1.0],
+        };
+        let mut embedding = [0.0_f32, 2.0];
+        let original = embedding;
+
+        let error =
+            attractive_optimize_csr(&mut embedding, 1, &graph, 1.0, 1.0, 0.1, 2).unwrap_err();
+
+        assert!(matches!(error, LayoutError::InvalidGraphOrder { .. }));
+        assert_eq!(embedding, original);
     }
 }

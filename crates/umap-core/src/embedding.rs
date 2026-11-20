@@ -83,7 +83,43 @@ pub struct DenseEmbeddingConfig<T = f32, R = f32> {
     pub init: DenseEmbeddingInit,
 }
 
-/// Output of [`fit_dense_embedding`].
+impl<T: Copy, R: Copy> DenseEmbeddingConfig<T, R> {
+    fn layout_config(&self) -> EmbeddingLayoutConfig<T, R> {
+        EmbeddingLayoutConfig {
+            n_components: self.n_components,
+            a: self.a,
+            b: self.b,
+            learning_rate: self.learning_rate,
+            n_epochs: self.n_epochs,
+            repulsion_strength: self.repulsion_strength,
+            negative_sample_rate: self.negative_sample_rate,
+        }
+    }
+}
+
+/// Layout settings for a fit with an existing fuzzy graph.
+///
+/// `T` controls the precision of the curve parameters and learning rate. `R`
+/// controls repulsion strength, as in [`DenseEmbeddingConfig`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct EmbeddingLayoutConfig<T = f32, R = f32> {
+    /// Number of output coordinates per row.
+    pub n_components: usize,
+    /// Positive curve coefficient used by the layout objective.
+    pub a: T,
+    /// Positive curve exponent used by the layout objective.
+    pub b: T,
+    /// Initial optimizer learning rate.
+    pub learning_rate: T,
+    /// Number of optimizer epochs.
+    pub n_epochs: usize,
+    /// Non-negative scale for negative-example updates.
+    pub repulsion_strength: R,
+    /// Number of negative samples per positive sample.
+    pub negative_sample_rate: f64,
+}
+
+/// Output of a dense embedding fit.
 ///
 /// `coordinates` is a contiguous row-major `shape.0` by `shape.1` matrix.
 /// The fitted graph and coordinates are owned independently of the caller's
@@ -98,7 +134,7 @@ pub struct DenseEmbedding {
     pub shape: (usize, usize),
 }
 
-/// Failures returned by [`fit_dense_embedding`].
+/// Failures returned by the dense embedding fit functions.
 #[derive(Clone, Debug, PartialEq)]
 pub enum DenseEmbeddingFitError {
     /// Dense graph construction rejected the input matrix or neighbor count.
@@ -174,9 +210,13 @@ pub fn fit_dense_embedding<F>(
 where
     F: FnMut(usize) -> usize,
 {
-    fit_dense_embedding_using(data, n_rows, n_features, config, |_, _| {
-        Ok(negative_sampler)
-    })
+    let (graph, coordinates, _) = prepare_dense_embedding(data, n_rows, n_features, config)?;
+    finish_embedding(
+        graph,
+        coordinates,
+        &config.layout_config(),
+        negative_sampler,
+    )
 }
 
 /// Fit a dense embedding using the serial seeded negative sampler.
@@ -193,19 +233,44 @@ pub fn fit_dense_embedding_seeded(
     config: &DenseEmbeddingConfig<impl Copy + Into<f64>, impl Copy + Into<f64>>,
     explicit_seed: u32,
 ) -> Result<DenseEmbedding, DenseEmbeddingFitError> {
-    fit_dense_embedding_using(
-        data,
-        n_rows,
-        n_features,
-        config,
-        |caller_rng, coordinates| {
-            let mut caller_rng = caller_rng.unwrap_or_else(|| Mt19937::new(explicit_seed));
-            let mut sampler = SerialNegativeSampler::new(
-                &mut caller_rng,
-                coordinates,
-                n_rows,
-                config.n_components,
-            )
+    let (graph, coordinates, caller_rng) =
+        prepare_dense_embedding(data, n_rows, n_features, config)?;
+    let mut caller_rng = caller_rng.unwrap_or_else(|| Mt19937::new(explicit_seed));
+    finish_seeded_embedding(graph, coordinates, &config.layout_config(), &mut caller_rng)
+}
+
+/// Fit an existing fuzzy graph from raw, row-major explicit coordinates.
+///
+/// Supply `graph.n_rows * config.n_components` coordinates and the caller RNG
+/// positioned immediately after any draws used to produce them. This function
+/// copies and normalizes the layout, seeds the serial negative sampler from
+/// the current stream position (including at zero epochs), and optimizes the
+/// layout. The returned embedding owns the supplied graph and final coordinates.
+/// On success the caller RNG advances past sampler seeding. On error it keeps
+/// its original state.
+pub fn fit_graph_embedding_with_rng(
+    graph: CsrGraph,
+    initial_coordinates: &[f32],
+    config: &EmbeddingLayoutConfig<impl Copy + Into<f64>, impl Copy + Into<f64>>,
+    caller_rng: &mut Mt19937,
+) -> Result<DenseEmbedding, DenseEmbeddingFitError> {
+    let mut coordinates = initial_coordinates.to_vec();
+    normalize_columns(&mut coordinates, graph.n_rows, config.n_components)?;
+
+    let mut next_rng = caller_rng.clone();
+    let fit = finish_seeded_embedding(graph, coordinates, config, &mut next_rng)?;
+    *caller_rng = next_rng;
+    Ok(fit)
+}
+
+fn finish_seeded_embedding(
+    graph: CsrGraph,
+    coordinates: Vec<f32>,
+    config: &EmbeddingLayoutConfig<impl Copy + Into<f64>, impl Copy + Into<f64>>,
+    caller_rng: &mut Mt19937,
+) -> Result<DenseEmbedding, DenseEmbeddingFitError> {
+    let mut sampler =
+        SerialNegativeSampler::new(caller_rng, &coordinates, graph.n_rows, config.n_components)
             .map_err(|error| match error {
                 NegativeSamplerError::InvalidShape {
                     n_rows,
@@ -223,28 +288,22 @@ pub fn fit_dense_embedding_seeded(
                     }
                 }
             })?;
-            Ok(move |row| {
-                sampler
-                    .sample(row)
-                    .expect("optimizer source row is in bounds")
-            })
-        },
-    )
+    finish_embedding(graph, coordinates, config, |row| {
+        sampler
+            .sample(row)
+            .expect("optimizer source row is in bounds")
+    })
 }
 
-fn fit_dense_embedding_using<F>(
+fn prepare_dense_embedding(
     data: &[f32],
     n_rows: usize,
     n_features: usize,
     config: &DenseEmbeddingConfig<impl Copy + Into<f64>, impl Copy + Into<f64>>,
-    make_sampler: impl FnOnce(Option<Mt19937>, &[f32]) -> Result<F, InitializationError>,
-) -> Result<DenseEmbedding, DenseEmbeddingFitError>
-where
-    F: FnMut(usize) -> usize,
-{
+) -> Result<(CsrGraph, Vec<f32>, Option<Mt19937>), DenseEmbeddingFitError> {
     let graph = fit_dense_graph(data, n_rows, n_features, config.n_neighbors, config.metric)?;
 
-    let (mut coordinates, caller_rng) = match &config.init {
+    let (coordinates, caller_rng) = match &config.init {
         DenseEmbeddingInit::Random { seed } => {
             let mut caller_rng = Mt19937::new(*seed);
             let coordinates =
@@ -258,7 +317,15 @@ where
         }
     };
 
-    let negative_sampler = make_sampler(caller_rng, &coordinates)?;
+    Ok((graph, coordinates, caller_rng))
+}
+
+fn finish_embedding(
+    graph: CsrGraph,
+    mut coordinates: Vec<f32>,
+    config: &EmbeddingLayoutConfig<impl Copy + Into<f64>, impl Copy + Into<f64>>,
+    negative_sampler: impl FnMut(usize) -> usize,
+) -> Result<DenseEmbedding, DenseEmbeddingFitError> {
     optimize_csr(
         &mut coordinates,
         config.n_components,
@@ -273,8 +340,8 @@ where
     )?;
 
     Ok(DenseEmbedding {
+        shape: (graph.n_rows, config.n_components),
         graph,
         coordinates,
-        shape: (n_rows, config.n_components),
     })
 }

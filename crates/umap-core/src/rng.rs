@@ -30,6 +30,36 @@ pub struct Mt19937 {
     index: usize,
 }
 
+/// An invalid MT19937 state snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mt19937StateError {
+    /// The word array does not contain exactly 624 values.
+    InvalidLength { actual: usize },
+    /// The cursor is outside the inclusive range `0..=624`.
+    InvalidCursor { cursor: usize },
+}
+
+impl fmt::Display for Mt19937StateError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidLength { actual } => {
+                write!(
+                    formatter,
+                    "MT19937 state has {actual} words, expected {STATE_WORDS}"
+                )
+            }
+            Self::InvalidCursor { cursor } => {
+                write!(
+                    formatter,
+                    "MT19937 cursor {cursor} is outside 0..={STATE_WORDS}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for Mt19937StateError {}
+
 impl Mt19937 {
     /// Construct a generator with the reference MT19937 integer seed.
     #[must_use]
@@ -48,6 +78,35 @@ impl Mt19937 {
             // A freshly initialized state is twisted before its first draw.
             index: STATE_WORDS,
         }
+    }
+
+    /// Restore the word array and cursor from a stream snapshot.
+    ///
+    /// These are the `keys` and `pos` fields in NumPy's legacy MT19937
+    /// `RandomState.get_state()` tuple. The array must contain 624 words, and
+    /// the cursor must be in `0..=624`. Cursor zero reads the first word in the
+    /// supplied block. Cursor 624 twists the block before the next draw.
+    /// The tuple's Gaussian cache belongs to `RandomState` and is independent
+    /// of the integer and uniform draws supported here.
+    pub fn from_state(words: &[u32], cursor: usize) -> Result<Self, Mt19937StateError> {
+        let state = words
+            .try_into()
+            .map_err(|_| Mt19937StateError::InvalidLength {
+                actual: words.len(),
+            })?;
+        if cursor > STATE_WORDS {
+            return Err(Mt19937StateError::InvalidCursor { cursor });
+        }
+        Ok(Self {
+            state,
+            index: cursor,
+        })
+    }
+
+    /// Copy the current word array and cursor for a later [`Self::from_state`] call.
+    #[must_use]
+    pub fn state(&self) -> ([u32; STATE_WORDS], usize) {
+        (self.state, self.index)
     }
 
     /// Return the next tempered 32-bit MT19937 word.

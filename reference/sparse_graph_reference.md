@@ -95,6 +95,35 @@ Each precomputed case emitted the `UserWarning` about `inverse_transform`
 being unavailable. Successes and errors are observations for these inputs under
 the pinned versions.
 
+## Python estimator coverage
+
+`UMAP(transform_mode="graph").fit` and `fit_transform` use the exhaustive Rust
+CSR feature path for unsupervised Euclidean, Manhattan, and Chebyshev fits.
+The Python tests match the fixture's CSR shape, pointer and column order, and
+every float32 weight bit for the 15 supported feature cases and the canonical
+Euclidean holdout.
+
+CSR, CSC, and COO matrices and arrays are validated before conversion and
+canonicalized without changing the original values, coordinates, pointers, or
+storage order. Duplicate coordinates are summed and columns are sorted. For
+compressed inputs, values are cast to float32 before summation. COO conversion
+sums in the original dtype before casting to float32. A public API probe using
+float64 duplicate values `[1e8, 1, -1e8]` at the same coordinate produced the
+same graph as a single zero there for CSR and CSC, and as a single one for COO.
+Malformed storage and nonfinite normalized values raise `ValueError`.
+
+Empty rows are allowed. A singleton `fit` has no `graph_`, and its
+`fit_transform` raises `AttributeError`. The Rust search ranks ties by
+ascending row index and requires each row's selected neighbors to include
+itself. An all-zero 4-by-2 matrix with `n_neighbors=2` therefore raises
+`ValueError`. Public UMAP 0.6.0 returned a graph with 10 unit-weight entries
+on this input. Three identical rows among four with `n_neighbors=2` also
+raise `ValueError` when the third row loses its self neighbor.
+
+Sparse precomputed distances, cosine, supervised sparse fits, sparse
+embeddings, and transforms with sparse training data or queries remain
+outside this implementation.
+
 ## Reproducibility
 
 Run from the repository root with the existing locked reference environment.

@@ -8,6 +8,7 @@ use umap_core::embedding::{
 use umap_core::fit::{fit_dense_categorical_graph, fit_dense_graph, fit_precomputed_graph};
 use umap_core::fuzzy_graph::CsrGraph;
 use umap_core::neighbors::DistanceMetric;
+use umap_core::sparse::fit_sparse_graph;
 use umap_core::transform::{CooGraph, transform_dense_graph};
 
 type CsrComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
@@ -23,7 +24,7 @@ fn csr_components(graph: CsrGraph) -> CsrComponents {
     )
 }
 
-/// Parse the metric names supported by the dense graph compatibility path.
+/// Parse the metric names supported by the feature graph compatibility paths.
 ///
 /// The aliases match the names commonly used for these three distance
 /// functions by the Python-facing UMAP API: L1/city-block, L2, and the
@@ -51,6 +52,24 @@ fn _fit_dense_graph(
 ) -> PyResult<CsrComponents> {
     let metric = parse_metric(metric)?;
     fit_dense_graph(&data, n_rows, n_features, k, metric)
+        .map(csr_components)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+/// Fit a fuzzy graph from canonical CSR features and return its CSR data.
+#[pyfunction]
+fn _fit_sparse_graph(
+    py: Python<'_>,
+    indptr: Vec<usize>,
+    indices: Vec<usize>,
+    data: Vec<f32>,
+    shape: (usize, usize),
+    k: usize,
+    metric: &str,
+) -> PyResult<CsrComponents> {
+    let metric = parse_metric(metric)?;
+    let (n_rows, n_features) = shape;
+    py.detach(|| fit_sparse_graph(&indptr, &indices, &data, n_rows, n_features, k, metric))
         .map(csr_components)
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
@@ -162,6 +181,7 @@ fn _transform_dense_graph(
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", umap_core::VERSION)?;
     module.add_function(wrap_pyfunction!(_fit_dense_graph, module)?)?;
+    module.add_function(wrap_pyfunction!(_fit_sparse_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_embedding, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_categorical_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_precomputed_graph, module)?)?;

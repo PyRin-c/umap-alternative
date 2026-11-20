@@ -1,4 +1,4 @@
-"""Public estimator for dense graph and serial seeded embedding fits."""
+"""Public estimator for feature graphs and serial seeded dense embeddings."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import numbers
 import warnings
 
 import numpy as np
-from scipy.sparse import coo_matrix, csr_matrix, issparse
+from scipy.sparse import coo_matrix, csc_matrix, csr_matrix, issparse
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_array
 
@@ -49,21 +49,72 @@ _COMPATIBILITY_WARNING = (
 )
 
 
+def _check_sparse_indices(indices, n_entries, axis_size):
+    if indices.shape != (n_entries,) or indices.dtype.kind not in "iu":
+        raise ValueError("sparse indices must be one integer per stored value")
+    if np.any((indices < 0) | (indices >= axis_size)):
+        raise ValueError("sparse indices are out of bounds")
+
+
+def _canonical_sparse_features(X):
+    if X.format not in ("csr", "csc", "coo"):
+        raise TypeError("sparse graph fitting requires SciPy CSR, CSC, or COO input")
+    if X.ndim != 2:
+        raise ValueError("sparse features must be two-dimensional")
+    data = np.asarray(X.data)
+    if data.ndim != 1:
+        raise ValueError("sparse data must be one-dimensional")
+    n_entries = data.size
+    n_rows, n_features = X.shape
+
+    # Check raw indices before any SciPy conversion. Rebuilding the matrix
+    # also avoids trusting cached sorted/canonical flags after direct edits.
+    if X.format == "coo":
+        rows, columns = np.asarray(X.row), np.asarray(X.col)
+        _check_sparse_indices(rows, n_entries, n_rows)
+        _check_sparse_indices(columns, n_entries, n_features)
+        csr = coo_matrix((data, (rows, columns)), shape=X.shape, copy=True).tocsr()
+    else:
+        compressed_rows = X.format == "csr"
+        major_size, minor_size = (n_rows, n_features) if compressed_rows else (n_features, n_rows)
+        offsets, indices = np.asarray(X.indptr), np.asarray(X.indices)
+        if (
+            offsets.shape != (major_size + 1,)
+            or offsets.dtype.kind not in "iu"
+            or offsets[0] != 0
+            or offsets[-1] != n_entries
+            or np.any(offsets[1:] < offsets[:-1])
+        ):
+            raise ValueError("sparse indptr must be nondecreasing from zero to the stored value count")
+        _check_sparse_indices(indices, n_entries, minor_size)
+        # Compressed inputs are cast before coalescing. COO conversion
+        # coalesces in the input dtype, as observed through the public API.
+        data = check_array(data, dtype=np.float32, ensure_2d=False, ensure_min_samples=0)
+        constructor = csr_matrix if compressed_rows else csc_matrix
+        csr = constructor((data, indices, offsets), shape=X.shape, copy=True).tocsr()
+    csr.sum_duplicates()
+    return check_array(csr, dtype=np.float32, accept_sparse="csr")
+
+
 class UMAP(BaseEstimator, TransformerMixin):
     """Fit a fuzzy graph or a serial seeded dense UMAP embedding.
 
-    Dense ``transform_mode="graph"`` fitting is implemented and returns the
-    fuzzy simplicial-set graph as a SciPy CSR matrix.
-    ``transform`` on held-out dense features returns a float32 SciPy COO
-    matrix with query rows and fitted training columns. Transforming the
-    fitted data returns ``graph_`` itself.
+    With ``transform_mode="graph"``, ``fit_transform`` returns the fuzzy
+    simplicial-set graph as a float32 SciPy CSR matrix. Unsupervised feature
+    fits accept dense input and SciPy CSR, CSC, or COO input for Euclidean,
+    Manhattan, and Chebyshev. Sparse storage is normalized on a copy.
+    Zero-distance ties that exclude a row's self neighbor raise ``ValueError``.
+    A singleton graph fit has no ``graph_``.
+    Graph ``transform`` requires dense features for both training and queries.
+    It returns a float32 SciPy COO matrix with query rows and training columns
+    for held-out data, and returns ``graph_`` itself for the fitted data.
 
     For categorical supervision with dense features, supply one real numeric
     label per row in ``y``. A label of ``-1`` indicates an unlabeled row.
     ``target_weight`` controls the reduction of edges between known classes
     and must lie in the interval [0, 1].
 
-    With ``metric="precomputed"``, provide a square distance matrix. After
+    With ``metric="precomputed"``, provide a dense square distance matrix. After
     conversion to float32, its entries must be finite and non-negative and its
     diagonal must be zero. The rows are ranked independently, so asymmetric
     distances are accepted. Each row's selected neighbors must include its
@@ -128,7 +179,8 @@ class UMAP(BaseEstimator, TransformerMixin):
         """Fit the fuzzy graph and, in embedding mode, the training layout."""
 
         self._validate_mode()
-        self._validate_metric()
+        sparse = issparse(X)
+        self._validate_metric(sparse=sparse)
         if self.set_op_mix_ratio != 1.0:
             raise NotImplementedError(
                 "set_op_mix_ratio values other than 1.0 are not implemented"
@@ -143,10 +195,15 @@ class UMAP(BaseEstimator, TransformerMixin):
         if n_neighbors <= 1:
             raise ValueError("n_neighbors must be greater than 1")
 
-        if issparse(X):
-            raise TypeError("sparse input is not supported; pass a dense array")
         precomputed = self.metric == "precomputed"
         embedding_mode = self.transform_mode == "embedding"
+        if sparse:
+            if precomputed:
+                raise TypeError("sparse input is not supported for metric='precomputed'")
+            if embedding_mode:
+                raise TypeError("sparse input is not supported in embedding mode")
+            if y is not None:
+                raise TypeError("sparse input is not supported for supervised fitting")
         if embedding_mode and precomputed:
             raise NotImplementedError("metric='precomputed' requires transform_mode='graph'")
         if embedding_mode and y is not None:
@@ -155,19 +212,19 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise NotImplementedError(
                 "supervised fitting with metric='precomputed' is not implemented"
             )
-        # check_array is public sklearn validation.  Its default finite-value
-        # check supplies the captured ``Input contains NaN.`` error while the
-        # dtype argument gives float64 inputs the native f32 behavior.
-        X_checked = check_array(
-            X,
-            dtype=np.float32,
-            order="C",
-            copy=not precomputed,
-            ensure_2d=True,
-            allow_nd=False,
-            ensure_min_samples=1,
-            ensure_min_features=1,
-        )
+        if sparse:
+            X_checked = _canonical_sparse_features(X)
+        else:
+            X_checked = check_array(
+                X,
+                dtype=np.float32,
+                order="C",
+                copy=not precomputed,
+                ensure_2d=True,
+                allow_nd=False,
+                ensure_min_samples=1,
+                ensure_min_features=1,
+            )
         n_rows, n_features = X_checked.shape
         metric = self.metric if precomputed else _METRIC_ALIASES[self.metric.lower()]
         transform_fit = None if precomputed else (X_checked, metric)
@@ -192,11 +249,22 @@ class UMAP(BaseEstimator, TransformerMixin):
             warnings.warn(_TRUNCATION_WARNING, UserWarning, stacklevel=2)
             n_neighbors = n_rows - 1
 
-        values = X_checked.ravel(order="C").tolist()
         embedding = None
         if precomputed:
-            components = _native._fit_precomputed_graph(values, n_rows, n_neighbors)
+            components = _native._fit_precomputed_graph(
+                X_checked.ravel(order="C").tolist(), n_rows, n_neighbors
+            )
+        elif sparse:
+            components = _native._fit_sparse_graph(
+                X_checked.indptr.tolist(),
+                X_checked.indices.tolist(),
+                X_checked.data.tolist(),
+                X_checked.shape,
+                n_neighbors,
+                metric,
+            )
         else:
+            values = X_checked.ravel(order="C").tolist()
             dense_args = (values, n_rows, n_features, n_neighbors, metric)
             if embedding_mode:
                 components, embedding_shape, coordinates = _native._fit_dense_embedding(
@@ -263,6 +331,8 @@ class UMAP(BaseEstimator, TransformerMixin):
         n_training_rows, n_features = training.shape
         if n_training_rows == 1:
             raise ValueError("Transform unavailable when model was fit with only a single data sample.")
+        if issparse(training):
+            raise NotImplementedError("transform after fitting sparse features is not implemented")
         if issparse(X):
             raise TypeError("sparse input is not supported; pass a dense array")
         queries = check_array(X, dtype=np.float32, order="C")
@@ -435,7 +505,9 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise NotImplementedError("explicit init with repeated rows is not implemented")
         return initial.ravel().tolist()
 
-    def _validate_metric(self):
+    def _validate_metric(self, *, sparse):
+        if sparse and isinstance(self.metric, str) and self.metric.lower() == "cosine":
+            raise NotImplementedError("metric='cosine' is not implemented for sparse graph fitting")
         if callable(self.metric):
             raise NotImplementedError(
                 "callable metrics are not implemented by the dense graph path"

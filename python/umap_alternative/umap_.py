@@ -4,10 +4,12 @@ from operator import index
 
 import numpy as np
 from scipy.sparse import coo_matrix
+from sklearn.preprocessing import normalize
 
 from . import _native
 from ._curve import find_ab_params
 from ._umap import UMAP
+from .sparse import general_sset_intersection, general_sset_union
 from .utils import fast_knn_indices, submatrix
 
 
@@ -112,7 +114,45 @@ def make_epochs_per_sample(weights, n_epochs):
     return result
 
 
+def general_simplicial_set_union(simplicial_set1, simplicial_set2):
+    """Return the directed fuzzy union on the support of the summed graphs."""
+    result = (simplicial_set1 + simplicial_set2).tocoo()
+    left, right = simplicial_set1.tocsr(), simplicial_set2.tocsr()
+    general_sset_union(
+        left.indptr, left.indices, left.data, right.indptr, right.indices, right.data,
+        result.row, result.col, result.data,
+    )
+    return result
+
+
+def general_simplicial_set_intersection(simplicial_set1, simplicial_set2, weight=0.5, right_complement=False):
+    """Return the directed weighted intersection, optionally with the right complement.
+
+    Taking the complement uses the left graph's COO storage and updates the
+    left graph when the conversion shares its data buffer.
+    """
+    result = simplicial_set1.tocoo() if right_complement else (simplicial_set1 + simplicial_set2).tocoo()
+    left, right = simplicial_set1.tocsr(), simplicial_set2.tocsr()
+    general_sset_intersection(
+        left.indptr, left.indices, left.data, right.indptr, right.indices, right.data,
+        result.row, result.col, result.data, right_complement, weight,
+    )
+    return result
+
+
+def reset_local_connectivity(simplicial_set, reset_local_metric=False):
+    """Normalize row maxima and take a fuzzy union with the transpose."""
+    result = normalize(simplicial_set, norm="max")
+    if reset_local_metric:
+        result.data[:] = _native._reset_membership_scales(result.indptr.tolist(), result.data.tolist())
+    transpose = result.T
+    result = result + transpose - result.multiply(transpose)
+    result.eliminate_zeros()
+    return result
+
+
 __all__ = [
     "UMAP", "compute_membership_strengths", "find_ab_params", "fuzzy_simplicial_set",
-    "make_epochs_per_sample", "nearest_neighbors", "smooth_knn_dist",
+    "general_simplicial_set_intersection", "general_simplicial_set_union", "make_epochs_per_sample",
+    "nearest_neighbors", "reset_local_connectivity", "smooth_knn_dist",
 ]

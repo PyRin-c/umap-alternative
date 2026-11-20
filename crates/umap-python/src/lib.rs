@@ -21,8 +21,9 @@ use umap_core::fit::{
     fit_sparse_precomputed_ranked_graph, fit_supplied_neighbors_graph,
 };
 use umap_core::fuzzy_graph::{
-    CsrGraph, FuzzySetOperation, GraphOptions, KnnDistances, SmoothKnnConfig, combine_fuzzy_graphs,
-    compute_knn_memberships, smooth_knn_distances,
+    CsrGraph, FuzzySetOperation, GraphOptions, KnnDistances, MembershipOperation, MembershipRows,
+    SmoothKnnConfig, combine_fuzzy_graphs, combine_memberships, compute_knn_memberships,
+    reset_membership_scales, smooth_knn_distances,
 };
 use umap_core::inverse::{
     DenseInverseError, DenseInverseInput, DenseInverseLayout, InverseTriangulation,
@@ -59,6 +60,7 @@ use umap_core::validation::{
 
 type CsrComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
 type FloatBuffer = (Vec<f64>, bool);
+type MembershipBuffers = (Vec<usize>, Vec<usize>, Vec<f64>);
 type NeighborMembershipComponents = (Vec<i32>, Vec<i32>, Vec<f32>, Option<Vec<f32>>);
 type RowGroups = (Vec<usize>, Vec<usize>, Vec<usize>);
 type CooComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
@@ -338,6 +340,58 @@ fn _combine_fuzzy_graphs(
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     let left_weights = (operation == FuzzySetOperation::Difference).then_some(left.data);
     Ok((csr_components(graph), left_weights))
+}
+
+#[pyfunction]
+fn _combine_memberships(
+    py: Python<'_>,
+    left: MembershipBuffers,
+    right: MembershipBuffers,
+    coordinates: (Vec<usize>, Vec<usize>),
+    output: (Vec<f64>, String),
+    aliases: [bool; 2],
+    intersection: Option<(bool, f64)>,
+) -> PyResult<Vec<f64>> {
+    let (rows, columns) = coordinates;
+    let (mut values, storage) = output;
+    let operation = match intersection {
+        Some((right_complement, weight)) => MembershipOperation::Intersection {
+            weight,
+            right_complement,
+        },
+        None => MembershipOperation::Union,
+    };
+    let store: fn(f64) -> f64 = match storage.as_str() {
+        "f32" => |value| f64::from(value as f32),
+        "int" => f64::trunc,
+        "bool" => |value| if value == 0.0 { 0.0 } else { 1.0 },
+        _ => |value| value,
+    };
+    py.detach(|| -> Result<_, &'static str> {
+        let left = MembershipRows::new(&left.0, &left.1, &left.2)?;
+        let right = MembershipRows::new(&right.0, &right.1, &right.2)?;
+        combine_memberships(
+            [&left, &right],
+            (&rows, &columns),
+            &mut values,
+            aliases,
+            operation,
+            store,
+        )?;
+        Ok(values)
+    })
+    .map_err(PyValueError::new_err)
+}
+
+#[pyfunction]
+fn _reset_membership_scales(
+    py: Python<'_>,
+    indptr: Vec<usize>,
+    mut values: Vec<f64>,
+) -> PyResult<Vec<f64>> {
+    py.detach(|| reset_membership_scales(&indptr, &mut values))
+        .map_err(PyValueError::new_err)?;
+    Ok(values)
 }
 
 #[pyfunction]
@@ -1590,6 +1644,8 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_compute_knn_memberships, module)?)?;
     module.add_function(wrap_pyfunction!(_unique_csr_rows, module)?)?;
     module.add_function(wrap_pyfunction!(_combine_fuzzy_graphs, module)?)?;
+    module.add_function(wrap_pyfunction!(_combine_memberships, module)?)?;
+    module.add_function(wrap_pyfunction!(_reset_membership_scales, module)?)?;
     module.add_function(wrap_pyfunction!(_optimize_aligned_layout, module)?)?;
     module.add_function(wrap_pyfunction!(_prepare_parametric_edges, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_graph, module)?)?;

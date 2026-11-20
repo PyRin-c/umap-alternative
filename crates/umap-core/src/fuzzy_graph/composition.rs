@@ -14,6 +14,176 @@ pub enum FuzzySetOperation {
     Difference,
 }
 
+/// Directed fuzzy operations evaluated at an existing set of coordinates.
+#[derive(Clone, Copy, Debug)]
+pub enum MembershipOperation {
+    Union,
+    Intersection { weight: f64, right_complement: bool },
+}
+
+/// Borrowed CSR storage for membership calculations, including explicit zeros.
+pub struct MembershipRows<'a> {
+    indptr: &'a [usize],
+    columns: &'a [usize],
+    values: &'a [f64],
+    sorted: bool,
+}
+
+impl<'a> MembershipRows<'a> {
+    /// Validate the offsets while retaining the original order of repeated entries.
+    pub fn new(
+        indptr: &'a [usize],
+        columns: &'a [usize],
+        values: &'a [f64],
+    ) -> Result<Self, &'static str> {
+        if columns.len() != values.len() || !valid_membership_offsets(indptr, values.len()) {
+            return Err("invalid CSR membership buffers");
+        }
+        let sorted = indptr
+            .windows(2)
+            .all(|range| columns[range[0]..range[1]].is_sorted());
+        Ok(Self {
+            indptr,
+            columns,
+            values,
+            sorted,
+        })
+    }
+
+    fn position(&self, row: usize, column: usize) -> Option<usize> {
+        let start = self.indptr[row];
+        let columns = &self.columns[start..self.indptr[row + 1]];
+        let index = if self.sorted {
+            let index = columns
+                .partition_point(|&entry| entry <= column)
+                .checked_sub(1)?;
+            (columns[index] == column).then_some(index)
+        } else {
+            columns.iter().rposition(|&entry| entry == column)
+        }?;
+        Some(start + index)
+    }
+}
+
+/// Write directed membership weights into an existing COO value buffer.
+///
+/// Missing entries use the operand's fallback. Explicit zeros are present
+/// entries. For repeated CSR columns the last stored weight is used.
+/// `aliases` indicates which operand value buffers share the full output
+/// storage. `store` rounds a new weight to the output dtype before reuse.
+pub fn combine_memberships(
+    operands: [&MembershipRows<'_>; 2],
+    coordinates: (&[usize], &[usize]),
+    values: &mut [f64],
+    aliases: [bool; 2],
+    operation: MembershipOperation,
+    store: impl Fn(f64) -> f64,
+) -> Result<(), &'static str> {
+    let [left, right] = operands;
+    let (rows, columns) = coordinates;
+    if values.len() != rows.len()
+        || values.len() != columns.len()
+        || rows
+            .iter()
+            .any(|&row| row >= left.indptr.len().min(right.indptr.len()) - 1)
+        || operands
+            .iter()
+            .zip(aliases)
+            .any(|(graph, aliases)| aliases && graph.values.len() != values.len())
+    {
+        return Err("incompatible fuzzy membership shapes");
+    }
+    let ([alias_left, alias_right], right_complement) = (
+        aliases,
+        matches!(
+            operation,
+            MembershipOperation::Intersection {
+                right_complement: true,
+                ..
+            }
+        ),
+    );
+    let right_value = |value| if right_complement { 1.0 - value } else { value };
+    let get_floor = |iter_min: Option<f64>| {
+        iter_min
+            .map(|min| (min / 2.0).max(1.0e-8))
+            .ok_or("membership graph has no stored weights")
+    };
+    let left_floor = get_floor(left.values.iter().copied().reduce(f64::min))?;
+    let mut right_floor = get_floor(
+        right
+            .values
+            .iter()
+            .copied()
+            .map(right_value)
+            .reduce(f64::min),
+    )?;
+    if matches!(operation, MembershipOperation::Intersection { .. }) {
+        right_floor = right_floor.min(1.0e-4);
+    }
+    for (index, (&row, &column)) in rows.iter().zip(columns).enumerate() {
+        let a = left.position(row, column).map_or(left_floor, |position| {
+            if alias_left {
+                values[position]
+            } else {
+                left.values[position]
+            }
+        });
+        let b = right.position(row, column).map_or(right_floor, |position| {
+            right_value(if alias_right {
+                values[position]
+            } else {
+                right.values[position]
+            })
+        });
+        let weight = match operation {
+            MembershipOperation::Union => union_weight(a, b),
+            MembershipOperation::Intersection { weight, .. } => {
+                if a > left_floor || b > right_floor {
+                    intersection_weight(a, b, weight)
+                } else {
+                    continue;
+                }
+            }
+        };
+        values[index] = store(weight);
+    }
+    Ok(())
+}
+
+fn union_weight(left: f64, right: f64) -> f64 {
+    left + right - left * right
+}
+
+fn intersection_weight(left: f64, right: f64, weight: f64) -> f64 {
+    if weight < 0.5 {
+        left * right.powf(weight / (1.0 - weight))
+    } else {
+        left.powf((1.0 - weight) / weight) * right
+    }
+}
+
+fn valid_membership_offsets(indptr: &[usize], entries: usize) -> bool {
+    indptr.first() == Some(&0) && indptr.last() == Some(&entries) && indptr.is_sorted()
+}
+
+/// Recalibrate a CSR buffer of max-normalized rows toward `log2(15)` membership mass.
+pub fn reset_membership_scales(indptr: &[usize], values: &mut [f64]) -> Result<(), &'static str> {
+    if !valid_membership_offsets(indptr, values.len()) {
+        return Err("invalid CSR membership offsets");
+    }
+    for bounds in indptr.windows(2) {
+        let row = &mut values[bounds[0]..bounds[1]];
+        if !row.is_empty() {
+            let power = membership_power(row.iter().copied(), 32);
+            for weight in row {
+                *weight = weight.powf(power);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Combine two canonical square CSR memberships with the same vertex count.
 ///
 /// The result has symmetric memberships and sorted column indices. The row
@@ -79,9 +249,7 @@ pub fn combine_fuzzy_graphs(
                         left_position.map_or(left_floor, |position| f64::from(left.data[position]));
                     let right_weight = right_entry.unwrap_or(right_floor);
                     let weight = match operation {
-                        FuzzySetOperation::Union => {
-                            left_weight + right_weight - left_weight * right_weight
-                        }
+                        FuzzySetOperation::Union => union_weight(left_weight, right_weight),
                         FuzzySetOperation::Intersection => left_weight * right_weight,
                         FuzzySetOperation::Difference => {
                             let complement = right_entry.map_or(right_floor, |value| 1.0 - value);
@@ -121,15 +289,19 @@ fn membership_floor(weights: impl Iterator<Item = f32>) -> f64 {
 }
 
 fn reset_row_memberships(row: &mut [(usize, f32)]) {
+    let power = membership_power(row.iter().map(|&(_, weight)| f64::from(weight)), 64);
+    for (_, weight) in row {
+        *weight = f64::from(*weight).powf(power) as f32;
+    }
+}
+
+fn membership_power(weights: impl Iterator<Item = f64> + Clone, iterations: usize) -> f64 {
     let target = 15.0_f64.log2();
     let mut low = 0.0;
     let mut high = f64::INFINITY;
     let mut power = 1.0;
-    for _ in 0..64 {
-        let total: f64 = row
-            .iter()
-            .map(|&(_, weight)| f64::from(weight).powf(power))
-            .sum();
+    for _ in 0..iterations {
+        let total: f64 = weights.clone().map(|weight| weight.powf(power)).sum();
         if (total - target).abs() < SMOOTH_TOLERANCE {
             break;
         }
@@ -144,7 +316,5 @@ fn reset_row_memberships(row: &mut [(usize, f32)]) {
             power * 2.0
         };
     }
-    for (_, weight) in row {
-        *weight = f64::from(*weight).powf(power) as f32;
-    }
+    power
 }

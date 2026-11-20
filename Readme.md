@@ -81,6 +81,8 @@ Euclidean、Manhattan、Chebyshev、cosine の互換レイアウトでは、CSR�
 
 `umap_alternative.umap_` で近傍距離の平滑化、メンバーシップ、近傍配列からのグラフ構築を利用できます。孤立した入力行は `umap_alternative.utils.disconnected_vertices` で確認できます。[グラフ補助関数の参照記録](reference/graph_primitives_reference.md)
 
+同じ頂点を持つ疎グラフの有向和・重み付き積・局所接続度の再正規化は、`umap_alternative.umap_` の補助関数で実行できます。`umap_alternative.sparse` の演算は COO の値バッファへ直接書き込みます。[グラフ演算の比較記録](reference/graph_operators_reference.md)
+
 `umap_alternative.validation.trustworthiness_vector` で、元データの近傍が埋め込みに保たれているかを、近傍数ごとのスコアで確認できます。近傍を計算済みの場合は `trustworthiness_vector_bulk` や `make_trustworthiness_calculator` を利用できます。[信頼度スコアの比較記録](reference/trustworthiness_reference.md)
 
 ## 独立実装と数値互換性

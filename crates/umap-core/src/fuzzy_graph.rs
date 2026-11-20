@@ -12,7 +12,10 @@ mod composition;
 mod primitives;
 pub(crate) mod supplied_neighbors;
 
-pub use composition::{FuzzySetOperation, combine_fuzzy_graphs};
+pub use composition::{
+    FuzzySetOperation, MembershipOperation, MembershipRows, combine_fuzzy_graphs,
+    combine_memberships, reset_membership_scales,
+};
 pub use primitives::{
     KnnDistances, KnnMemberships, KnnStageError, SmoothKnnConfig, compute_knn_memberships,
     smooth_knn_distances,

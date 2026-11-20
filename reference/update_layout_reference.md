@@ -42,8 +42,9 @@ two-epoch sweep. The 30-epoch attraction-only trial matches the scheduled
 weighted sweep, using float32 squared distances and float64 force, clip,
 and rate arithmetic before storing each coordinate as float32. The
 optimizer keeps the supplied CSR graph and derives edge eligibility from
-the cursors. Public checkpoints leave internal pruning unobservable for
-edges whose first due time lies outside the run.
+the cursors. The end-to-end update prunes weak memberships before it invokes
+the optimizer, as shown by the duplicate-row and epoch-threshold cases in
+the [initialization reference](update_reference.md).
 
 ## RNG handoff
 
@@ -80,8 +81,9 @@ separate fit fixtures.
 
 Call `update_layout::begin_update_layout_rng(transform_seed)` before
 initialization. Use the returned `Mt19937` for any Gaussian draws and
-pass it, the normalized row-major float32 coordinates, and the full
-combined CSR graph to `update_layout::optimize_update_layout`. Set
+pass it, the normalized row-major float32 coordinates, and the combined
+CSR graph with weak memberships set to zero to
+`update_layout::optimize_update_layout`. Set
 `EmbeddingLayoutConfig.n_epochs` to zero when the estimator's public
 epoch parameter is omitted, and use the fit-time rate and curve with
 the update-time repulsion strength and negative sample rate.

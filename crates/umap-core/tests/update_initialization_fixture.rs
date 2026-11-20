@@ -7,6 +7,9 @@ use umap_core::update::{DenseUpdateConfig, DenseUpdateError, prepare_dense_updat
 
 const FIXTURE: &str =
     include_str!("../../../reference/fixtures/umap-learn-0.6.0-update-windows-x86_64.json");
+const HOLDOUTS: &str = include_str!(
+    "../../../reference/fixtures/umap-learn-0.6.0-update-initialization-holdouts-x86_64.json"
+);
 
 fn dimensions(record: &Value) -> (usize, usize) {
     (
@@ -25,7 +28,12 @@ fn float32_matrix(record: &Value) -> Vec<f32> {
 
 #[test]
 fn dense_update_initialization_and_graph_match_public_checkpoints() {
-    let fixture: Value = serde_json::from_str(FIXTURE).unwrap();
+    assert_eq!(check_initialization_fixture(FIXTURE), 16);
+    assert_eq!(check_initialization_fixture(HOLDOUTS), 4);
+}
+
+fn check_initialization_fixture(source: &str) -> usize {
+    let fixture: Value = serde_json::from_str(source).unwrap();
     let mut matched = 0;
     for (name, case) in fixture["cases"].as_object().unwrap() {
         let parameters = |key: &str| {
@@ -106,7 +114,7 @@ fn dense_update_initialization_and_graph_match_public_checkpoints() {
             matched += 1;
         }
     }
-    assert_eq!(matched, 16, "public dense update checkpoints");
+    matched
 }
 
 #[test]

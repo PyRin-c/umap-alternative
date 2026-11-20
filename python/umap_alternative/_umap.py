@@ -85,6 +85,19 @@ def _default_epochs(n_rows):
     return 500 if n_rows <= 10_000 else 200
 
 
+def _csr_graph(components):
+    shape, indptr, indices, data = components
+    return csr_matrix(
+        (
+            np.asarray(data, dtype=np.float32),
+            np.asarray(indices, dtype=np.int64),
+            np.asarray(indptr, dtype=np.int64),
+        ),
+        shape=tuple(shape),
+        dtype=np.float32,
+    )
+
+
 def _validate_epochs(n_epochs):
     if isinstance(n_epochs, (list, tuple)):
         raise NotImplementedError("embedding supports a scalar n_epochs")
@@ -465,16 +478,7 @@ class UMAP(BaseEstimator, TransformerMixin):
                 components = _native._fit_dense_categorical_graph(
                     *dense_args, labels, self.target_weight, graph_options=graph_options
                 )
-        shape, indptr, indices, data = components
-        graph = csr_matrix(
-            (
-                np.asarray(data, dtype=np.float32),
-                np.asarray(indices, dtype=np.int64),
-                np.asarray(indptr, dtype=np.int64),
-            ),
-            shape=tuple(shape),
-            dtype=np.float32,
-        )
+        graph = _csr_graph(components)
         if supplied is not None and embedding_mode:
             # This stage has succeeded even if the subsequent layout fails.
             self.graph_ = graph
@@ -507,6 +511,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             embedding_options=embedding_options if embedding_mode else None,
             transform_error=transform_error,
             transform_cutoff=transform_cutoff,
+            supervised=y is not None,
         )
 
     def fit_transform(self, X, y=None, **fit_params):
@@ -605,6 +610,68 @@ class UMAP(BaseEstimator, TransformerMixin):
             **self._embedding_transform_options,
         )
         return np.asarray(coordinates, dtype=np.float32).reshape(queries.shape[0], n_components)
+
+    def update(self, X, ensure_all_finite=True):
+        """Append dense Euclidean features and update the fitted embedding in place."""
+        if not hasattr(self, "_graph_transform_fit"):
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '_raw_data'")
+        if self._graph_transform_fit is None:
+            raise ValueError("Update does not currently support precomputed metrics")
+        if not hasattr(self, "n_neighbors_"):
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '_supervised'")
+        if getattr(self, "_supervised_fit", False):
+            raise ValueError("Updating supervised models is not currently supported")
+        training, metric = self._graph_transform_fit
+        if (
+            metric != "euclidean"
+            or issparse(training)
+            or self._supplied_transform_error is not None
+            or self._transform_cutoff is not None
+        ):
+            raise NotImplementedError(
+                "update requires dense Euclidean features with computed neighbors and no cutoff"
+            )
+        batch = check_array(
+            X, dtype=np.float32, order="C", ensure_all_finite=ensure_all_finite
+        )
+        combined = np.concatenate((training, batch), axis=0)
+        n_rows, n_features = combined.shape
+        data = combined.ravel().tolist()
+        graph_options = self._graph_options()
+        n_neighbors = self.n_neighbors_
+        if self._embedding_transform_options is None:
+            components = _native._fit_dense_graph(
+                data, n_rows, n_features, n_neighbors, metric, graph_options=graph_options
+            )
+            self.graph_ = _csr_graph(components)
+            self._graph_transform_fit = (combined, metric)
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute 'embedding_'")
+        fitted = self.embedding_
+        n_epochs = 0 if self.n_epochs is None else _validate_epochs(self.n_epochs)
+        repulsion, negative_rate = self._sampling_options()
+        components, shape, coordinates = _native._update_dense_embedding(
+            data,
+            combined.shape,
+            training.shape[0],
+            fitted.ravel().tolist(),
+            k=n_neighbors,
+            metric=metric,
+            n_components=fitted.shape[1],
+            n_epochs=n_epochs,
+            repulsion_strength=repulsion,
+            negative_sample_rate=negative_rate,
+            transform_seed=self._embedding_transform_seed(),
+            graph_options=graph_options,
+            **self._embedding_transform_options,
+        )
+        self._store_fit(
+            n_features,
+            (combined, metric),
+            _csr_graph(components),
+            n_neighbors,
+            np.asarray(coordinates, dtype=np.float32).reshape(shape),
+            embedding_options=self._embedding_transform_options,
+        )
 
     def inverse_transform(self, X):
         """Reconstruct dense Euclidean features from points in the fitted layout."""
@@ -719,7 +786,7 @@ class UMAP(BaseEstimator, TransformerMixin):
 
     def _store_fit(
         self, n_features, transform_fit, graph, n_neighbors, embedding, *,
-        embedding_options=None, transform_error=None, transform_cutoff=None,
+        embedding_options=None, transform_error=None, transform_cutoff=None, supervised=False,
     ):
         if graph is not None:
             self.graph_ = graph
@@ -737,6 +804,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             transform_fit[0] if transform_fit is not None and not issparse(transform_fit[0]) else None
         )
         self._supplied_transform_error = transform_error
+        self._supervised_fit = supervised
         self._transform_cutoff = transform_cutoff
         self._inverse_local_connectivity = float(self.local_connectivity)
         self._embedding_transform_options = None

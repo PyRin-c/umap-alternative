@@ -40,8 +40,8 @@ def prepare_layout(
     scale = 0.001 * np.sqrt(distances.min(axis=1)).mean()
     rng = np.random.RandomState(seed)
     rng.randint(0, 2**32, size=discard_rng_words, dtype=np.uint32)
-    noise = rng.normal(0.0, scale, size=initial.shape)
-    perturbed = (initial + noise).astype(np.float32)
+    noise = rng.normal(0.0, scale, size=initial.shape).astype(np.float32)
+    perturbed = initial + noise
     return normalize(perturbed), float(scale)
 
 
@@ -91,9 +91,16 @@ def analyze_step(
     ranked = np.argsort(distances, axis=1, kind="stable")
     nearest = ranked[:, :neighbor_count]
     previous_neighbors = [row[row < old_count] for row in nearest]
-    fallback = old.mean(axis=0)
+    fallback = old.mean(axis=0, dtype=np.float64).astype(np.float32)
+
+    def ordered_mean(rows):
+        total = np.zeros(old.shape[1], dtype=np.float32)
+        for row in rows:
+            total += row
+        return total / len(rows)
+
     centroids = np.array(
-        [old[row].mean(axis=0) if row.size else fallback for row in previous_neighbors]
+        [ordered_mean(old[row]) if row.size else fallback for row in previous_neighbors]
     )
     initial = np.concatenate((old, centroids))
     predicted, jitter_scale = prepare_layout(initial, transform_seed)

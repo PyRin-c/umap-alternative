@@ -80,6 +80,10 @@ INPUTS = {
         [[0.822, 0.336, 0.461], [0.703, 0.297, 0.512]], dtype=np.float32
     ),
     "far_pair": np.array([[4.1, 2.2, 1.3], [4.7, 2.0, 1.7]], dtype=np.float32),
+    "weak_membership_pair": np.array(
+        [[1059563064, 1067763342, 1066820658], [1045674222, 1061822105, 1079934270]],
+        dtype=np.uint32,
+    ).view(np.float32),
     "duplicate": TRAINING[:1],
     "empty": np.empty((0, 3), dtype=np.float32),
     "fewer_features": np.zeros((1, 2), dtype=np.float32),
@@ -107,6 +111,12 @@ CASES = {
     "dense_one": Case(compare_combined_fit=True),
     "dense_far_pair": Case(updates=("far_pair",), compare_combined_fit=True),
     "dense_duplicate": Case(updates=("duplicate",), compare_combined_fit=True),
+    **{
+        f"weak_membership_{epochs}_epochs": Case(
+            updates=("weak_membership_pair",), parameters={"n_epochs": epochs}
+        )
+        for epochs in (10, 11, 17, 18)
+    },
     "dense_initialization_one": Case(parameters={"n_epochs": 0}, compare_combined_fit=True),
     "dense_initialization_pair": Case(
         updates=("near_pair",), parameters={"n_epochs": 0}, compare_combined_fit=True
@@ -331,13 +341,37 @@ def capture(case: Case) -> dict:
     return result
 
 
-def make_fixture() -> dict:
+def initialization_holdouts() -> dict[str, Case]:
+    points = np.random.RandomState(441).uniform(-1.0, 1.0, (129, 5)).astype(np.float32)
+    INPUTS["far_close_pair"] = np.array([[7.0] * 5, [7.125] * 5], dtype=np.float32)
+    cases = {}
+    for n_rows in (127, 128, 129):
+        name = f"training_{n_rows}"
+        INPUTS[name] = points[:n_rows]
+        cases[f"contiguous_fallback_{n_rows}"] = Case(
+            updates=("far_close_pair",),
+            fit_input=name,
+            parameters={
+                "n_components": 1,
+                "n_neighbors": 2,
+                "n_epochs": 0,
+                "transform_seed": 2**32 - 1,
+            },
+        )
+    cases["wide_jitter"] = Case(
+        updates=("near_pair",),
+        parameters={"n_components": 9, "n_epochs": 0, "transform_seed": 0},
+    )
+    return cases
+
+
+def make_fixture(cases: dict[str, Case]) -> dict:
     packages = {name: version(name) for name in PACKAGE_VERSIONS}
     if platform.python_version() != PYTHON_VERSION or packages != PACKAGE_VERSIONS:
         raise RuntimeError("run with the locked reference environment")
 
     observations = {}
-    for name, case in CASES.items():
+    for name, case in cases.items():
         first = capture(case)
         if capture(case) != first:
             raise AssertionError(f"{name}: repeated fit and update checkpoints differ")
@@ -362,10 +396,14 @@ def make_fixture() -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--initialization-holdouts", action="store_true")
     args = parser.parse_args()
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    cases = initialization_holdouts() if args.initialization_holdouts else CASES
+    fixture = make_fixture(cases)
+    formatting = {"separators": (",", ":")} if args.initialization_holdouts else {"indent": 2}
     args.output.write_text(
-        json.dumps(make_fixture(), indent=2, allow_nan=False) + "\n",
+        json.dumps(fixture, **formatting, allow_nan=False) + "\n",
         encoding="utf-8",
         newline="\n",
     )

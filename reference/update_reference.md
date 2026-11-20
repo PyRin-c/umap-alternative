@@ -39,15 +39,16 @@ weighted-centroid comparison. These steps reproduced every coordinate in all
    indices, including the new row itself. The cases used for the model have
    distinct input rows.
 2. Retain indices from before the current update and average their existing
-   float32 coordinates in distance order. Use the mean of the entire old
-   embedding when this leaves an empty list. Each row in a simultaneous batch
-   uses the same pre-update embedding.
+   float32 coordinates in distance order using a serial float32 sum. An
+   empty list uses the mean of the entire old embedding, accumulated and
+   divided in float64 before rounding to float32. Each appended row uses the
+   same pre-update embedding.
 3. Append the centroids in input order. When the resulting layout has
    coincident coordinates, take the mean Euclidean distance to each row's
    closest other row, counting zero distances. Multiply the mean by 0.001
    for the Gaussian standard deviation. Create a NumPy `RandomState` from
    `transform_seed`, advance it by three uint32 words, draw one Gaussian per
-   coordinate in row order, and cast the perturbed layout to float32. The
+   coordinate in row order, and round the noise to float32 before adding it. The
    seed controls vary `random_state` and `transform_seed` independently.
 4. Apply `10 * (x - min) / (max - min)` in float32 separately to each column.
    This can change existing coordinates even when the layout required no
@@ -79,11 +80,38 @@ checkpoints available as public observations.
 
 `prepare_dense_update` rebuilds the dense fuzzy graph and prepares the
 normalized initial layout using the fitted neighbor count. The native
-regression replays 16 dense zero- and one-epoch checkpoints, including
-successive calls, anchors selected from the original coordinates, and
-the fallback to their mean. The rebuilt CSR and coordinate bits match
-the snapshot on Windows and Ubuntu WSL. Positive-epoch optimization and
-the estimator update entry point are subsequent stages.
+regression replays 20 dense zero- and one-epoch checkpoints, including
+successive calls, a one-dimensional fallback mean over 127, 128, and 129 old
+rows, nine layout dimensions, and both limits of the unsigned transform seed.
+The rebuilt CSR and coordinate bits match the public snapshot on Windows and
+Ubuntu WSL. The independent Python analyzer checks the same initialization
+with the captured fitted coordinates on each host.
+
+`update_dense_embedding` carries the initialization RNG into the
+[serial optimizer](update_layout_reference.md) and returns the combined CSR
+and new coordinates. Python `UMAP.update(X, ensure_all_finite=True)` uses that
+path for unsupervised dense Euclidean models fitted with computed neighbors
+and no finite distance cutoff. A successful call returns `None`, retains the
+effective fitted neighbor count, and updates the exact-input transform
+shortcut to include all appended rows. A graph-only fit publishes the
+expanded graph and preserves the previous exact-input shortcut when the
+missing embedding raises `AttributeError`.
+
+The public update sets weights below `max(weight) / sampling_epochs` to
+positive zero while preserving the CSR positions. The duplicate-row case
+stores two zeros for weights below the default sampling cutoff. In a separate
+case with a weight near 0.058155, the edge is retained at 10 epochs, stored
+as zero at 11 and 17, and retained again at 18. This supports the use of the
+ordinary 500-epoch budget for small datasets through 10 epochs and the
+specified budget above 10. Fit-time curve and learning-rate settings are
+retained, and update reads the current epoch count, graph settings, repulsion,
+negative sample rate and transform seed.
+
+Sparse feature updates, other metrics, externally supplied neighbors, and
+finite cutoffs remain open. The implementation requires finite float32
+features and a finite fitted layout. General equal-distance neighbor ties and
+state following a failure partway through embedding optimization remain
+unverified.
 
 ## Reproduction
 
@@ -100,4 +128,7 @@ uv sync --project reference --locked --python 3.13.12
 $updateFixture = 'reference/fixtures/umap-learn-0.6.0-update-windows-x86_64.json'
 uv run --project reference --no-sync python -I reference/generate_update_fixture.py --output $updateFixture
 uv run --project reference --no-sync python -I reference/analyze_update_fixture.py $updateFixture --check
+$holdouts = 'reference/fixtures/umap-learn-0.6.0-update-initialization-holdouts-x86_64.json'
+uv run --project reference --no-sync python -I reference/generate_update_fixture.py --initialization-holdouts --output $holdouts
+uv run --project reference --no-sync python -I reference/analyze_update_fixture.py $holdouts --check
 ```

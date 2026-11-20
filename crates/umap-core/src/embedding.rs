@@ -264,21 +264,25 @@ pub fn fit_dense_embedding_seeded_with_graph_options(
     let (mut graph, coordinates, caller_rng) =
         prepare_dense_embedding(data, n_rows, n_features, config, graph_options)?;
     if graph_options.is_some() {
-        let sampling_epochs = match config.n_epochs {
-            epochs if epochs > 10 => epochs,
-            _ if n_rows <= 10_000 => 500,
-            _ => 200,
-        };
-        let maximum = graph.data.iter().copied().fold(0.0_f32, f32::max);
-        let cutoff = maximum / sampling_epochs as f32;
-        for weight in &mut graph.data {
-            if *weight < cutoff {
-                *weight = 0.0;
-            }
-        }
+        zero_weak_memberships(&mut graph, config.n_epochs);
     }
     let mut caller_rng = caller_rng.unwrap_or_else(|| Mt19937::new(explicit_seed));
     finish_seeded_embedding(graph, coordinates, &config.layout_config(), &mut caller_rng)
+}
+
+pub(crate) fn zero_weak_memberships(graph: &mut CsrGraph, n_epochs: usize) {
+    let sampling_epochs = match n_epochs {
+        epochs if epochs > 10 => epochs,
+        _ if graph.n_rows <= 10_000 => 500,
+        _ => 200,
+    };
+    let maximum = graph.data.iter().copied().fold(0.0_f32, f32::max);
+    let cutoff = maximum / sampling_epochs as f32;
+    for weight in &mut graph.data {
+        if *weight < cutoff {
+            *weight = 0.0;
+        }
+    }
 }
 
 /// Fit an existing fuzzy graph from raw, row-major explicit coordinates.

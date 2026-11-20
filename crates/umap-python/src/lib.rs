@@ -22,6 +22,7 @@ use umap_core::transform::{
     CooGraph, DenseEmbeddingTransformConfig, transform_dense_embedding_with_options,
     transform_dense_graph_with_cutoff,
 };
+use umap_core::update::{DenseUpdateConfig, update_dense_embedding};
 
 type CsrComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
 type CooComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
@@ -165,6 +166,61 @@ fn _fit_dense_embedding(
         .detach(|| {
             fit_dense_embedding_seeded_with_graph_options(
                 &data, n_rows, n_features, &config, seed, options,
+            )
+        })
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok((csr_components(graph), shape, coordinates))
+}
+
+/// Append rows and optimize the combined dense layout using the fitted settings.
+#[pyfunction]
+#[pyo3(signature = (
+    data, shape, n_existing, fitted, *, k, metric, n_components, a, b, learning_rate,
+    n_epochs, repulsion_strength, negative_sample_rate, transform_seed, graph_options=None
+))]
+#[allow(clippy::too_many_arguments)]
+fn _update_dense_embedding(
+    py: Python<'_>,
+    data: Vec<f32>,
+    shape: (usize, usize),
+    n_existing: usize,
+    fitted: Vec<f32>,
+    k: usize,
+    metric: &str,
+    n_components: usize,
+    a: f64,
+    b: f64,
+    learning_rate: f64,
+    n_epochs: usize,
+    repulsion_strength: f64,
+    negative_sample_rate: f64,
+    transform_seed: u32,
+    graph_options: Option<(f64, f64)>,
+) -> PyResult<EmbeddingComponents> {
+    let config = DenseUpdateConfig {
+        n_neighbors: k,
+        metric: parse_metric(metric)?,
+        n_components,
+        graph_options: parse_graph_options(graph_options)?,
+        transform_seed,
+    };
+    let layout = EmbeddingLayoutConfig {
+        n_components,
+        a,
+        b,
+        learning_rate,
+        n_epochs,
+        repulsion_strength,
+        negative_sample_rate,
+    };
+    let DenseEmbedding {
+        graph,
+        coordinates,
+        shape,
+    } = py
+        .detach(|| {
+            update_dense_embedding(
+                &data, shape.0, shape.1, n_existing, &fitted, &config, &layout,
             )
         })
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
@@ -457,6 +513,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_fit_dense_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_sparse_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_embedding, module)?)?;
+    module.add_function(wrap_pyfunction!(_update_dense_embedding, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_graph_embedding_with_rng, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_categorical_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_precomputed_graph, module)?)?;

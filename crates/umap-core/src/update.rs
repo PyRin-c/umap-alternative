@@ -1,15 +1,15 @@
 //! Graph rebuilding and coordinate initialization for dense incremental fits.
 
-use std::cmp::Ordering;
-use std::fmt;
-use std::ops::{Add, AddAssign};
-
-use crate::embedding::DenseEmbedding;
+use crate::embedding::{DenseEmbedding, EmbeddingLayoutConfig, zero_weak_memberships};
 use crate::fit::{DenseGraphFitError, build_fitted_graph};
 use crate::fuzzy_graph::GraphOptions;
 use crate::initialization::{InitializationError, normalize_columns};
 use crate::neighbors::{DistanceMetric, Neighbor, exhaustive_knn_with_metric};
-use crate::rng::{Mt19937, draw_negative_seed};
+use crate::optimize::OptimizeError;
+use crate::rng::Mt19937;
+use crate::update_layout::{begin_update_layout_rng, optimize_update_layout};
+use std::cmp::Ordering;
+use std::fmt;
 
 /// Fitted settings and transform seed used to prepare a dense update.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -39,6 +39,10 @@ pub enum DenseUpdateError {
     Graph(DenseGraphFitError),
     /// The fitted coordinates or provisional layout cannot be normalized.
     Initialization(InitializationError),
+    /// The optimizer uses a different coordinate width.
+    LayoutWidth { fitted: usize, optimizer: usize },
+    /// The optimizer rejected the graph, parameters, or a coordinate update.
+    Optimization(OptimizeError),
 }
 
 impl fmt::Display for DenseUpdateError {
@@ -54,6 +58,13 @@ impl fmt::Display for DenseUpdateError {
             ),
             Self::Graph(error) => error.fmt(formatter),
             Self::Initialization(error) => error.fmt(formatter),
+            Self::LayoutWidth { fitted, optimizer } => {
+                write!(
+                    formatter,
+                    "optimizer width {optimizer} differs from fitted width {fitted}"
+                )
+            }
+            Self::Optimization(error) => error.fmt(formatter),
         }
     }
 }
@@ -61,9 +72,10 @@ impl fmt::Display for DenseUpdateError {
 impl std::error::Error for DenseUpdateError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::InvalidDataShape { .. } => None,
+            Self::InvalidDataShape { .. } | Self::LayoutWidth { .. } => None,
             Self::Graph(error) => Some(error),
             Self::Initialization(error) => Some(error),
+            Self::Optimization(error) => Some(error),
         }
     }
 }
@@ -95,6 +107,58 @@ pub fn prepare_dense_update(
     n_existing: usize,
     fitted: &[f32],
     config: &DenseUpdateConfig,
+) -> Result<DenseEmbedding, DenseUpdateError> {
+    let mut rng = begin_update_layout_rng(config.transform_seed);
+    prepare_with_rng(
+        data, n_rows, n_features, n_existing, fitted, config, &mut rng,
+    )
+}
+
+/// Rebuild and optimize a serial dense embedding after appending feature rows.
+///
+/// Pass the same inputs as [`prepare_dense_update`] and the layout settings
+/// for this update. Use the fitted curve and learning rate, and pass zero
+/// epochs for an omitted update epoch count. The optimizer starts with the
+/// RNG stream left by preparation and can move both old and new points.
+/// Memberships below the sampling cutoff are retained as stored CSR zeros.
+pub fn update_dense_embedding(
+    data: &[f32],
+    n_rows: usize,
+    n_features: usize,
+    n_existing: usize,
+    fitted: &[f32],
+    config: &DenseUpdateConfig,
+    layout: &EmbeddingLayoutConfig<impl Copy + Into<f64>, impl Copy + Into<f64>>,
+) -> Result<DenseEmbedding, DenseUpdateError> {
+    if layout.n_components != config.n_components {
+        return Err(DenseUpdateError::LayoutWidth {
+            fitted: config.n_components,
+            optimizer: layout.n_components,
+        });
+    }
+    let mut rng = begin_update_layout_rng(config.transform_seed);
+    let mut embedding = prepare_with_rng(
+        data, n_rows, n_features, n_existing, fitted, config, &mut rng,
+    )?;
+    zero_weak_memberships(&mut embedding.graph, layout.n_epochs);
+    optimize_update_layout(
+        &mut embedding.coordinates,
+        &embedding.graph,
+        layout,
+        &mut rng,
+    )
+    .map_err(DenseUpdateError::Optimization)?;
+    Ok(embedding)
+}
+
+fn prepare_with_rng(
+    data: &[f32],
+    n_rows: usize,
+    n_features: usize,
+    n_existing: usize,
+    fitted: &[f32],
+    config: &DenseUpdateConfig,
+    rng: &mut Mt19937,
 ) -> Result<DenseEmbedding, DenseUpdateError> {
     if n_existing == 0 || n_existing >= n_rows || n_features == 0 {
         return Err(DenseUpdateError::InvalidDataShape {
@@ -136,7 +200,7 @@ pub fn prepare_dense_update(
     );
     validate_finite(&coordinates)?;
     if has_coincident_rows(&coordinates, width) {
-        perturb_coincident_layout(&mut coordinates, width, config.transform_seed);
+        perturb_coincident_layout(&mut coordinates, width, rng);
     }
     normalize_columns(&mut coordinates, n_rows, width)?;
     Ok(DenseEmbedding {
@@ -165,8 +229,7 @@ fn append_centroids(
     neighbors: &[Vec<Neighbor>],
 ) {
     let n_existing = fitted.len() / width;
-    let mut fallback = vec![0.0; width];
-    write_mean(&mut fallback, fitted.chunks_exact(width));
+    let mut fallback = None;
     for (coordinate, neighbors) in appended.chunks_exact_mut(width).zip(neighbors) {
         let selected = neighbors
             .iter()
@@ -175,7 +238,19 @@ fn append_centroids(
             .map(|row| &fitted[row * width..(row + 1) * width]);
         let mut selected = selected.peekable();
         if selected.peek().is_none() {
-            coordinate.copy_from_slice(&fallback);
+            let mean = fallback.get_or_insert_with(|| {
+                let mut totals = vec![0.0_f64; width];
+                for row in fitted.chunks_exact(width) {
+                    for (total, &value) in totals.iter_mut().zip(row) {
+                        *total += f64::from(value);
+                    }
+                }
+                totals
+                    .into_iter()
+                    .map(|sum| (sum / n_existing as f64) as f32)
+                    .collect::<Vec<_>>()
+            });
+            coordinate.copy_from_slice(mean);
         } else {
             write_mean(coordinate, selected);
         }
@@ -183,21 +258,15 @@ fn append_centroids(
 }
 
 fn write_mean<'a>(output: &mut [f32], rows: impl Iterator<Item = &'a [f32]>) {
-    if output.len() == 1 {
-        // The reduced axis is contiguous in a one-coordinate layout.
-        let column: Vec<_> = rows.map(|row| row[0]).collect();
-        output[0] = pairwise_sum(&column) / column.len() as f32;
-    } else {
-        let mut count = 0;
-        for row in rows {
-            for (coordinate, &value) in output.iter_mut().zip(row) {
-                *coordinate += value;
-            }
-            count += 1;
+    let mut count = 0;
+    for row in rows {
+        for (coordinate, &value) in output.iter_mut().zip(row) {
+            *coordinate += value;
         }
-        for coordinate in output {
-            *coordinate /= count as f32;
-        }
+        count += 1;
+    }
+    for coordinate in output {
+        *coordinate /= count as f32;
     }
 }
 
@@ -219,7 +288,7 @@ fn has_coincident_rows(layout: &[f32], width: usize) -> bool {
     rows.windows(2).any(|pair| pair[0] == pair[1])
 }
 
-fn perturb_coincident_layout(layout: &mut [f32], width: usize, seed: u32) {
+fn perturb_coincident_layout(layout: &mut [f32], width: usize, rng: &mut Mt19937) {
     let count = layout.len() / width;
     let mut nearest = vec![f64::INFINITY; count];
     let mut squared_components = Vec::with_capacity(width);
@@ -239,22 +308,17 @@ fn perturb_coincident_layout(layout: &mut [f32], width: usize, seed: u32) {
         *value = value.sqrt();
     }
     let scale = 0.001 * (pairwise_sum(&nearest) / count as f64);
-    let mut generator = Mt19937::new(seed);
-    draw_negative_seed(|| generator.next_u32());
     let mut spare = None;
     for coordinate in layout {
-        let noise = scale * generator.next_standard_normal(&mut spare);
-        *coordinate = (f64::from(*coordinate) + noise) as f32;
+        let noise = (scale * rng.next_standard_normal(&mut spare)) as f32;
+        *coordinate += noise;
     }
 }
 
 // Contiguous reductions combine complete groups of eight before adding any tail.
-fn pairwise_sum<T>(values: &[T]) -> T
-where
-    T: Copy + From<i8> + Add<Output = T> + AddAssign,
-{
+fn pairwise_sum(values: &[f64]) -> f64 {
     if values.len() < 8 {
-        return values.iter().copied().fold(T::from(0), Add::add);
+        return values.iter().copied().sum();
     }
     if values.len() > 128 {
         let (left, right) = values.split_at((values.len() / 2) & !7);
@@ -273,5 +337,7 @@ where
     let [a, b, c, d, e, f, g, h] = lanes;
     tail.iter()
         .copied()
-        .fold(((a + b) + (c + d)) + ((e + f) + (g + h)), Add::add)
+        .fold(((a + b) + (c + d)) + ((e + f) + (g + h)), |sum, value| {
+            sum + value
+        })
 }

@@ -86,6 +86,7 @@ fn metric_top_k_matches_full_sort() {
                                 / divisor) as f32
                         }
                     }
+                    _ => unreachable!("the reference loop selects the original metrics"),
                 }
             },
             |k| {

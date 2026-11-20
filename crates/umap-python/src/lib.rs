@@ -299,6 +299,16 @@ fn parse_metric(metric: &str) -> PyResult<DistanceMetric> {
         "correlation" => Ok(DistanceMetric::Correlation),
         "canberra" => Ok(DistanceMetric::Canberra),
         "braycurtis" => Ok(DistanceMetric::BrayCurtis),
+        "hamming" => Ok(DistanceMetric::Hamming),
+        "matching" => Ok(DistanceMetric::Matching),
+        "jaccard" => Ok(DistanceMetric::Jaccard),
+        "dice" => Ok(DistanceMetric::Dice),
+        "russellrao" => Ok(DistanceMetric::RussellRao),
+        "rogerstanimoto" => Ok(DistanceMetric::RogersTanimoto),
+        "sokalmichener" => Ok(DistanceMetric::SokalMichener),
+        "sokalsneath" => Ok(DistanceMetric::SokalSneath),
+        "yule" => Ok(DistanceMetric::Yule),
+        "kulsinski" => Ok(DistanceMetric::Kulsinski),
         _ => Err(PyValueError::new_err(format!(
             "unsupported metric {metric:?}"
         ))),

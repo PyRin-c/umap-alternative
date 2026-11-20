@@ -6,9 +6,9 @@ use std::fmt;
 use crate::fit::{build_fitted_graph, build_graph_with_cutoff};
 use crate::fuzzy_graph::{CsrGraph, GraphError, GraphOptions};
 use crate::neighbors::{
-    DistanceMetric, Neighbor, bray_curtis_distance_pairs, canberra_distance_pairs,
-    collect_neighbors, cosine_distance_pairs, euclidean_distance_pairs, manhattan_distance_pairs,
-    manhattan_distance_pairs_wide,
+    DistanceMetric, Neighbor, boolean_distance_pairs, bray_curtis_distance_pairs,
+    canberra_distance_pairs, collect_neighbors, cosine_distance_pairs, euclidean_distance_pairs,
+    manhattan_distance_pairs, manhattan_distance_pairs_wide,
 };
 use crate::transform::{DenseGraphTransformError, QueryTieRanking};
 
@@ -394,7 +394,7 @@ fn csr_knn_counting_cutoff(
         for index in 0..input.shape.0 {
             let distance = match metric {
                 SparseDistanceMetric::Dense(metric) => {
-                    sparse_distance(query, input.row(index), metric)
+                    sparse_distance(query, input.row(index), metric, input.shape.1)
                 }
                 SparseDistanceMetric::Cosine if query_index == index => 0.0,
                 SparseDistanceMetric::Cosine => sparse_cosine_distance(query, input.row(index)),
@@ -609,6 +609,7 @@ impl<'a> SparseFeatureRanking<'a> {
     fn fill(&mut self, row: CsrRow<'_>, width: Option<usize>) {
         self.candidates.clear();
         self.wide_distances.clear();
+        let n_features = width.unwrap_or(self.training.shape.1);
         for index in 0..self.training.shape.0 {
             let mut candidate = self.training.row(index);
             if let Some(width) = width {
@@ -627,7 +628,7 @@ impl<'a> SparseFeatureRanking<'a> {
                     cosine_distance_pairs(merged_features(row, candidate))
                 }
                 DistanceMetric::Cosine => sparse_cosine_distance(row, candidate),
-                _ => sparse_distance(row, candidate, self.metric),
+                _ => sparse_distance(row, candidate, self.metric, n_features),
             };
             self.candidates.push(Neighbor { index, distance });
         }
@@ -981,7 +982,12 @@ fn merged_entries<T: Default + Copy>(
     })
 }
 
-fn sparse_distance(left: CsrRow<'_>, right: CsrRow<'_>, metric: DistanceMetric) -> f32 {
+fn sparse_distance(
+    left: CsrRow<'_>,
+    right: CsrRow<'_>,
+    metric: DistanceMetric,
+    n_features: usize,
+) -> f32 {
     if metric == DistanceMetric::Manhattan {
         return manhattan_distance_pairs(merged_features(left, right));
     }
@@ -1007,5 +1013,6 @@ fn sparse_distance(left: CsrRow<'_>, right: CsrRow<'_>, metric: DistanceMetric) 
         DistanceMetric::Manhattan | DistanceMetric::Cosine | DistanceMetric::Correlation => {
             unreachable!("CSR metric was dispatched before merging coordinates")
         }
+        metric => boolean_distance_pairs(metric, merged_features(left, right), n_features),
     }
 }

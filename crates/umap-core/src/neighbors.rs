@@ -35,6 +35,26 @@ pub enum DistanceMetric {
     Canberra,
     /// Sum of absolute differences divided by the sum of absolute pair sums.
     BrayCurtis,
+    /// Fraction of numerically unequal features.
+    Hamming,
+    /// Fraction of features present on exactly one side.
+    Matching,
+    /// Support mismatch divided by the size of the union.
+    Jaccard,
+    /// Support mismatch divided by the sum of the support sizes.
+    Dice,
+    /// Fraction of features outside the shared support, with an equal-support shortcut.
+    RussellRao,
+    /// Twice the support mismatch divided by width plus mismatch.
+    RogersTanimoto,
+    /// The same support ratio as Rogers–Tanimoto.
+    SokalMichener,
+    /// Twice the support mismatch divided by shared support plus twice the mismatch.
+    SokalSneath,
+    /// Support contingency ratio using both directions of mismatch.
+    Yule,
+    /// Support contingency ratio with an equal-support shortcut.
+    Kulsinski,
 }
 
 /// Input validation failures for [`exhaustive_knn`] and
@@ -410,13 +430,33 @@ impl DistanceMetric {
         matches!(self, Self::Cosine | Self::Correlation)
     }
 
-    /// Return the finite default cutoff for cosine and correlation graphs.
+    pub(crate) fn is_boolean(self) -> bool {
+        matches!(
+            self,
+            Self::Hamming
+                | Self::Matching
+                | Self::Jaccard
+                | Self::Dice
+                | Self::RussellRao
+                | Self::RogersTanimoto
+                | Self::SokalMichener
+                | Self::SokalSneath
+                | Self::Yule
+                | Self::Kulsinski
+        )
+    }
+
+    /// Return the metric's finite default cutoff, when defined.
     pub fn default_disconnection_distance(self) -> Option<f32> {
-        self.is_angular().then_some(2.0)
+        match self {
+            Self::Cosine | Self::Correlation => Some(2.0),
+            Self::Jaccard | Self::Dice => Some(1.0),
+            _ => None,
+        }
     }
 
     pub(crate) fn uses_ranked_graph(self) -> bool {
-        self.is_angular() || matches!(self, Self::Canberra | Self::BrayCurtis)
+        self.is_angular() || self.is_boolean() || matches!(self, Self::Canberra | Self::BrayCurtis)
     }
 
     pub(crate) fn distance(self, left: &[f32], right: &[f32]) -> f32 {
@@ -432,7 +472,62 @@ impl DistanceMetric {
             Self::BrayCurtis => {
                 bray_curtis_distance_pairs(left.iter().copied().zip(right.iter().copied())) as f32
             }
+            metric => boolean_distance_pairs(
+                metric,
+                left.iter().copied().zip(right.iter().copied()),
+                left.len(),
+            ),
         }
+    }
+}
+
+/// Dense pairs include every feature. A CSR merge can omit the jointly zero
+/// pairs because the declared width supplies their contribution.
+pub(crate) fn boolean_distance_pairs(
+    metric: DistanceMetric,
+    pairs: impl Iterator<Item = (f32, f32)>,
+    width: usize,
+) -> f32 {
+    use DistanceMetric as Metric;
+    if width == 0 {
+        return 0.0;
+    }
+    if metric == Metric::Hamming {
+        let unequal = pairs.filter(|(left, right)| left != right).count();
+        return (unequal as f64 / width as f64) as f32;
+    }
+    let (mut both, mut left_only, mut right_only) = (0, 0, 0);
+    for (left, right) in pairs {
+        match (left != 0.0, right != 0.0) {
+            (true, true) => both += 1,
+            (true, false) => left_only += 1,
+            (false, true) => right_only += 1,
+            (false, false) => {}
+        }
+    }
+    let neither = (width - both - left_only - right_only) as f64;
+    let (both, left_only, right_only) = (both as f64, left_only as f64, right_only as f64);
+    let width = width as f64;
+    let mismatch = left_only + right_only;
+    let (numerator, denominator) = match metric {
+        Metric::Matching => (mismatch, width),
+        Metric::Jaccard => (mismatch, both + mismatch),
+        Metric::Dice => (mismatch, 2.0 * both + mismatch),
+        Metric::RussellRao | Metric::Kulsinski if mismatch == 0.0 => return 0.0,
+        Metric::RussellRao => (width - both, width),
+        Metric::Kulsinski => (width + mismatch - both, width + mismatch),
+        Metric::RogersTanimoto | Metric::SokalMichener => (2.0 * mismatch, width + mismatch),
+        Metric::SokalSneath => (2.0 * mismatch, both + 2.0 * mismatch),
+        Metric::Yule => {
+            let cross = left_only * right_only;
+            (2.0 * cross, both * neither + cross)
+        }
+        _ => unreachable!("only boolean metrics use support counts"),
+    };
+    if denominator == 0.0 {
+        0.0
+    } else {
+        (numerator / denominator) as f32
     }
 }
 

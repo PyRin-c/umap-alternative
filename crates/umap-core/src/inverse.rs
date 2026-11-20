@@ -91,6 +91,8 @@ pub enum DenseInverseError {
     Layout(LayoutError),
     /// The sampling schedule cannot be represented.
     Sampling(SamplingError),
+    /// The feature metric has no inverse gradient.
+    UnsupportedMetric(DistanceMetric),
 }
 
 impl fmt::Display for DenseInverseError {
@@ -107,6 +109,9 @@ impl fmt::Display for DenseInverseError {
             }
             Self::Layout(error) => error.fmt(f),
             Self::Sampling(error) => error.fmt(f),
+            Self::UnsupportedMetric(metric) => {
+                write!(f, "inverse transform is unavailable for {metric:?}")
+            }
         }
     }
 }
@@ -279,6 +284,9 @@ pub fn inverse_transform_dense_with_metric(
     layout: DenseInverseLayout,
     metric: DistanceMetric,
 ) -> Result<DenseInverseOutput, DenseInverseError> {
+    if metric.is_boolean() {
+        return Err(DenseInverseError::UnsupportedMetric(metric));
+    }
     validate_parameters(a, b, layout.initial_alpha).map_err(DenseInverseError::Layout)?;
     validate_repulsion_strength(layout.repulsion_strength).map_err(DenseInverseError::Layout)?;
     let (mut output, edges) = initialize(input, a, b)?;
@@ -625,6 +633,7 @@ fn metric_gradient(
             }
             distance
         }
+        _ => unreachable!("boolean metrics have no inverse gradient"),
     }
 }
 

@@ -40,8 +40,15 @@ _METRIC_ALIASES = {
 }
 _ANGULAR_METRICS = ("cosine", "correlation")
 _RATIO_METRICS = ("canberra", "braycurtis")
-_TIE_RANKED_METRICS = _ANGULAR_METRICS + _RATIO_METRICS
-_SPARSE_LAYOUT_METRICS = ("euclidean", "manhattan", "chebyshev", "cosine") + _RATIO_METRICS
+_SPARSE_BOOLEAN_METRICS = (
+    "hamming", "matching", "jaccard", "dice", "russellrao", "rogerstanimoto",
+    "sokalmichener", "sokalsneath", "kulsinski",
+)
+_BOOLEAN_METRICS = _SPARSE_BOOLEAN_METRICS + ("yule",)
+_TIE_RANKED_METRICS = _ANGULAR_METRICS + _RATIO_METRICS + _BOOLEAN_METRICS
+_SPARSE_LAYOUT_METRICS = (
+    ("euclidean", "manhattan", "chebyshev", "cosine") + _RATIO_METRICS + _SPARSE_BOOLEAN_METRICS
+)
 
 _TRUNCATION_WARNING = (
     "n_neighbors is larger than the dataset size; truncating to X.shape[0] - 1"
@@ -506,7 +513,7 @@ def _same_transform_input(queries, fitted):
     return False
 
 
-def _sparse_feature_embedding_output(embedding, X):
+def _feature_embedding_output(embedding, X):
     dtype = np.float64 if getattr(X, "dtype", None) == np.dtype(np.float64) else np.float32
     return embedding.astype(dtype, copy=False)
 
@@ -723,6 +730,13 @@ class UMAP(BaseEstimator, TransformerMixin):
         densmap = density_options if getattr(self, "densmap", False) else None
         sparse = issparse(X)
         metric = self._validate_metric(sparse=sparse)
+        boolean_metric = metric in _BOOLEAN_METRICS
+        if boolean_metric:
+            warnings.warn(
+                f"gradient function is not yet implemented for {metric} distance metric; "
+                "inverse_transform will be unavailable",
+                UserWarning, stacklevel=3,
+            )
         graph_options = self._graph_options()
         if not isinstance(self.n_neighbors, numbers.Integral):
             raise ValueError("n_neighbors must be an integer")
@@ -736,7 +750,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         sparse_feature_layout = sparse and metric in _SPARSE_LAYOUT_METRICS
         sparse_embedding = sparse and not precomputed and embedding_mode
         angular = not sparse and metric in _ANGULAR_METRICS
-        ratio_metric = not sparse and metric in _RATIO_METRICS
+        ranked_non_angular = not sparse and (boolean_metric or metric in _RATIO_METRICS)
         if sparse and not precomputed:
             if sparse_embedding and not sparse_feature_layout:
                 raise TypeError(
@@ -835,7 +849,10 @@ class UMAP(BaseEstimator, TransformerMixin):
             self._graph_transform_fit = transform_fit
         cutoff = self.disconnection_distance
         if cutoff is None:
-            cutoff = 2.0 if angular or metric == "cosine" else np.inf
+            if angular or metric == "cosine":
+                cutoff = 2.0
+            else:
+                cutoff = 1.0 if metric in ("jaccard", "dice") else np.inf
         elif not isinstance(cutoff, (int, float)):
             raise ValueError("disconnection_distance must either be None or a numeric.")
         if angular and y is not None and self.disconnection_distance is not None:
@@ -901,7 +918,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         )
         graph_from_neighbors = (
             supplied is not None or cutoff < np.inf or (sparse and precomputed) or ranked_sparse_graph
-            or ratio_metric
+            or ranked_non_angular
         )
         if supplied is not None:
             if y is not None:
@@ -922,7 +939,7 @@ class UMAP(BaseEstimator, TransformerMixin):
                 )
             if precomputed:
                 transform_fit = (X_checked.copy(), metric)
-        elif (angular or ratio_metric or cutoff < np.inf) and not (precomputed or sparse) and y is None:
+        elif (angular or ranked_non_angular or cutoff < np.inf) and not (precomputed or sparse) and y is None:
             transform_cutoff = cutoff
             components, removed = _native._fit_dense_graph_with_cutoff(
                 X_checked.ravel().tolist(), n_rows, n_features, n_neighbors, metric, cutoff,
@@ -1020,7 +1037,9 @@ class UMAP(BaseEstimator, TransformerMixin):
                 stacklevel=2,
             )
         if graph.nnz == 0 and (embedding_mode or empty_continuous_graph):
-            if sparse_feature_layout and metric == "euclidean" and not hasattr(self, "_graph_transform_fit"):
+            if (boolean_metric or (sparse_feature_layout and metric == "euclidean")) and not hasattr(
+                self, "_graph_transform_fit"
+            ):
                 # A cold fit can publish the empty graph before layout fails.
                 self._store_fit(
                     n_features, transform_fit, graph, n_neighbors, None,
@@ -1175,8 +1194,9 @@ class UMAP(BaseEstimator, TransformerMixin):
         if self.transform_mode == "embedding":
             if getattr(self, "output_dens", False):
                 return self.embedding_, self.rad_orig_, self.rad_emb_
-            if issparse(X) and self._graph_transform_fit[1] in _SPARSE_LAYOUT_METRICS:
-                return _sparse_feature_embedding_output(self.embedding_, X)
+            metric = self._graph_transform_fit[1]
+            if metric in _BOOLEAN_METRICS or (issparse(X) and metric in _SPARSE_LAYOUT_METRICS):
+                return _feature_embedding_output(self.embedding_, X)
             return self.embedding_.astype(np.float32, copy=False)
         return self.graph_
 
@@ -1195,10 +1215,12 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise ValueError("Transform unavailable when model was fit with only a single data sample.")
         if self.unique and not hasattr(self, "n_neighbors_"):
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '_input_hash'")
-        sparse_features = metric != "precomputed" and issparse(training)
-        if sparse_features and metric not in _SPARSE_LAYOUT_METRICS:
+        sparse_fitted = metric != "precomputed" and issparse(training)
+        if sparse_fitted and metric not in _SPARSE_LAYOUT_METRICS:
             raise NotImplementedError("transform after fitting sparse features is not implemented")
         sparse = issparse(X)
+        boolean_metric = metric in _BOOLEAN_METRICS
+        sparse_features = sparse_fitted or (sparse and boolean_metric)
         if sparse:
             if sparse_features:
                 queries = csr_matrix(_check_sparse_input(X, input_name="sparse features"))
@@ -1217,8 +1239,8 @@ class UMAP(BaseEstimator, TransformerMixin):
         if _same_transform_input(queries, fitted_input):
             if self.transform_mode == "graph":
                 return self.graph_
-            if sparse_features:
-                return _sparse_feature_embedding_output(self.embedding_, X)
+            if sparse_features or boolean_metric:
+                return _feature_embedding_output(self.embedding_, X)
             return self.embedding_
         if getattr(self, "densmap", False):
             raise NotImplementedError("Transforming data into an existing embedding not supported for densMAP.")
@@ -1240,11 +1262,13 @@ class UMAP(BaseEstimator, TransformerMixin):
                 raise AssertionError
             ranked_columns = order.ravel().tolist()
         elif sparse_features:
-            if n_query_features > n_features:
+            if n_query_features > n_features or (boolean_metric and n_query_features != n_features):
                 raise ValueError(
                     f"X has {n_query_features} features, but UMAP was fit with {n_features}."
                 )
             preserve_duplicates = metric == "cosine" and n_query_features == n_features
+            if not sparse_fitted:
+                training = csr_matrix(training)
             # Narrow cosine uses coalesced values in the shared feature prefix.
             # Earlier fits may have kept the raw CSR identity snapshot here.
             if not preserve_duplicates and not training.has_canonical_format:
@@ -1269,7 +1293,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             )
         if self.transform_mode == "embedding":
             coordinates = self._transform_embedding(training, queries, metric, ranked_columns)
-            return _sparse_feature_embedding_output(coordinates, X) if sparse_features else coordinates
+            return _feature_embedding_output(coordinates, X) if sparse_features or boolean_metric else coordinates
 
         shape, row, col, data = _native._transform_dense_graph(
             [] if ranked_columns is not None else training.ravel().tolist(),
@@ -1468,6 +1492,8 @@ class UMAP(BaseEstimator, TransformerMixin):
         training, metric = transform_fit
         if issparse(training):
             raise ValueError("Inverse transform not available for sparse input.")
+        if metric in _BOOLEAN_METRICS:
+            raise ValueError("Inverse transform not available for given metric.")
         if self.transform_mode == "graph":
             raise ValueError("Inverse transform not available for transform_mode = 'graph'")
         fitted = self.embedding_
@@ -1763,6 +1789,10 @@ class UMAP(BaseEstimator, TransformerMixin):
             return self.metric
         name = self.metric.lower()
         if name == "cosine" or (name == "correlation" and not sparse):
+            return name
+        if name in _BOOLEAN_METRICS:
+            if sparse and name == "yule":
+                raise ValueError("Metric yule is not supported for sparse data")
             return name
         if name not in _METRIC_ALIASES:
             raise ValueError("metric is neither callable nor a recognised string")

@@ -18,6 +18,17 @@ const SMALL_DATA_LIMIT: usize = 4096;
 const MAX_CANDIDATES: usize = 60;
 const MIN_LEAF_SIZE: usize = 60;
 
+/// Draw the caller's projection scalar after consuming the two signed states.
+///
+/// `caller` must be at the start of approximate-index initialization. The
+/// signed draws can reject raw words, so the scalar has no fixed byte offset
+/// in the caller stream. The resulting value is in `0..2^62`.
+pub fn draw_projection_scalar(caller: &mut Mt19937) -> u64 {
+    draw_negative_seed(|| caller.next_u32());
+    draw_negative_seed(|| caller.next_u32());
+    (u64::from(caller.next_u32() & 0x3fff_ffff) << 32) | u64::from(caller.next_u32())
+}
+
 /// Observed dense feature routing after any deduplication.
 ///
 /// The caller handles singletons and any fallback from supplied neighbors before
@@ -822,8 +833,7 @@ mod tests {
             let mut rng = Mt19937::new(seed);
             assert_eq!(draw_negative_seed(|| rng.next_u32()), expected.first_state);
             assert_eq!(draw_negative_seed(|| rng.next_u32()), expected.second_state);
-            let scalar =
-                (u64::from(rng.next_u32() & 0x3fff_ffff) << 32) | u64::from(rng.next_u32());
+            let scalar = draw_projection_scalar(&mut Mt19937::new(seed));
             assert_eq!(scalar, expected.scalar);
             println!("caller seed {seed}: both signed draws and projection scalar {scalar} match");
         }

@@ -1,5 +1,8 @@
 # Projection words and prepared query pivots
 
+Fresh scalar, rejection, and depth-three tests are reported in the
+[projection generator reference](projection_generator_reference.md).
+
 The baseline is `dbff1b7`. The probe uses the public PyNNDescent 0.7.0
 constructor, `neighbor_graph`, `prepare`, and `query` in the pinned
 umap-learn 0.6.0 environment. A recording caller `RandomState` replaces

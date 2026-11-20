@@ -6,6 +6,33 @@ use serde::Deserialize;
 use super::*;
 
 #[test]
+fn projection_scalar_consumes_rejected_words_before_the_full_sized_draw() {
+    let mut words = [0; 624];
+    // Untempered caller state from the rejection witness.
+    words[..13].copy_from_slice(&[
+        0x12dd_9bb3,
+        0x12dd_9bb1,
+        0x9134_6001,
+        0x02ff_df78,
+        0x02ff_df7a,
+        0x1022_44c9,
+        0x0000_0002,
+        0x12dd_9bb3,
+        0x1022_44cb,
+        0x8112_2040,
+        0x12dd_9bb3,
+        0x12dd_9bb3,
+        0x9134_6003,
+    ]);
+    let mut caller = Mt19937::from_state(&words, 0).unwrap();
+    assert_eq!(
+        super::super::draw_projection_scalar(&mut caller),
+        (1 << 62) - 1
+    );
+    assert_eq!(caller.next_u32(), 15);
+}
+
+#[test]
 fn pivot_words_skip_the_first_position_and_keep_the_partition_order() {
     let values = [9.0, 0.0, 8.0, 1.0, 7.0, 2.0];
     let data = DenseRows::training(&values, 6, 1).unwrap();
@@ -40,6 +67,15 @@ fn pivot_words_skip_the_first_position_and_keep_the_partition_order() {
 struct Observations {
     training: Vec<TrainingCase>,
     queries: Vec<QueryCase>,
+    #[serde(default)]
+    caller_draws: Vec<CallerCase>,
+}
+
+#[derive(Deserialize)]
+struct CallerCase {
+    seed: Option<u32>,
+    state: Option<Vec<u32>>,
+    draws: Vec<(i64, i64, Option<usize>, serde_json::Value)>,
 }
 
 #[derive(Deserialize)]
@@ -57,6 +93,8 @@ struct TrainingCase {
     matching_component_labels: usize,
     shifted_right_matches: Option<usize>,
     cross_leaf_offers: usize,
+    active_slots: Option<Vec<usize>>,
+    packed_labels: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -86,13 +124,20 @@ struct QuerySweep {
     bits: Vec<u32>,
 }
 
-fn record_splits(tree: Tree, pivots: &mut Vec<[usize; 2]>, leaves: &mut Vec<Vec<usize>>) {
+fn record_splits(
+    tree: Tree,
+    pivots: &mut Vec<[usize; 2]>,
+    leaves: &mut Vec<Vec<usize>>,
+    slots: &mut Vec<usize>,
+    slot: usize,
+) {
     match tree {
         Tree::Leaf(rows) => leaves.push(rows),
         Tree::Split { a, b, left, right } => {
             pivots.push([a, b]);
-            record_splits(*left, pivots, leaves);
-            record_splits(*right, pivots, leaves);
+            slots.push(slot);
+            record_splits(*left, pivots, leaves, slots, 2 * slot + 1);
+            record_splits(*right, pivots, leaves, slots, 2 * slot + 2);
         }
         Tree::Balanced { .. } => panic!("unexpected tree split"),
     }
@@ -103,6 +148,19 @@ fn record_splits(tree: Tree, pivots: &mut Vec<[usize; 2]>, leaves: &mut Vec<Vec<
 fn compare_projection_words_with_wheel() {
     let path = std::env::var_os("PROJECTION_WORD_OBSERVATIONS").unwrap();
     let observations: Observations = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    for case in observations.caller_draws {
+        let mut rng = if let Some(seed) = case.seed {
+            Mt19937::new(seed)
+        } else {
+            Mt19937::from_state(case.state.as_ref().unwrap(), 0).unwrap()
+        };
+        let expected = case.draws[2].3.as_u64().unwrap();
+        assert_eq!(super::super::draw_projection_scalar(&mut rng), expected);
+        if case.state.is_some() {
+            assert_eq!(rng.next_u32(), 15);
+        }
+        println!("caller {:?} projection scalar {expected}", case.seed);
+    }
     let decode = |values: Vec<u32>| values.into_iter().map(f32::from_bits).collect::<Vec<_>>();
     let mut total_pivots = 0;
     let mut total_rows = 0;
@@ -121,9 +179,13 @@ fn compare_projection_words_with_wheel() {
         .unwrap();
         let mut pivots = Vec::new();
         let mut leaves = Vec::new();
-        record_splits(tree, &mut pivots, &mut leaves);
+        let mut slots = Vec::new();
+        record_splits(tree, &mut pivots, &mut leaves, &mut slots, 0);
         assert_eq!(pivots, case.pivots, "{}", case.name);
         assert_eq!(leaves, case.rows_by_leaf, "{}", case.name);
+        if let Some(expected) = case.active_slots {
+            assert_eq!(slots, expected, "{}", case.name);
+        }
         let aligned: usize = leaves
             .iter()
             .map(|rows| {
@@ -145,6 +207,12 @@ fn compare_projection_words_with_wheel() {
             case.cross_leaf_offers,
             case.shifted_right_matches
         );
+        if let Some(packed) = case.packed_labels {
+            println!(
+                "  slots {slots:?}, packed preorder labels {packed}/{}",
+                case.n
+            );
+        }
     }
     println!("training pivot pairs {total_pivots}, components {matching_rows}/{total_rows}");
     for case in observations.queries {

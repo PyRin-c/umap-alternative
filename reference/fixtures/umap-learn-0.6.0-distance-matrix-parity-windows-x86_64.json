@@ -1,0 +1,1317 @@
+{
+  "base_parameters": {
+    "compatibility_layout": true,
+    "init": "random",
+    "n_components": 2,
+    "n_epochs": 30,
+    "n_jobs": 1,
+    "n_neighbors": 4,
+    "random_state": 42,
+    "set_op_mix_ratio": 1.0,
+    "transform_mode": "graph"
+  },
+  "cases": {
+    "connected-dense": {
+      "dense_euclidean_graph": {
+        "data_bits_uint32": [
+          1065353216,
+          1052872807,
+          1059010489,
+          1065353216,
+          1064126184,
+          1059457891,
+          1044604040,
+          1052872807,
+          1064126184,
+          1051886576,
+          1065353216,
+          1059010489,
+          1059457891,
+          1065353216,
+          1062302398,
+          1051886576,
+          1065353216,
+          1065353216,
+          1065353215,
+          1044604040,
+          1065353216,
+          1065353216,
+          1051174888,
+          1062302398,
+          1065353215,
+          1051174888
+        ],
+        "dtype": "float32",
+        "format": "csr",
+        "indices": [
+          1,
+          2,
+          3,
+          0,
+          2,
+          3,
+          5,
+          0,
+          1,
+          4,
+          5,
+          0,
+          1,
+          4,
+          6,
+          2,
+          3,
+          5,
+          6,
+          1,
+          2,
+          4,
+          6,
+          3,
+          4,
+          5
+        ],
+        "indptr": [
+          0,
+          3,
+          7,
+          11,
+          15,
+          19,
+          23,
+          26
+        ],
+        "shape": [
+          7,
+          7
+        ],
+        "type": "csr_matrix"
+      },
+      "diagnostic_nextafter_only_at_1_5_and_5_1": [
+        {
+          "comparison": {
+            "data_bit_mismatches": [
+              {
+                "csr_position": 6,
+                "dense": 1044604040,
+                "precomputed": 1044604037
+              },
+              {
+                "csr_position": 19,
+                "dense": 1044604040,
+                "precomputed": 1044604037
+              }
+            ],
+            "full_csr_bits_match": false,
+            "structure_match": true
+          },
+          "diagnostic_only": true,
+          "direction": "down",
+          "edge_distance_bits": {
+            "1,5": 1047013416,
+            "5,1": 1047013416
+          },
+          "graph_edge_bits": {
+            "1,5": 1044604037,
+            "5,1": 1044604037
+          },
+          "steps": 0
+        },
+        {
+          "comparison": {
+            "data_bit_mismatches": [],
+            "full_csr_bits_match": true,
+            "structure_match": true
+          },
+          "diagnostic_only": true,
+          "direction": "down",
+          "edge_distance_bits": {
+            "1,5": 1047013415,
+            "5,1": 1047013415
+          },
+          "graph_edge_bits": {
+            "1,5": 1044604040,
+            "5,1": 1044604040
+          },
+          "steps": 1
+        },
+        {
+          "comparison": {
+            "data_bit_mismatches": [
+              {
+                "csr_position": 6,
+                "dense": 1044604040,
+                "precomputed": 1044604043
+              },
+              {
+                "csr_position": 19,
+                "dense": 1044604040,
+                "precomputed": 1044604043
+              }
+            ],
+            "full_csr_bits_match": false,
+            "structure_match": true
+          },
+          "diagnostic_only": true,
+          "direction": "down",
+          "edge_distance_bits": {
+            "1,5": 1047013414,
+            "5,1": 1047013414
+          },
+          "graph_edge_bits": {
+            "1,5": 1044604043,
+            "5,1": 1044604043
+          },
+          "steps": 2
+        },
+        {
+          "comparison": {
+            "data_bit_mismatches": [
+              {
+                "csr_position": 6,
+                "dense": 1044604040,
+                "precomputed": 1044604037
+              },
+              {
+                "csr_position": 19,
+                "dense": 1044604040,
+                "precomputed": 1044604037
+              }
+            ],
+            "full_csr_bits_match": false,
+            "structure_match": true
+          },
+          "diagnostic_only": true,
+          "direction": "up",
+          "edge_distance_bits": {
+            "1,5": 1047013416,
+            "5,1": 1047013416
+          },
+          "graph_edge_bits": {
+            "1,5": 1044604037,
+            "5,1": 1044604037
+          },
+          "steps": 0
+        },
+        {
+          "comparison": {
+            "data_bit_mismatches": [
+              {
+                "csr_position": 6,
+                "dense": 1044604040,
+                "precomputed": 1044604034
+              },
+              {
+                "csr_position": 19,
+                "dense": 1044604040,
+                "precomputed": 1044604034
+              }
+            ],
+            "full_csr_bits_match": false,
+            "structure_match": true
+          },
+          "diagnostic_only": true,
+          "direction": "up",
+          "edge_distance_bits": {
+            "1,5": 1047013417,
+            "5,1": 1047013417
+          },
+          "graph_edge_bits": {
+            "1,5": 1044604034,
+            "5,1": 1044604034
+          },
+          "steps": 1
+        },
+        {
+          "comparison": {
+            "data_bit_mismatches": [
+              {
+                "csr_position": 6,
+                "dense": 1044604040,
+                "precomputed": 1044604033
+              },
+              {
+                "csr_position": 19,
+                "dense": 1044604040,
+                "precomputed": 1044604033
+              }
+            ],
+            "full_csr_bits_match": false,
+            "structure_match": true
+          },
+          "diagnostic_only": true,
+          "direction": "up",
+          "edge_distance_bits": {
+            "1,5": 1047013418,
+            "5,1": 1047013418
+          },
+          "graph_edge_bits": {
+            "1,5": 1044604033,
+            "5,1": 1044604033
+          },
+          "steps": 2
+        }
+      ],
+      "distance_matrices": {
+        "f32_pure": {
+          "comparison": {
+            "data_bit_mismatches": [
+              {
+                "csr_position": 5,
+                "dense": 1059457891,
+                "precomputed": 1059457892
+              },
+              {
+                "csr_position": 6,
+                "dense": 1044604040,
+                "precomputed": 1044604037
+              },
+              {
+                "csr_position": 12,
+                "dense": 1059457891,
+                "precomputed": 1059457892
+              },
+              {
+                "csr_position": 13,
+                "dense": 1065353216,
+                "precomputed": 1065353215
+              },
+              {
+                "csr_position": 16,
+                "dense": 1065353216,
+                "precomputed": 1065353215
+              },
+              {
+                "csr_position": 18,
+                "dense": 1065353215,
+                "precomputed": 1065353216
+              },
+              {
+                "csr_position": 19,
+                "dense": 1044604040,
+                "precomputed": 1044604037
+              },
+              {
+                "csr_position": 24,
+                "dense": 1065353215,
+                "precomputed": 1065353216
+              }
+            ],
+            "full_csr_bits_match": false,
+            "structure_match": true
+          },
+          "distance_matrix": {
+            "dtype": "float32",
+            "edge_distance_bits": {
+              "1,5": 1047013416,
+              "5,1": 1047013416
+            },
+            "row_5_local_nearest": [
+              {
+                "bits_uint32": 1038416175,
+                "column": 2,
+                "value": 0.11180340498685837
+              },
+              {
+                "bits_uint32": 1040287458,
+                "column": 4,
+                "value": 0.12649109959602356
+              },
+              {
+                "bits_uint32": 1047013416,
+                "column": 1,
+                "value": 0.22671568393707275
+              },
+              {
+                "bits_uint32": 1047904911,
+                "column": 3,
+                "value": 0.23999999463558197
+              },
+              {
+                "bits_uint32": 1048414157,
+                "column": 6,
+                "value": 0.2475883513689041
+              },
+              {
+                "bits_uint32": 1051640223,
+                "column": 0,
+                "value": 0.3413209617137909
+              }
+            ],
+            "shape": [
+              7,
+              7
+            ]
+          },
+          "precomputed_graph": {
+            "data_bits_uint32": [
+              1065353216,
+              1052872807,
+              1059010489,
+              1065353216,
+              1064126184,
+              1059457892,
+              1044604037,
+              1052872807,
+              1064126184,
+              1051886576,
+              1065353216,
+              1059010489,
+              1059457892,
+              1065353215,
+              1062302398,
+              1051886576,
+              1065353215,
+              1065353216,
+              1065353216,
+              1044604037,
+              1065353216,
+              1065353216,
+              1051174888,
+              1062302398,
+              1065353216,
+              1051174888
+            ],
+            "dtype": "float32",
+            "format": "csr",
+            "indices": [
+              1,
+              2,
+              3,
+              0,
+              2,
+              3,
+              5,
+              0,
+              1,
+              4,
+              5,
+              0,
+              1,
+              4,
+              6,
+              2,
+              3,
+              5,
+              6,
+              1,
+              2,
+              4,
+              6,
+              3,
+              4,
+              5
+            ],
+            "indptr": [
+              0,
+              3,
+              7,
+              11,
+              15,
+              19,
+              23,
+              26
+            ],
+            "shape": [
+              7,
+              7
+            ],
+            "type": "csr_matrix"
+          }
+        },
+        "f64_ordered": {
+          "comparison": {
+            "data_bit_mismatches": [
+              {
+                "csr_position": 6,
+                "dense": 1044604040,
+                "precomputed": 1044604037
+              },
+              {
+                "csr_position": 19,
+                "dense": 1044604040,
+                "precomputed": 1044604037
+              }
+            ],
+            "full_csr_bits_match": false,
+            "structure_match": true
+          },
+          "distance_matrix": {
+            "dtype": "float32",
+            "edge_distance_bits": {
+              "1,5": 1047013416,
+              "5,1": 1047013416
+            },
+            "row_5_local_nearest": [
+              {
+                "bits_uint32": 1038416175,
+                "column": 2,
+                "value": 0.11180340498685837
+              },
+              {
+                "bits_uint32": 1040287458,
+                "column": 4,
+                "value": 0.12649109959602356
+              },
+              {
+                "bits_uint32": 1047013416,
+                "column": 1,
+                "value": 0.22671568393707275
+              },
+              {
+                "bits_uint32": 1047904911,
+                "column": 3,
+                "value": 0.23999999463558197
+              },
+              {
+                "bits_uint32": 1048414157,
+                "column": 6,
+                "value": 0.2475883513689041
+              },
+              {
+                "bits_uint32": 1051640223,
+                "column": 0,
+                "value": 0.3413209617137909
+              }
+            ],
+            "shape": [
+              7,
+              7
+            ]
+          },
+          "precomputed_graph": {
+            "data_bits_uint32": [
+              1065353216,
+              1052872807,
+              1059010489,
+              1065353216,
+              1064126184,
+              1059457891,
+              1044604037,
+              1052872807,
+              1064126184,
+              1051886576,
+              1065353216,
+              1059010489,
+              1059457891,
+              1065353216,
+              1062302398,
+              1051886576,
+              1065353216,
+              1065353216,
+              1065353215,
+              1044604037,
+              1065353216,
+              1065353216,
+              1051174888,
+              1062302398,
+              1065353215,
+              1051174888
+            ],
+            "dtype": "float32",
+            "format": "csr",
+            "indices": [
+              1,
+              2,
+              3,
+              0,
+              2,
+              3,
+              5,
+              0,
+              1,
+              4,
+              5,
+              0,
+              1,
+              4,
+              6,
+              2,
+              3,
+              5,
+              6,
+              1,
+              2,
+              4,
+              6,
+              3,
+              4,
+              5
+            ],
+            "indptr": [
+              0,
+              3,
+              7,
+              11,
+              15,
+              19,
+              23,
+              26
+            ],
+            "shape": [
+              7,
+              7
+            ],
+            "type": "csr_matrix"
+          }
+        },
+        "sklearn_euclidean_distances": {
+          "comparison": {
+            "data_bit_mismatches": [
+              {
+                "csr_position": 6,
+                "dense": 1044604040,
+                "precomputed": 1044604037
+              },
+              {
+                "csr_position": 19,
+                "dense": 1044604040,
+                "precomputed": 1044604037
+              }
+            ],
+            "full_csr_bits_match": false,
+            "structure_match": true
+          },
+          "distance_matrix": {
+            "dtype": "float32",
+            "edge_distance_bits": {
+              "1,5": 1047013416,
+              "5,1": 1047013416
+            },
+            "row_5_local_nearest": [
+              {
+                "bits_uint32": 1038416175,
+                "column": 2,
+                "value": 0.11180340498685837
+              },
+              {
+                "bits_uint32": 1040287458,
+                "column": 4,
+                "value": 0.12649109959602356
+              },
+              {
+                "bits_uint32": 1047013416,
+                "column": 1,
+                "value": 0.22671568393707275
+              },
+              {
+                "bits_uint32": 1047904911,
+                "column": 3,
+                "value": 0.23999999463558197
+              },
+              {
+                "bits_uint32": 1048414157,
+                "column": 6,
+                "value": 0.2475883513689041
+              },
+              {
+                "bits_uint32": 1051640223,
+                "column": 0,
+                "value": 0.3413209617137909
+              }
+            ],
+            "shape": [
+              7,
+              7
+            ]
+          },
+          "precomputed_graph": {
+            "data_bits_uint32": [
+              1065353216,
+              1052872807,
+              1059010489,
+              1065353216,
+              1064126184,
+              1059457891,
+              1044604037,
+              1052872807,
+              1064126184,
+              1051886576,
+              1065353216,
+              1059010489,
+              1059457891,
+              1065353216,
+              1062302398,
+              1051886576,
+              1065353216,
+              1065353216,
+              1065353215,
+              1044604037,
+              1065353216,
+              1065353216,
+              1051174888,
+              1062302398,
+              1065353215,
+              1051174888
+            ],
+            "dtype": "float32",
+            "format": "csr",
+            "indices": [
+              1,
+              2,
+              3,
+              0,
+              2,
+              3,
+              5,
+              0,
+              1,
+              4,
+              5,
+              0,
+              1,
+              4,
+              6,
+              2,
+              3,
+              5,
+              6,
+              1,
+              2,
+              4,
+              6,
+              3,
+              4,
+              5
+            ],
+            "indptr": [
+              0,
+              3,
+              7,
+              11,
+              15,
+              19,
+              23,
+              26
+            ],
+            "shape": [
+              7,
+              7
+            ],
+            "type": "csr_matrix"
+          }
+        }
+      },
+      "input": {
+        "dtype": "float32",
+        "shape": [
+          7,
+          2
+        ],
+        "values": [
+          [
+            0.0,
+            0.0
+          ],
+          [
+            0.12,
+            0.03
+          ],
+          [
+            0.24,
+            0.08
+          ],
+          [
+            0.05,
+            0.18
+          ],
+          [
+            0.17,
+            0.22
+          ],
+          [
+            0.29,
+            0.18
+          ],
+          [
+            0.11,
+            0.35
+          ]
+        ]
+      }
+    },
+    "ties-duplicates": {
+      "dense_euclidean_graph": {
+        "data_bits_uint32": [
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216
+        ],
+        "dtype": "float32",
+        "format": "csr",
+        "indices": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          0,
+          2,
+          3,
+          4,
+          5,
+          0,
+          1,
+          3,
+          6,
+          7,
+          0,
+          1,
+          2,
+          6,
+          7,
+          0,
+          1,
+          5,
+          0,
+          1,
+          4,
+          2,
+          3,
+          7,
+          2,
+          3,
+          6
+        ],
+        "indptr": [
+          0,
+          5,
+          10,
+          15,
+          20,
+          23,
+          26,
+          29,
+          32
+        ],
+        "shape": [
+          8,
+          8
+        ],
+        "type": "csr_matrix"
+      },
+      "distance_matrices": {
+        "f32_pure": {
+          "comparison": {
+            "data_bit_mismatches": [],
+            "full_csr_bits_match": true,
+            "structure_match": true
+          },
+          "distance_matrix": {
+            "dtype": "float32",
+            "edge_distance_bits": {
+              "1,5": 1065353216,
+              "5,1": 1065353216
+            },
+            "row_5_local_nearest": [
+              {
+                "bits_uint32": 0,
+                "column": 4,
+                "value": 0.0
+              },
+              {
+                "bits_uint32": 1065353216,
+                "column": 0,
+                "value": 1.0
+              },
+              {
+                "bits_uint32": 1065353216,
+                "column": 1,
+                "value": 1.0
+              },
+              {
+                "bits_uint32": 1065353216,
+                "column": 6,
+                "value": 1.0
+              },
+              {
+                "bits_uint32": 1065353216,
+                "column": 7,
+                "value": 1.0
+              },
+              {
+                "bits_uint32": 1068827891,
+                "column": 2,
+                "value": 1.4142135381698608
+              },
+              {
+                "bits_uint32": 1068827891,
+                "column": 3,
+                "value": 1.4142135381698608
+              }
+            ],
+            "shape": [
+              8,
+              8
+            ]
+          },
+          "precomputed_graph": {
+            "data_bits_uint32": [
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216
+            ],
+            "dtype": "float32",
+            "format": "csr",
+            "indices": [
+              1,
+              2,
+              3,
+              4,
+              5,
+              0,
+              2,
+              3,
+              4,
+              5,
+              0,
+              1,
+              3,
+              6,
+              7,
+              0,
+              1,
+              2,
+              6,
+              7,
+              0,
+              1,
+              5,
+              0,
+              1,
+              4,
+              2,
+              3,
+              7,
+              2,
+              3,
+              6
+            ],
+            "indptr": [
+              0,
+              5,
+              10,
+              15,
+              20,
+              23,
+              26,
+              29,
+              32
+            ],
+            "shape": [
+              8,
+              8
+            ],
+            "type": "csr_matrix"
+          }
+        },
+        "f64_ordered": {
+          "comparison": {
+            "data_bit_mismatches": [],
+            "full_csr_bits_match": true,
+            "structure_match": true
+          },
+          "distance_matrix": {
+            "dtype": "float32",
+            "edge_distance_bits": {
+              "1,5": 1065353216,
+              "5,1": 1065353216
+            },
+            "row_5_local_nearest": [
+              {
+                "bits_uint32": 0,
+                "column": 4,
+                "value": 0.0
+              },
+              {
+                "bits_uint32": 1065353216,
+                "column": 0,
+                "value": 1.0
+              },
+              {
+                "bits_uint32": 1065353216,
+                "column": 1,
+                "value": 1.0
+              },
+              {
+                "bits_uint32": 1065353216,
+                "column": 6,
+                "value": 1.0
+              },
+              {
+                "bits_uint32": 1065353216,
+                "column": 7,
+                "value": 1.0
+              },
+              {
+                "bits_uint32": 1068827891,
+                "column": 2,
+                "value": 1.4142135381698608
+              },
+              {
+                "bits_uint32": 1068827891,
+                "column": 3,
+                "value": 1.4142135381698608
+              }
+            ],
+            "shape": [
+              8,
+              8
+            ]
+          },
+          "precomputed_graph": {
+            "data_bits_uint32": [
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216
+            ],
+            "dtype": "float32",
+            "format": "csr",
+            "indices": [
+              1,
+              2,
+              3,
+              4,
+              5,
+              0,
+              2,
+              3,
+              4,
+              5,
+              0,
+              1,
+              3,
+              6,
+              7,
+              0,
+              1,
+              2,
+              6,
+              7,
+              0,
+              1,
+              5,
+              0,
+              1,
+              4,
+              2,
+              3,
+              7,
+              2,
+              3,
+              6
+            ],
+            "indptr": [
+              0,
+              5,
+              10,
+              15,
+              20,
+              23,
+              26,
+              29,
+              32
+            ],
+            "shape": [
+              8,
+              8
+            ],
+            "type": "csr_matrix"
+          }
+        },
+        "sklearn_euclidean_distances": {
+          "comparison": {
+            "data_bit_mismatches": [],
+            "full_csr_bits_match": true,
+            "structure_match": true
+          },
+          "distance_matrix": {
+            "dtype": "float32",
+            "edge_distance_bits": {
+              "1,5": 1065353216,
+              "5,1": 1065353216
+            },
+            "row_5_local_nearest": [
+              {
+                "bits_uint32": 0,
+                "column": 4,
+                "value": 0.0
+              },
+              {
+                "bits_uint32": 1065353216,
+                "column": 0,
+                "value": 1.0
+              },
+              {
+                "bits_uint32": 1065353216,
+                "column": 1,
+                "value": 1.0
+              },
+              {
+                "bits_uint32": 1065353216,
+                "column": 6,
+                "value": 1.0
+              },
+              {
+                "bits_uint32": 1065353216,
+                "column": 7,
+                "value": 1.0
+              },
+              {
+                "bits_uint32": 1068827891,
+                "column": 2,
+                "value": 1.4142135381698608
+              },
+              {
+                "bits_uint32": 1068827891,
+                "column": 3,
+                "value": 1.4142135381698608
+              }
+            ],
+            "shape": [
+              8,
+              8
+            ]
+          },
+          "precomputed_graph": {
+            "data_bits_uint32": [
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216
+            ],
+            "dtype": "float32",
+            "format": "csr",
+            "indices": [
+              1,
+              2,
+              3,
+              4,
+              5,
+              0,
+              2,
+              3,
+              4,
+              5,
+              0,
+              1,
+              3,
+              6,
+              7,
+              0,
+              1,
+              2,
+              6,
+              7,
+              0,
+              1,
+              5,
+              0,
+              1,
+              4,
+              2,
+              3,
+              7,
+              2,
+              3,
+              6
+            ],
+            "indptr": [
+              0,
+              5,
+              10,
+              15,
+              20,
+              23,
+              26,
+              29,
+              32
+            ],
+            "shape": [
+              8,
+              8
+            ],
+            "type": "csr_matrix"
+          }
+        }
+      },
+      "input": {
+        "dtype": "float32",
+        "shape": [
+          8,
+          2
+        ],
+        "values": [
+          [
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0
+          ],
+          [
+            1.0,
+            0.0
+          ],
+          [
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0
+          ],
+          [
+            0.0,
+            1.0
+          ],
+          [
+            1.0,
+            1.0
+          ],
+          [
+            1.0,
+            1.0
+          ]
+        ]
+      }
+    }
+  },
+  "diagnostic_note": "nextafter cases alter only (1,5) and (5,1) to localize sensitivity; they are not production inputs or a hardcoding recommendation",
+  "distance_methods": {
+    "f32_pure": "float32 subtraction, products, accumulation, sqrt",
+    "f64_ordered": "ordered float64 dx*dx + dy*dy, sqrt, then float32 cast",
+    "sklearn_euclidean_distances": "public sklearn.metrics.pairwise.euclidean_distances, then float32 cast"
+  },
+  "environment": {
+    "machine": "AMD64",
+    "packages": {
+      "llvmlite": "0.50.0",
+      "numba": "0.68.1",
+      "numpy": "2.5.5",
+      "pynndescent": "0.7.0",
+      "scikit-learn": "1.9.1",
+      "scipy": "1.18.1",
+      "umap-learn": "0.6.0"
+    },
+    "platform": "Windows",
+    "python": "CPython 3.13.12"
+  },
+  "operation": "public UMAP graph-mode Euclidean/precomputed parity"
+}

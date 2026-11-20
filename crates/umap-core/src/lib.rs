@@ -6,6 +6,7 @@ pub mod initialization;
 pub mod layout;
 pub mod neighbors;
 pub mod rng;
+pub mod sampling;
 
 /// Version of the Rust implementation.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

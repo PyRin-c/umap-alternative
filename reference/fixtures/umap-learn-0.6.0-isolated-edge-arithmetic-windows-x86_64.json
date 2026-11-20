@@ -1,0 +1,849 @@
+{
+  "comparisons": {
+    "a1-b1-lr1_vs_a1-b1-lr325": {
+      "first_embedding_bit_difference_by_checkpoint": [
+        {
+          "difference": {},
+          "n_epochs": 0
+        },
+        {
+          "difference": {
+            "column": 0,
+            "left_uint32": 1066897512,
+            "right_uint32": 1065642742,
+            "row": 0
+          },
+          "n_epochs": 2
+        },
+        {
+          "difference": {
+            "column": 0,
+            "left_uint32": 1067153115,
+            "right_uint32": 1074135825,
+            "row": 0
+          },
+          "n_epochs": 3
+        }
+      ],
+      "graph_bits_match_at_all_checkpoints": true
+    },
+    "a1-b1-lr1_vs_a17-b09-lr1": {
+      "first_embedding_bit_difference_by_checkpoint": [
+        {
+          "difference": {},
+          "n_epochs": 0
+        },
+        {
+          "difference": {
+            "column": 0,
+            "left_uint32": 1066897512,
+            "right_uint32": 1070745131,
+            "row": 0
+          },
+          "n_epochs": 2
+        },
+        {
+          "difference": {
+            "column": 0,
+            "left_uint32": 1067153115,
+            "right_uint32": 1058177819,
+            "row": 0
+          },
+          "n_epochs": 3
+        }
+      ],
+      "graph_bits_match_at_all_checkpoints": true
+    }
+  },
+  "environment": {
+    "machine": "AMD64",
+    "packages": {
+      "llvmlite": "0.50.0",
+      "numba": "0.68.1",
+      "numpy": "2.5.5",
+      "pynndescent": "0.7.0",
+      "scikit-learn": "1.9.1",
+      "scipy": "1.18.1",
+      "umap-learn": "0.6.0"
+    },
+    "platform": "Windows",
+    "platform_release": "11",
+    "platform_version": "10.0.26200",
+    "python": "CPython 3.13.12"
+  },
+  "input": {
+    "distance_matrix": {
+      "bits_uint32": [
+        [
+          0,
+          1067450368,
+          1120403456,
+          1120403456
+        ],
+        [
+          1067450368,
+          0,
+          1120403456,
+          1120403456
+        ],
+        [
+          1120403456,
+          1120403456,
+          0,
+          1075838976
+        ],
+        [
+          1120403456,
+          1120403456,
+          1075838976,
+          0
+        ]
+      ],
+      "dtype": "float32",
+      "shape": [
+        4,
+        4
+      ],
+      "values": [
+        [
+          0.0,
+          1.25,
+          100.0,
+          100.0
+        ],
+        [
+          1.25,
+          0.0,
+          100.0,
+          100.0
+        ],
+        [
+          100.0,
+          100.0,
+          0.0,
+          2.5
+        ],
+        [
+          100.0,
+          100.0,
+          2.5,
+          0.0
+        ]
+      ]
+    },
+    "init": {
+      "bits_uint32": [
+        [
+          3326142134,
+          3131127796
+        ],
+        [
+          1040234368,
+          1067320345
+        ],
+        [
+          1176130092,
+          1120403469
+        ],
+        [
+          1196699927,
+          1148846091
+        ]
+      ],
+      "dtype": "float32",
+      "shape": [
+        4,
+        2
+      ],
+      "values": [
+        [
+          -12345.678,
+          -0.00123
+        ],
+        [
+          0.1257,
+          1.2345
+        ],
+        [
+          9876.543,
+          100.0001
+        ],
+        [
+          54321.09,
+          1000.0007
+        ]
+      ]
+    }
+  },
+  "operation": "public UMAP.fit_transform isolated-edge attraction checkpoints",
+  "parameters": {
+    "checkpoints_n_epochs": [
+      0,
+      2,
+      3
+    ],
+    "compatibility_layout": true,
+    "init": "explicit_float32_array",
+    "metric": "precomputed",
+    "min_dist": 0.1,
+    "n_components": 2,
+    "n_jobs": 1,
+    "n_neighbors": 2,
+    "negative_sample_rate": 1,
+    "random_state": 42,
+    "repulsion_strength": 0.0,
+    "spread": 1.0,
+    "transform_mode": "embedding"
+  },
+  "protocol": {
+    "fit_transform_call": "UMAP(**parameters).fit_transform(float32 precomputed distance matrix)",
+    "fresh_call_per_checkpoint": true,
+    "graph_interpretation": "n_neighbors=2 emits exactly 0<->1 and 2<->3 after omitting self entries",
+    "n_epochs_interpretation": "total epochs for that fresh call, not a resumable checkpoint",
+    "normalization_interpretation": "compatibility_layout=True normalizes the explicit float32 init independently per coordinate to [0, 10] at n_epochs=0",
+    "precomputed_cross_distance_note": "finite 100.0 cross-pair entries are required because public precomputed validation rejects infinity",
+    "public_api_only": true,
+    "repeat_call_per_checkpoint": true
+  },
+  "scenarios": {
+    "a1-b1-lr1": {
+      "checkpoints": [
+        {
+          "embedding": {
+            "bits_uint32": [
+              [
+                0,
+                0
+              ],
+              [
+                1072499201,
+                1011512878
+              ],
+              [
+                1079334207,
+                1065353312
+              ],
+              [
+                1092616192,
+                1092616192
+              ]
+            ],
+            "dtype": "float32",
+            "shape": [
+              4,
+              2
+            ]
+          },
+          "graph": {
+            "data_bits_uint32": [
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216
+            ],
+            "dtype": "float32",
+            "format": "csr",
+            "indices": [
+              1,
+              0,
+              3,
+              2
+            ],
+            "indptr": [
+              0,
+              1,
+              2,
+              3,
+              4
+            ],
+            "shape": [
+              4,
+              4
+            ]
+          },
+          "n_epochs": 0,
+          "repeat_bits_equal": true,
+          "warnings_first_run": [
+            {
+              "class": "UserWarning",
+              "message": "using precomputed metric; inverse_transform will be unavailable"
+            }
+          ],
+          "warnings_second_run": [
+            {
+              "class": "UserWarning",
+              "message": "using precomputed metric; inverse_transform will be unavailable"
+            }
+          ]
+        },
+        {
+          "embedding": {
+            "bits_uint32": [
+              [
+                1066897512,
+                1006728320
+              ],
+              [
+                1059779377,
+                999424860
+              ],
+              [
+                1080232980,
+                1067779996
+              ],
+              [
+                1092391498,
+                1092312857
+              ]
+            ],
+            "dtype": "float32",
+            "shape": [
+              4,
+              2
+            ]
+          },
+          "graph": {
+            "data_bits_uint32": [
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216
+            ],
+            "dtype": "float32",
+            "format": "csr",
+            "indices": [
+              1,
+              0,
+              3,
+              2
+            ],
+            "indptr": [
+              0,
+              1,
+              2,
+              3,
+              4
+            ],
+            "shape": [
+              4,
+              4
+            ]
+          },
+          "n_epochs": 2,
+          "repeat_bits_equal": true,
+          "warnings_first_run": [
+            {
+              "class": "UserWarning",
+              "message": "using precomputed metric; inverse_transform will be unavailable"
+            }
+          ],
+          "warnings_second_run": [
+            {
+              "class": "UserWarning",
+              "message": "using precomputed metric; inverse_transform will be unavailable"
+            }
+          ]
+        },
+        {
+          "embedding": {
+            "bits_uint32": [
+              [
+                1067153115,
+                1006946637
+              ],
+              [
+                1059268172,
+                998988226
+              ],
+              [
+                1080870111,
+                1069500246
+              ],
+              [
+                1092232215,
+                1092097825
+              ]
+            ],
+            "dtype": "float32",
+            "shape": [
+              4,
+              2
+            ]
+          },
+          "graph": {
+            "data_bits_uint32": [
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216
+            ],
+            "dtype": "float32",
+            "format": "csr",
+            "indices": [
+              1,
+              0,
+              3,
+              2
+            ],
+            "indptr": [
+              0,
+              1,
+              2,
+              3,
+              4
+            ],
+            "shape": [
+              4,
+              4
+            ]
+          },
+          "n_epochs": 3,
+          "repeat_bits_equal": true,
+          "warnings_first_run": [
+            {
+              "class": "UserWarning",
+              "message": "using precomputed metric; inverse_transform will be unavailable"
+            }
+          ],
+          "warnings_second_run": [
+            {
+              "class": "UserWarning",
+              "message": "using precomputed metric; inverse_transform will be unavailable"
+            }
+          ]
+        }
+      ],
+      "settings": {
+        "a": 1.0,
+        "b": 1.0,
+        "learning_rate": 1.0
+      }
+    },
+    "a1-b1-lr325": {
+      "checkpoints": [
+        {
+          "embedding": {
+            "bits_uint32": [
+              [
+                0,
+                0
+              ],
+              [
+                1072499201,
+                1011512878
+              ],
+              [
+                1079334207,
+                1065353312
+              ],
+              [
+                1092616192,
+                1092616192
+              ]
+            ],
+            "dtype": "float32",
+            "shape": [
+              4,
+              2
+            ]
+          },
+          "graph": {
+            "data_bits_uint32": [
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216
+            ],
+            "dtype": "float32",
+            "format": "csr",
+            "indices": [
+              1,
+              0,
+              3,
+              2
+            ],
+            "indptr": [
+              0,
+              1,
+              2,
+              3,
+              4
+            ],
+            "shape": [
+              4,
+              4
+            ]
+          },
+          "n_epochs": 0,
+          "repeat_bits_equal": true,
+          "warnings_first_run": [
+            {
+              "class": "UserWarning",
+              "message": "using precomputed metric; inverse_transform will be unavailable"
+            }
+          ],
+          "warnings_second_run": [
+            {
+              "class": "UserWarning",
+              "message": "using precomputed metric; inverse_transform will be unavailable"
+            }
+          ]
+        },
+        {
+          "embedding": {
+            "bits_uint32": [
+              [
+                1065642742,
+                1004680212
+              ],
+              [
+                1062288920,
+                1001568329
+              ],
+              [
+                1082250565,
+                1073551819
+              ],
+              [
+                1091857070,
+                1091591378
+              ]
+            ],
+            "dtype": "float32",
+            "shape": [
+              4,
+              2
+            ]
+          },
+          "graph": {
+            "data_bits_uint32": [
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216
+            ],
+            "dtype": "float32",
+            "format": "csr",
+            "indices": [
+              1,
+              0,
+              3,
+              2
+            ],
+            "indptr": [
+              0,
+              1,
+              2,
+              3,
+              4
+            ],
+            "shape": [
+              4,
+              4
+            ]
+          },
+          "n_epochs": 2,
+          "repeat_bits_equal": true,
+          "warnings_first_run": [
+            {
+              "class": "UserWarning",
+              "message": "using precomputed metric; inverse_transform will be unavailable"
+            }
+          ],
+          "warnings_second_run": [
+            {
+              "class": "UserWarning",
+              "message": "using precomputed metric; inverse_transform will be unavailable"
+            }
+          ]
+        },
+        {
+          "embedding": {
+            "bits_uint32": [
+              [
+                1074135825,
+                1013247288
+              ],
+              [
+                3195527426,
+                3134437450
+              ],
+              [
+                1083542561,
+                1077135202
+              ],
+              [
+                1091211072,
+                1090719283
+              ]
+            ],
+            "dtype": "float32",
+            "shape": [
+              4,
+              2
+            ]
+          },
+          "graph": {
+            "data_bits_uint32": [
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216
+            ],
+            "dtype": "float32",
+            "format": "csr",
+            "indices": [
+              1,
+              0,
+              3,
+              2
+            ],
+            "indptr": [
+              0,
+              1,
+              2,
+              3,
+              4
+            ],
+            "shape": [
+              4,
+              4
+            ]
+          },
+          "n_epochs": 3,
+          "repeat_bits_equal": true,
+          "warnings_first_run": [
+            {
+              "class": "UserWarning",
+              "message": "using precomputed metric; inverse_transform will be unavailable"
+            }
+          ],
+          "warnings_second_run": [
+            {
+              "class": "UserWarning",
+              "message": "using precomputed metric; inverse_transform will be unavailable"
+            }
+          ]
+        }
+      ],
+      "settings": {
+        "a": 1.0,
+        "b": 1.0,
+        "learning_rate": 3.25
+      }
+    },
+    "a17-b09-lr1": {
+      "checkpoints": [
+        {
+          "embedding": {
+            "bits_uint32": [
+              [
+                0,
+                0
+              ],
+              [
+                1072499201,
+                1011512878
+              ],
+              [
+                1079334207,
+                1065353312
+              ],
+              [
+                1092616192,
+                1092616192
+              ]
+            ],
+            "dtype": "float32",
+            "shape": [
+              4,
+              2
+            ]
+          },
+          "graph": {
+            "data_bits_uint32": [
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216
+            ],
+            "dtype": "float32",
+            "format": "csr",
+            "indices": [
+              1,
+              0,
+              3,
+              2
+            ],
+            "indptr": [
+              0,
+              1,
+              2,
+              3,
+              4
+            ],
+            "shape": [
+              4,
+              4
+            ]
+          },
+          "n_epochs": 0,
+          "repeat_bits_equal": true,
+          "warnings_first_run": [
+            {
+              "class": "UserWarning",
+              "message": "using precomputed metric; inverse_transform will be unavailable"
+            }
+          ],
+          "warnings_second_run": [
+            {
+              "class": "UserWarning",
+              "message": "using precomputed metric; inverse_transform will be unavailable"
+            }
+          ]
+        },
+        {
+          "embedding": {
+            "bits_uint32": [
+              [
+                1070745131,
+                1010014677
+              ],
+              [
+                1045831342,
+                985064132
+              ],
+              [
+                1080142116,
+                1067534662
+              ],
+              [
+                1092414215,
+                1092343524
+              ]
+            ],
+            "dtype": "float32",
+            "shape": [
+              4,
+              2
+            ]
+          },
+          "graph": {
+            "data_bits_uint32": [
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216
+            ],
+            "dtype": "float32",
+            "format": "csr",
+            "indices": [
+              1,
+              0,
+              3,
+              2
+            ],
+            "indptr": [
+              0,
+              1,
+              2,
+              3,
+              4
+            ],
+            "shape": [
+              4,
+              4
+            ]
+          },
+          "n_epochs": 2,
+          "repeat_bits_equal": true,
+          "warnings_first_run": [
+            {
+              "class": "UserWarning",
+              "message": "using precomputed metric; inverse_transform will be unavailable"
+            }
+          ],
+          "warnings_second_run": [
+            {
+              "class": "UserWarning",
+              "message": "using precomputed metric; inverse_transform will be unavailable"
+            }
+          ]
+        },
+        {
+          "embedding": {
+            "bits_uint32": [
+              [
+                1058177819,
+                997869497
+              ],
+              [
+                1067698291,
+                1007412287
+              ],
+              [
+                1080711183,
+                1069071139
+              ],
+              [
+                1092271948,
+                1092151464
+              ]
+            ],
+            "dtype": "float32",
+            "shape": [
+              4,
+              2
+            ]
+          },
+          "graph": {
+            "data_bits_uint32": [
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216
+            ],
+            "dtype": "float32",
+            "format": "csr",
+            "indices": [
+              1,
+              0,
+              3,
+              2
+            ],
+            "indptr": [
+              0,
+              1,
+              2,
+              3,
+              4
+            ],
+            "shape": [
+              4,
+              4
+            ]
+          },
+          "n_epochs": 3,
+          "repeat_bits_equal": true,
+          "warnings_first_run": [
+            {
+              "class": "UserWarning",
+              "message": "using precomputed metric; inverse_transform will be unavailable"
+            }
+          ],
+          "warnings_second_run": [
+            {
+              "class": "UserWarning",
+              "message": "using precomputed metric; inverse_transform will be unavailable"
+            }
+          ]
+        }
+      ],
+      "settings": {
+        "a": 1.7,
+        "b": 0.9,
+        "learning_rate": 1.0
+      }
+    }
+  }
+}

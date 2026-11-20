@@ -271,7 +271,7 @@ def test_modern_optimizer_cannot_use_seeded_compatibility_path(optimizer):
     [
         ({"compatibility_layout": False}, NotImplementedError, "compatibility_layout=False"),
         ({"optimizer": "sgd"}, ValueError, "Unknown optimizer"),
-        ({"init": "spectral"}, NotImplementedError, "spectral"),
+        ({"init": "tswspectral"}, NotImplementedError, "tswspectral"),
         ({"init": EXPLICIT.tolist()}, ValueError, "string or ndarray"),
         ({"init": EXPLICIT[[0, 1, 1, 3, 4, 5, 6, 7]]}, NotImplementedError, "repeated rows"),
         ({"n_epochs": [0, 2]}, NotImplementedError, "scalar n_epochs"),

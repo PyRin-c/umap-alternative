@@ -12,6 +12,7 @@ from sklearn.utils.validation import check_array
 
 from . import _native
 from ._curve import _finite_float, _resolve_curve_params
+from ._spectral import _spectral_initialization
 
 
 _METRIC_ALIASES = {
@@ -47,6 +48,38 @@ _COMPATIBILITY_WARNING = (
     "Set compatibility_layout=True to keep the current behavior and silence this "
     "warning, or compatibility_layout=False (or optimizer='adam') to adopt the new behavior now."
 )
+
+
+def _default_epochs(n_rows):
+    return 500 if n_rows <= 10_000 else 200
+
+
+def _fit_spectral_embedding(graph, rng, *, n_epochs, n_components, **layout_options):
+    # Public graph_ retains the CSR entries whose memberships were zeroed.
+    # Fits of at most ten epochs use the default budget for this cutoff.
+    sampling_epochs = n_epochs if n_epochs > 10 else _default_epochs(graph.shape[0])
+    unsampled = graph.data < np.float32(graph.data.max() / sampling_epochs)
+    spectral_graph = graph
+    if np.any(unsampled):
+        graph.data[unsampled] = 0
+        # SciPy's connectivity check treats stored zeros as edges.
+        spectral_graph = graph.copy()
+        spectral_graph.eliminate_zeros()
+
+    initial = _spectral_initialization(spectral_graph, n_components, rng)
+    algorithm, words, cursor, has_gaussian, cached_gaussian = rng.get_state()
+    shape, coordinates, (words, cursor) = _native._fit_graph_embedding_with_rng(
+        (graph.shape, graph.indptr.tolist(), graph.indices.tolist(), graph.data.tolist()),
+        initial.ravel().tolist(),
+        (words.tolist(), cursor),
+        n_epochs=n_epochs,
+        n_components=n_components,
+        **layout_options,
+    )
+    rng.set_state(
+        (algorithm, np.asarray(words, dtype=np.uint32), cursor, has_gaussian, cached_gaussian)
+    )
+    return np.asarray(coordinates, dtype=np.float32).reshape(shape)
 
 
 def _check_sparse_indices(indices, n_entries, axis_size):
@@ -126,12 +159,14 @@ class UMAP(BaseEstimator, TransformerMixin):
     diagonal entry, which can be excluded when there are ties at zero distance.
 
     For an embedding, use dense features, an integer ``random_state`` in
-    ``[0, 2**32 - 1]``, and ``compatibility_layout=True``. ``init`` can be
-    ``"random"`` or a finite NumPy array of shape ``(n_samples, n_components)``
-    with distinct rows and nonconstant columns. Fitting exposes ``embedding_``
-    and ``graph_``. A singleton has a zero embedding and no graph. Spectral
-    initialization, supervised embeddings, modern optimizers, out-of-sample
-    embedding transforms, and inverse transforms raise explicit errors.
+    ``[0, 2**32 - 1]``, and ``compatibility_layout=True``. The default
+    ``init="spectral"`` requires a connected sampled graph and fewer
+    components than samples. ``init`` can also be ``"random"`` or a finite
+    NumPy array of shape ``(n_samples, n_components)`` with distinct rows
+    and nonconstant columns. Fitting exposes ``embedding_`` and ``graph_``.
+    A singleton has a zero embedding and no graph. Supervised embeddings,
+    modern optimizers, out-of-sample embedding transforms, and inverse
+    transforms raise explicit errors.
     """
 
     def __init__(
@@ -236,7 +271,11 @@ class UMAP(BaseEstimator, TransformerMixin):
             if n_rows != n_features:
                 raise ValueError("precomputed distances must be a square matrix")
             warnings.warn(_PRECOMPUTED_WARNING, UserWarning, stacklevel=2)
-        embedding_options = self._embedding_options(n_rows) if embedding_mode else None
+        spectral = False
+        if embedding_mode:
+            embedding_options = self._embedding_options(n_rows)
+            initial_coordinates = self._embedding_init(n_rows, embedding_options["n_components"])
+            spectral = isinstance(self.init, str) and self.init == "spectral"
 
         # Singletons have no graph. Embedding mode exposes the public zero layout.
         if n_rows == 1:
@@ -270,9 +309,9 @@ class UMAP(BaseEstimator, TransformerMixin):
         else:
             values = X_checked.ravel(order="C").tolist()
             dense_args = (values, n_rows, n_features, n_neighbors, metric)
-            if embedding_mode:
+            if embedding_mode and not spectral:
                 components, embedding_shape, coordinates = _native._fit_dense_embedding(
-                    *dense_args, **embedding_options
+                    *dense_args, initial_coordinates=initial_coordinates, **embedding_options
                 )
                 embedding = np.asarray(coordinates, dtype=np.float32).reshape(embedding_shape)
             elif y is None:
@@ -304,6 +343,9 @@ class UMAP(BaseEstimator, TransformerMixin):
                 raise ValueError(
                     "zero-size array to reduction operation maximum which has no identity"
                 )
+        if spectral:
+            rng = np.random.RandomState(embedding_options.pop("seed"))
+            embedding = _fit_spectral_embedding(graph, rng, **embedding_options)
         if embedding is not None:
             embedding[np.diff(graph.indptr) == 0] = np.nan
         return self._store_fit(n_features, transform_fit, graph, n_neighbors, embedding)
@@ -438,7 +480,7 @@ class UMAP(BaseEstimator, TransformerMixin):
 
         n_epochs = self.n_epochs
         if n_epochs is None:
-            n_epochs = 500 if n_rows <= 10_000 else 200
+            n_epochs = _default_epochs(n_rows)
         elif isinstance(n_epochs, (list, tuple)):
             raise NotImplementedError("embedding supports a scalar n_epochs")
         elif (
@@ -486,16 +528,13 @@ class UMAP(BaseEstimator, TransformerMixin):
             learning_rate=learning_rate,
             repulsion_strength=repulsion_strength,
             negative_sample_rate=negative_sample_rate,
-            initial_coordinates=self._embedding_init(n_rows, n_components),
         )
 
     def _embedding_init(self, n_rows, n_components):
         if isinstance(self.init, str):
-            if self.init == "random" or (
-                n_rows == 1 and self.init in ("auto", "spectral")
-            ):
+            if self.init in ("random", "spectral") or (n_rows == 1 and self.init == "auto"):
                 return None
-            if self.init in ("auto", "pca", "tswspectral", "spectral", "recursive"):
+            if self.init in ("auto", "pca", "tswspectral", "recursive"):
                 raise NotImplementedError(f"init={self.init!r} is not implemented for embedding")
             raise ValueError(f"Unknown embedding init {self.init!r}")
         if not isinstance(self.init, np.ndarray):

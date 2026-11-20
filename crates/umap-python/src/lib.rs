@@ -3,17 +3,21 @@ use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
 use umap_core::embedding::{
-    DenseEmbedding, DenseEmbeddingConfig, DenseEmbeddingInit, fit_dense_embedding_seeded,
+    DenseEmbedding, DenseEmbeddingConfig, DenseEmbeddingInit, EmbeddingLayoutConfig,
+    fit_dense_embedding_seeded, fit_graph_embedding_with_rng,
 };
 use umap_core::fit::{fit_dense_categorical_graph, fit_dense_graph, fit_precomputed_graph};
 use umap_core::fuzzy_graph::CsrGraph;
 use umap_core::neighbors::DistanceMetric;
+use umap_core::rng::Mt19937;
 use umap_core::sparse::{SparseDistanceMetric, fit_sparse_graph};
 use umap_core::transform::{CooGraph, transform_dense_graph};
 
 type CsrComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
 type CooComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
 type EmbeddingComponents = (CsrComponents, (usize, usize), Vec<f32>);
+type RngState = (Vec<u32>, usize);
+type GraphEmbeddingComponents = ((usize, usize), Vec<f32>, RngState);
 
 fn csr_components(graph: CsrGraph) -> CsrComponents {
     (
@@ -125,6 +129,51 @@ fn _fit_dense_embedding(
     Ok((csr_components(graph), shape, coordinates))
 }
 
+/// Optimize raw coordinates with the same graph and MT19937 stream used for initialization.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn _fit_graph_embedding_with_rng(
+    py: Python<'_>,
+    graph: CsrComponents,
+    initial_coordinates: Vec<f32>,
+    rng_state: RngState,
+    n_components: usize,
+    a: f64,
+    b: f64,
+    learning_rate: f64,
+    n_epochs: usize,
+    repulsion_strength: f64,
+    negative_sample_rate: f64,
+) -> PyResult<GraphEmbeddingComponents> {
+    let ((n_rows, n_cols), indptr, indices, data) = graph;
+    let graph = CsrGraph {
+        n_rows,
+        n_cols,
+        indptr,
+        indices,
+        data,
+    };
+    let (words, cursor) = rng_state;
+    let mut rng = Mt19937::from_state(&words, cursor)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let config = EmbeddingLayoutConfig {
+        n_components,
+        a,
+        b,
+        learning_rate,
+        n_epochs,
+        repulsion_strength,
+        negative_sample_rate,
+    };
+    let DenseEmbedding {
+        coordinates, shape, ..
+    } = py
+        .detach(|| fit_graph_embedding_with_rng(graph, &initial_coordinates, &config, &mut rng))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let (words, cursor) = rng.state();
+    Ok((shape, coordinates, (words.to_vec(), cursor)))
+}
+
 /// Fit a fuzzy graph from dense features and one categorical label per row.
 #[pyfunction]
 fn _fit_dense_categorical_graph(
@@ -187,6 +236,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_fit_dense_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_sparse_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_embedding, module)?)?;
+    module.add_function(wrap_pyfunction!(_fit_graph_embedding_with_rng, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_categorical_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_precomputed_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_transform_dense_graph, module)?)

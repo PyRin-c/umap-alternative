@@ -160,3 +160,28 @@ sampling changes, and fitted geometry settings. An additional spectral case
 matched 16 fitted and 10 optimized coordinate bits on both platforms. The two
 wheels reproduced the equal-distance COO and Manhattan differences above with
 the same per-coordinate agreement and maximum absolute errors.
+
+## Held-out neighbor search timings
+
+The held-out graph and embedding paths share partial selection with training
+search. Each scan ranks distances by float32 total order and uses the training
+index to break ties. It then sorts the requested prefix. A request for every
+training row uses the full sort.
+
+A Windows x86-64 Rust release build called `transform_dense_graph` directly
+with Euclidean distance. An LCG initialized at 42 generated eight float32
+features per row by dividing each updated state's upper 16 bits by 65536.
+It used the recurrence `state = 1664525 * state + 1013904223` modulo
+`2**32`. The timings are medians of five interleaved process runs per
+version, each with three warm-up calls followed by eleven timed calls.
+
+| Training rows | Query rows | Neighbors | Full sort | Partial selection |
+| --- | --- | --- | --- | --- |
+| 1,024 | 256 | 15 | 4.522 ms | 1.286 ms |
+| 3,072 | 256 | 15 | 13.803 ms | 3.280 ms |
+| 512 | 128 | 512 | 5.666 ms | 5.556 ms |
+
+The ordered row indices, column indices, and weight bits produced identical
+fingerprints for each input. The graph and embedding fixtures check the
+ordered outputs directly, and the cutoff regression covers equal distances
+and finite inputs whose Euclidean distances overflow.

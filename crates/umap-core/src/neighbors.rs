@@ -298,7 +298,7 @@ pub(crate) fn collect_neighbors(
         for query_index in 0..n_rows {
             let mut candidates = Vec::with_capacity(n_rows);
             fill_candidates(query_index, &mut candidates);
-            candidates.sort_unstable_by(compare_neighbors);
+            sort_closest_neighbors(&mut candidates, k);
             result.push(candidates);
         }
     } else {
@@ -306,12 +306,21 @@ pub(crate) fn collect_neighbors(
         for query_index in 0..n_rows {
             candidates.clear();
             fill_candidates(query_index, &mut candidates);
-            let (closest, _, _) = candidates.select_nth_unstable_by(k, compare_neighbors);
-            closest.sort_unstable_by(compare_neighbors);
-            result.push(closest.to_vec());
+            result.push(sort_closest_neighbors(&mut candidates, k).to_vec());
         }
     }
     result
+}
+
+pub(crate) fn sort_closest_neighbors(candidates: &mut [Neighbor], k: usize) -> &[Neighbor] {
+    let closest = if k < candidates.len() {
+        let (prefix, _, _) = candidates.select_nth_unstable_by(k, compare_neighbors);
+        prefix
+    } else {
+        candidates
+    };
+    closest.sort_unstable_by(compare_neighbors);
+    closest
 }
 
 fn compare_neighbors(left: &Neighbor, right: &Neighbor) -> Ordering {

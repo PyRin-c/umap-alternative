@@ -7,7 +7,7 @@ use crate::layout::{
     attractive_update_fixed_tail, negative_update_fixed_tail, validate_parameters,
     validate_repulsion_strength,
 };
-use crate::neighbors::{DistanceMetric, KnnError, Neighbor};
+use crate::neighbors::{DistanceMetric, KnnError, Neighbor, sort_closest_neighbors};
 use crate::optimize::OptimizeError;
 use crate::rng::{Mt19937, SerialNegativeSampler};
 use crate::sampling::EdgeSamplingCursor;
@@ -620,12 +620,7 @@ fn transform_dense_graph_with_cutoff(
                 distance: metric.distance(query, candidate),
             },
         ));
-        candidates.sort_unstable_by(|left, right| {
-            left.distance
-                .total_cmp(&right.distance)
-                .then_with(|| left.index.cmp(&right.index))
-        });
-        for neighbor in &candidates[..k] {
+        for neighbor in sort_closest_neighbors(&mut candidates, k) {
             if !neighbor.distance.is_finite() {
                 return Err(DenseGraphTransformError::NonFiniteDistance {
                     query: query_index,

@@ -169,6 +169,36 @@ fn empty_queries_produce_an_empty_rectangular_graph() {
 }
 
 #[test]
+fn held_out_partial_selection_orders_cutoff_ties_and_ignores_unselected_overflow() {
+    let training = [f32::MAX, -1.0, 1.0, -0.0, 2.0, -2.0, -f32::MAX, 0.0, 1.0];
+    let order = [3, 7, 1, 2, 8, 4, 5];
+    let transform = |k| {
+        transform_dense_graph(
+            &training,
+            training.len(),
+            &[0.0],
+            1,
+            1,
+            k,
+            DistanceMetric::Euclidean,
+        )
+    };
+    for k in 1..=order.len() {
+        let graph = transform(k).expect("selected distances are finite");
+        assert_eq!(graph.col, order[..k]);
+        assert_eq!(graph.row, vec![0; k]);
+    }
+    assert_eq!(
+        transform(order.len() + 1),
+        Err(DenseGraphTransformError::NonFiniteDistance {
+            query: 0,
+            training: 0,
+            distance: f32::INFINITY,
+        })
+    );
+}
+
+#[test]
 fn validation_identifies_invalid_input_and_distance_overflow() {
     let metric = DistanceMetric::Euclidean;
     assert_eq!(

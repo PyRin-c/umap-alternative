@@ -1,11 +1,13 @@
-//! Deterministic MT19937 draws used by seeded UMAP initialization.
+//! Deterministic RNGs for seeded initialization and serial negative sampling.
 //!
 //! This is the original 32-bit Mersenne Twister recurrence (period
 //! `2^19937 - 1`) with the reference integer seeding procedure.  It is kept
 //! deliberately small: callers get the raw `u32` stream and the 53-bit
-//! double-precision construction used by NumPy's legacy `RandomState`, but no
-//! distribution or range helpers whose rounding would need a separate
-//! compatibility contract.
+//! double-precision construction used by NumPy's legacy `RandomState`.
+//! The serial layout sampler seeds its per-head streams from the same caller
+//! RNG after initialization.
+
+use std::fmt;
 
 const STATE_WORDS: usize = 624;
 const PERIOD_OFFSET: usize = 397;
@@ -91,6 +93,162 @@ impl Mt19937 {
         self.index = 0;
     }
 }
+
+/// Invalid initial layout for a serial negative sampler.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NegativeSamplerError {
+    /// The dimensions are empty or do not describe the supplied layout.
+    InvalidShape {
+        /// Number of vertices.
+        n_rows: usize,
+        /// Number of coordinates per vertex.
+        n_components: usize,
+        /// Number of row-major values supplied.
+        values: usize,
+    },
+    /// A head's first coordinate cannot seed its stream.
+    NonFiniteHeadCoordinate {
+        /// Vertex whose first coordinate is invalid.
+        head: usize,
+        /// Invalid coordinate.
+        value: f32,
+    },
+}
+
+impl fmt::Display for NegativeSamplerError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidShape {
+                n_rows,
+                n_components,
+                values,
+            } => write!(
+                formatter,
+                "negative sampler layout shape {n_rows}x{n_components} is invalid for {values} values"
+            ),
+            Self::NonFiniteHeadCoordinate { head, value } => {
+                write!(
+                    formatter,
+                    "negative sampler head {head} has non-finite coordinate {value}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for NegativeSamplerError {}
+
+/// Per-head negative vertex streams for the serial compatibility layout.
+///
+/// Each stream is seeded once from its head's first normalized coordinate and
+/// the caller RNG. A draw advances only the requested head. Keep this sampler
+/// for the entire optimization, including across edges and epochs.
+#[derive(Clone, Debug)]
+pub struct SerialNegativeSampler {
+    heads: Vec<[i64; 3]>,
+}
+
+impl SerialNegativeSampler {
+    /// Seed the sampler from the caller RNG and the initial row-major layout.
+    ///
+    /// Random initialization should consume draws from `caller_rng` before
+    /// this call. For explicit initialization, pass the normalized layout with
+    /// the caller RNG at its current position. An invalid shape or non-finite
+    /// first coordinate is reported before drawing from the caller RNG.
+    pub fn new(
+        caller_rng: &mut Mt19937,
+        normalized_layout: &[f32],
+        n_rows: usize,
+        n_components: usize,
+    ) -> Result<Self, NegativeSamplerError> {
+        Self::from_raw_words(normalized_layout, n_rows, n_components, || {
+            caller_rng.next_u32()
+        })
+    }
+
+    /// Draw a vertex from the full input layout for `head`.
+    ///
+    /// Returns `None` for an out-of-range head. A valid draw can select any
+    /// vertex, including `head` itself.
+    pub fn sample(&mut self, head: usize) -> Option<usize> {
+        // The validated input slice held at least one f32 per vertex, so the
+        // vertex count fits in i64 on Rust's supported pointer widths.
+        let n_vertices = self.heads.len() as i64;
+        let word = self.next_word(head)?;
+        Some(i64::from(word).rem_euclid(n_vertices) as usize)
+    }
+
+    fn from_raw_words(
+        normalized_layout: &[f32],
+        n_rows: usize,
+        n_components: usize,
+        next_raw_word: impl FnMut() -> u32,
+    ) -> Result<Self, NegativeSamplerError> {
+        if n_rows == 0
+            || n_components == 0
+            || n_rows.checked_mul(n_components) != Some(normalized_layout.len())
+        {
+            return Err(NegativeSamplerError::InvalidShape {
+                n_rows,
+                n_components,
+                values: normalized_layout.len(),
+            });
+        }
+
+        let rows = normalized_layout.chunks_exact(n_components);
+        for (head, row) in rows.clone().enumerate() {
+            if !row[0].is_finite() {
+                return Err(NegativeSamplerError::NonFiniteHeadCoordinate {
+                    head,
+                    value: row[0],
+                });
+            }
+        }
+
+        let seed = draw_negative_seed(next_raw_word);
+        let heads = rows
+            .map(|row| {
+                // Promote the coordinate before reinterpreting its binary64 bits.
+                let coordinate_bits = f64::from(row[0]).to_bits() as i64;
+                seed.map(|lane| coordinate_bits.wrapping_add(lane))
+            })
+            .collect();
+        Ok(Self { heads })
+    }
+
+    fn next_word(&mut self, head: usize) -> Option<i32> {
+        let lanes = self.heads.get_mut(head)?;
+        lanes[0] = advance_lane(lanes[0], 0xffff_fffe, 13, 12, 19);
+        lanes[1] = advance_lane(lanes[1], 0xffff_fff8, 2, 4, 25);
+        lanes[2] = advance_lane(lanes[2], 0xffff_fff0, 3, 17, 11);
+        // Interpret the low 32 bits of the XOR as a signed word.
+        Some((lanes[0] ^ lanes[1] ^ lanes[2]) as i32)
+    }
+}
+
+fn draw_negative_seed(mut next_raw_word: impl FnMut() -> u32) -> [i64; 3] {
+    std::array::from_fn(|_| {
+        loop {
+            let raw = next_raw_word();
+            // NumPy's observed seed interval rejects the three largest raw words.
+            if raw < 0xffff_fffd {
+                return i64::from(raw) - i64::from(i32::MAX);
+            }
+        }
+    })
+}
+
+fn advance_lane(lane: i64, mask: u32, q: u32, s: u32, r: u32) -> i64 {
+    // Both left shifts keep only their low 32 bits. The unshifted feedback
+    // operand and the saved result retain their signed 64-bit width.
+    let low = lane as u32;
+    let advance = i64::from((low & mask) << s);
+    let feedback = (i64::from(low << q) ^ lane) >> r;
+    advance ^ feedback
+}
+
+#[cfg(test)]
+mod negative_sampler_tests;
 
 #[cfg(test)]
 mod tests {

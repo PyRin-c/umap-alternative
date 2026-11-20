@@ -91,8 +91,19 @@ pub fn random_initialization(
     n_rows: usize,
     n_components: usize,
 ) -> Result<Vec<f32>, InitializationError> {
+    random_initialization_with_rng(&mut Mt19937::new(seed), n_rows, n_components)
+}
+
+/// Draw and normalize a random initial layout using an existing caller RNG.
+///
+/// Uses the same draws as [`random_initialization`]. The generator remains
+/// positioned after the uniform draws for subsequent layout sampling.
+pub fn random_initialization_with_rng(
+    generator: &mut Mt19937,
+    n_rows: usize,
+    n_components: usize,
+) -> Result<Vec<f32>, InitializationError> {
     let length = checked_length(n_rows, n_components)?;
-    let mut generator = Mt19937::new(seed);
     let mut values = Vec::with_capacity(length);
     for _ in 0..length {
         // Keep the f64 operation order used by the public uniform interval:

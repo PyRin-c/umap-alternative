@@ -39,8 +39,9 @@ class TracedRandomState(np.random.RandomState):
         return values
 
 
-def fit_case(case, method):
-    rng = TracedRandomState(case["seed"])
+def fit_case(case, method, rng=None):
+    if rng is None:
+        rng = TracedRandomState(case["seed"])
     if case["warm_gaussian"]:
         rng.standard_normal()
     assert rng_checkpoint(rng) == case["rng_start"]

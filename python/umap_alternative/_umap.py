@@ -316,14 +316,34 @@ def _modern_projector(rng, shape, *, draw_seed):
     return project
 
 
-def _refine_recursive_level(graph, coordinates, n_epochs, rng, *, a, b):
+def _recursive_shuffle(rng, n_rows):
+    adam_order = np.arange(n_rows, dtype=np.int32)
+    candidates = adam_order.copy()
+
+    def order(_epoch, _values):
+        # Full-range Adam advances both orders. The second dispatches samples.
+        rng.shuffle(adam_order)
+        rng.shuffle(candidates)
+        return candidates.tolist()
+
+    return order
+
+
+def _refine_recursive_level(graph, coordinates, n_epochs, rng, *, a, b, options, depth, use_refinement):
     shape = coordinates.shape
+    mode = options.get("recursive_negative_selection_range_mode", "scaled_coarse")
+    projected = mode == "scaled_coarse" and options.get("recursive_negative_selection_range_scale", 0.5) < 1.0
+    order = _modern_projector(rng, shape, draw_seed=False) if projected else _recursive_shuffle(rng, shape[0])
+    if options.get("curve_schedule", "strong_to_one") == "strong_to_one":
+        exponent = 0.25 ** depth
+        a, b = a ** exponent, b ** exponent
     components = graph.shape, graph.indptr.tolist(), graph.indices.tolist(), graph.data.tolist()
     values, _, _ = _native._fit_modern_layout(
         components, coordinates.ravel().tolist(), _modern_rng_state(rng),
         optimizer="adam", n_components=shape[1], n_epochs=n_epochs, a=a, b=b,
-        learning_rate=0.5, repulsion_strength=1.0, negative_sample_rate=1.0,
-        exclude_graph_neighbors=False, project=_modern_projector(rng, shape, draw_seed=False),
+        learning_rate=0.5, repulsion_strength=options.get("recursive_repulsion_strength", 4.0),
+        negative_sample_rate=options.get("recursive_negative_sample_rate", 1.0),
+        exclude_graph_neighbors=False, project=order, refinement_schedule=use_refinement,
     )
     return np.asarray(values, dtype=np.float32).reshape(shape)
 
@@ -595,7 +615,7 @@ class UMAP(BaseEstimator, TransformerMixin):
     A singleton has a zero embedding and no graph. Seeded modern Adam and
     momentum layouts accept spectral, random, and explicit initialization.
     Dense recursive initialization supports the PCA base case and coarsening.
-    Use up to one coarse epoch for multiple levels or up to three for one level.
+    Coarse layouts use an independent Adam schedule at each level.
     For a fitted dense embedding, ``inverse_transform`` reconstructs
     the original features as a new float32 array. It warns when any query
     requires extrapolation outside the convex hull of the fitted layout.
@@ -1020,7 +1040,10 @@ class UMAP(BaseEstimator, TransformerMixin):
                     _modern_recursive_initialization, features=X_checked, options=recursive_options,
                     ratio=self.recursive_coarsening_ratio,
                     weights=self.coarse_layout_weights if self.coarsen_on_layout_weights else "fuzzy_union",
-                    refine=partial(_refine_recursive_level, a=layout_options["a"], b=layout_options["b"]),
+                    refine=partial(
+                        _refine_recursive_level, a=layout_options["a"], b=layout_options["b"],
+                        options=recursive_options,
+                    ),
                 )
             embedding, history = _fit_modern_embedding(
                 components, rng, initial_coordinates,

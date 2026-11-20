@@ -1,5 +1,8 @@
 # Recursive contraction in UMAP 0.6.0
 
+The [coarse optimizer follow-up](modern_recursive_coarse_reference.md) resolves
+the archived three-coarse-epoch case and measures longer recursive schedules.
+
 The generator records fresh observations from the pinned public wheel. It
 uses `UMAP.fit`, `UMAP.fit_transform` and the public `label_propagation_init`
 function. Direct placement probes supply the graph and anchor explicitly.

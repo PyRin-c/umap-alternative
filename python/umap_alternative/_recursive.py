@@ -1,16 +1,19 @@
 """Dense PCA anchors and verified graph coarsening for modern layouts."""
 
 import numbers
+from math import sqrt
 
 import numpy as np
 from scipy.sparse import csr_matrix
 from sklearn.utils.extmath import randomized_svd
 
 from . import _native
+from ._curve import _finite_float
 
 
 _BASE_INIT_THRESHOLD = 1024
 _ANCHOR_SAMPLE_SIZE = 16384
+_COARSE_EPOCHS = 50
 
 
 def _recursive_base(coordinates, depth):
@@ -46,10 +49,14 @@ def _validate_recursive_initialization(ratio, weights, kwds):
     if weights not in ("transition", "fuzzy_union"):
         raise ValueError("coarse_layout_weights must be 'transition' or 'fuzzy_union'")
     if kwds is None:
-        return {}
+        kwds = {}
     if not isinstance(kwds, dict):
         raise ValueError("recursive_init_kwds must be a dictionary or None")
-    supported = {"base_init_threshold", "n_embedding_epochs", "anchor_method", "remove_coarse_diagonal"}
+    supported = {
+        "base_init_threshold", "n_embedding_epochs", "anchor_method", "remove_coarse_diagonal",
+        "recursive_negative_sample_rate", "recursive_repulsion_strength", "good_initialization_policy",
+        "curve_schedule", "recursive_negative_selection_range_mode", "recursive_negative_selection_range_scale",
+    }
     unknown = kwds.keys() - supported
     if unknown:
         raise NotImplementedError(f"unsupported recursive_init_kwds {sorted(unknown)!r}")
@@ -58,7 +65,28 @@ def _validate_recursive_initialization(ratio, weights, kwds):
     threshold = kwds.get("base_init_threshold", _BASE_INIT_THRESHOLD)
     if not isinstance(threshold, numbers.Integral) or threshold < 2:
         raise ValueError("base_init_threshold must be an integer of at least two")
-    return kwds
+    validated = kwds.copy()
+    budget = kwds.get("n_embedding_epochs")
+    if budget is not None and (not isinstance(budget, numbers.Integral) or budget < 0):
+        raise ValueError("n_embedding_epochs must be a nonnegative integer or None")
+    validated["n_embedding_epochs"] = _COARSE_EPOCHS if budget is None else int(budget)
+    for name in (
+        "recursive_negative_sample_rate", "recursive_repulsion_strength", "recursive_negative_selection_range_scale",
+    ):
+        if name in kwds:
+            value = _finite_float(kwds[name], name)
+            if value < 0:
+                raise ValueError(f"{name} must be nonnegative")
+            validated[name] = value
+    if kwds.get("good_initialization_policy", "heuristic") not in ("heuristic", "never", "available", "always"):
+        raise ValueError("invalid recursive good_initialization_policy")
+    if kwds.get("curve_schedule", "strong_to_one") not in ("strong_to_one", "original"):
+        raise NotImplementedError("recursive curve_schedule supports 'strong_to_one' and 'original'")
+    if kwds.get("recursive_negative_selection_range_mode", "scaled_coarse") not in (
+        "scaled_coarse", "coarse_n", "fixed_200k",
+    ):
+        raise ValueError("invalid recursive_negative_selection_range_mode")
+    return validated
 
 
 def _recursive_partition(graph, n_parts, seed, *, layout_graph=None):
@@ -158,11 +186,7 @@ def _modern_recursive_initialization(graph, features, n_components, rng, options
         raise NotImplementedError("recursive PCA anchor subsampling is not implemented")
     if not np.isfinite(features).all():
         raise ValueError("recursive PCA requires finite distances")
-    coarse_epochs = options.get("n_embedding_epochs")
-    if graph.shape[0] > threshold and coarse_epochs not in (0, 1, 2, 3):
-        raise NotImplementedError("recursive coarsening supports zero to three explicit coarse epochs")
-    if graph.shape[0] // ratio > threshold and coarse_epochs in (2, 3):
-        raise NotImplementedError("multiple recursive levels support zero or one coarse epoch")
+    coarse_epochs = options["n_embedding_epochs"]
     levels = []
     contraction_graph = graph
     anchors = [_sampled_pca_anchor(features, n_components, rng)]
@@ -182,13 +206,18 @@ def _modern_recursive_initialization(graph, features, n_components, rng, options
             contraction_graph, child = _coarse_graphs(
                 contraction_graph, labels, n_parts, weights, options.get("remove_coarse_diagonal", False),
             )
-        levels.append((graph, labels, child))
+        levels.append((graph, labels, child, coarse_epochs))
         if n_parts <= threshold:
             break
         graph = child
+        coarse_epochs = int(coarse_epochs * sqrt(2))
     layout = _recursive_base(anchors[-1], depth=len(anchors))
-    for (parent, labels, child), anchor in zip(reversed(levels), reversed(anchors[:-1]), strict=True):
-        if coarse_epochs:
-            layout = refine(child, layout, coarse_epochs, rng)
-        layout = _expand_layout(parent, labels, layout, anchor)
+    policy = options.get("good_initialization_policy", "heuristic")
+    for level in range(len(levels) - 1, -1, -1):
+        parent, labels, child, budget = levels[level]
+        if budget:
+            descendants = len(levels) - level - 1
+            use_refinement = policy in ("always", "available") or (policy == "heuristic" and descendants >= 2)
+            layout = refine(child, layout, budget, rng, depth=level + 1, use_refinement=use_refinement)
+        layout = _expand_layout(parent, labels, layout, anchors[level])
     return layout

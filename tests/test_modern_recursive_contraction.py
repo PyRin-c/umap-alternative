@@ -17,8 +17,7 @@ FIXTURE = (
     / f"reference/fixtures/umap-learn-0.6.0-modern-recursive-contraction-{PLATFORM}-x86_64.json"
 )
 REFERENCE = json.loads(FIXTURE.read_text(encoding="utf-8"))
-NESTED_OPTIMIZATION = "holdout-three-coarse-epochs"
-CASES = [case for case in REFERENCE["archived"] + REFERENCE["fits"] if case["name"] != NESTED_OPTIMIZATION]
+CASES = REFERENCE["archived"] + REFERENCE["fits"]
 
 
 @pytest.mark.parametrize("case", REFERENCE["placements"], ids=lambda value: value["name"])
@@ -59,22 +58,14 @@ def test_recursive_contraction_fit(case, method):
         np.testing.assert_allclose(actual, expected, rtol=0, atol=initial_bound if epoch == 0 else refined_bound)
 
 
-def test_unverified_coarse_epoch_budget_preserves_rng():
+@pytest.mark.parametrize("budget", [-1, 3.5])
+def test_invalid_coarse_epoch_budget_preserves_rng(budget):
     case = next(case for case in REFERENCE["archived"] if case["name"] == "first-level-optimized")
     rng = np.random.RandomState(case["seed"])
-    options = case["options"] | {"recursive_init_kwds": {"base_init_threshold": 3, "n_embedding_epochs": 4}}
+    options = case["options"] | {"recursive_init_kwds": {"base_init_threshold": 3, "n_embedding_epochs": budget}}
     model = UMAP(**options, random_state=rng, n_jobs=1)
     with pytest.warns(UserWarning, match="using precomputed metric"), pytest.raises(
-        NotImplementedError, match="zero to three explicit coarse epochs",
+        ValueError, match="n_embedding_epochs must be a nonnegative integer",
     ):
-        model.fit(make_data(case["data"]))
-    assert rng_checkpoint(rng) == case["rng_start"]
-
-
-def test_unverified_nested_optimization_preserves_rng():
-    case = next(case for case in REFERENCE["fits"] if case["name"] == NESTED_OPTIMIZATION)
-    rng = np.random.RandomState(case["seed"])
-    model = UMAP(**case["options"], random_state=rng, n_jobs=1)
-    with pytest.raises(NotImplementedError, match="multiple recursive levels support zero or one coarse epoch"):
         model.fit(make_data(case["data"]))
     assert rng_checkpoint(rng) == case["rng_start"]

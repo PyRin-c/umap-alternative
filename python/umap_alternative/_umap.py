@@ -211,10 +211,10 @@ def _restore_modern_rng(rng, state):
 
 def _fit_modern_initialization(
     components, rng, initial, n_components, rescale, scale_factor, n_epochs, repulsion_strength,
-    *, spectral,
+    *, spectral_input,
 ):
     n_rows = components[0][0]
-    if spectral or rescale == "graph_edge":
+    if spectral_input is not None or rescale == "graph_edge":
         shape, indptr, indices, weights = components
         weights = np.asarray(weights, dtype=np.float32)
         budget = n_epochs if n_epochs > 10 else _default_epochs(n_rows)
@@ -223,10 +223,13 @@ def _fit_modern_initialization(
             weights[weak] = 0.0
             components = (shape, indptr, indices, weights.tolist())
     init = "random" if initial is None else "explicit"
-    if spectral:
+    if spectral_input is not None:
+        features, metric = spectral_input
         sampling_graph = _csr_graph(components)
         sampling_graph.eliminate_zeros()
-        initial = _modern_spectral_initialization(sampling_graph, n_components, rng).ravel().tolist()
+        initial = _modern_spectral_initialization(
+            sampling_graph, features, metric, n_components, rng,
+        ).ravel().tolist()
         init = "prepared"
     coordinates, state = _native._initialize_modern_layout(
         components,
@@ -265,13 +268,13 @@ def _sparse_tie_ranker(metric):
 def _fit_modern_embedding(
     components, rng, initial, *, optimizer, n_components, n_epochs,
     rescale, scale_factor, checkpoint_epochs, negative_selection_range,
-    exclude_graph_neighbors, repulsion_strength, spectral, **layout_options,
+    exclude_graph_neighbors, repulsion_strength, spectral_input, **layout_options,
 ):
     if not isinstance(rng, np.random.RandomState):
         rng = np.random.RandomState(rng)
     embedding = _fit_modern_initialization(
         components, rng, initial, n_components, rescale, scale_factor, n_epochs, repulsion_strength,
-        spectral=spectral,
+        spectral_input=spectral_input,
     )
     if n_epochs == 0:
         rng.randint(-2**31 + 1, 2**31 - 2, 3)
@@ -540,7 +543,7 @@ class UMAP(BaseEstimator, TransformerMixin):
     Chebyshev fits accept dense, CSR, CSC, and COO queries. Float64 queries return float64
     coordinates for this path.
     A singleton has a zero embedding and no graph. Seeded modern Adam and
-    momentum layouts accept connected spectral, random, and explicit initialization.
+    momentum layouts accept spectral, random, and explicit initialization.
     For a fitted dense embedding, ``inverse_transform`` reconstructs
     the original features as a new float32 array. It warns when any query
     requires extrapolation outside the convex hull of the fitted layout.
@@ -898,7 +901,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             embedding, history = _fit_modern_embedding(
                 components, rng, initial_coordinates,
                 optimizer="momentum" if self.optimizer == "momentum" else "adam",
-                spectral=spectral,
+                spectral_input=(X_checked, metric) if spectral else None,
                 rescale=self.init_rescale, scale_factor=scale_factor,
                 checkpoint_epochs=checkpoint_epochs, negative_selection_range=selection_range,
                 exclude_graph_neighbors=bool(self.exclude_graph_neighbors), **layout_options,

@@ -1,6 +1,7 @@
 """Spectral initialization for fuzzy graphs."""
 
 import warnings
+from functools import partial
 from math import isqrt
 
 import numpy as np
@@ -63,10 +64,36 @@ def _spectral_eigenvectors(graph, n_components, rng):
     return eigenvectors[:, np.argsort(eigenvalues)[1:n_eigenpairs]]
 
 
-def _modern_spectral_initialization(graph, n_components, rng):
-    """Return the connected modern layout before centering and rescaling."""
+def _modern_spectral_eigenvectors(graph, n_components):
     n_rows = graph.shape[0]
-    if n_components >= n_rows:
+    adjacency = _normalized_adjacency(graph)
+    count = n_components + 1
+    if count == n_rows:
+        laplacian = eye(n_rows, dtype=np.float64, format="csr") - adjacency
+        eigenvalues, vectors = eigh(laplacian.toarray())
+        order = np.argsort(eigenvalues)
+    else:
+        eigenvalues, vectors = eigsh(
+            adjacency, k=count, which="LA", v0=np.ones(n_rows, dtype=np.float32),
+            ncv=max(2 * count + 1, isqrt(n_rows)), tol=1e-4,
+        )
+        order = np.argsort(eigenvalues)[::-1]
+    return vectors[:, order[1:count]]
+
+
+def _modern_spectral_initialization(graph, features, metric, n_components, rng):
+    """Lay out the sampled graph before centering and rescaling."""
+    n_rows = graph.shape[0]
+    count, labels = connected_components(graph, directed=False)
+    if count > 1:
+        component_distances = (
+            _mean_precomputed_distances if metric == "precomputed" else _centroid_distances
+        )
+        coordinates = _disconnected_spectral_coordinates(
+            graph, features, metric, n_components, rng, labels,
+            eigenvectors=_modern_spectral_eigenvectors, component_distances=component_distances,
+        )
+    elif n_components >= n_rows:
         warnings.warn(
             "Spectral initialisation needs more samples than n_components.\n"
             "Falling back to random initialisation!",
@@ -75,21 +102,7 @@ def _modern_spectral_initialization(graph, n_components, rng):
         )
         coordinates = rng.uniform(low=-10.0, high=10.0, size=(n_rows, n_components))
     else:
-        if connected_components(graph, directed=False, return_labels=False) != 1:
-            raise NotImplementedError("modern spectral initialization requires a connected graph")
-        adjacency = _normalized_adjacency(graph)
-        count = n_components + 1
-        if count == n_rows:
-            laplacian = eye(n_rows, dtype=np.float64, format="csr") - adjacency
-            eigenvalues, vectors = eigh(laplacian.toarray())
-            order = np.argsort(eigenvalues)
-        else:
-            eigenvalues, vectors = eigsh(
-                adjacency, k=count, which="LA", v0=np.ones(n_rows, dtype=np.float32),
-                ncv=max(2 * count + 1, isqrt(n_rows)), tol=1e-4,
-            )
-            order = np.argsort(eigenvalues)[::-1]
-        coordinates = vectors[:, order[1:count]]
+        coordinates = _modern_spectral_eigenvectors(graph, n_components)
     scale = 40.0 / np.max(np.abs(coordinates))
     coordinates = np.ascontiguousarray(scale * coordinates, dtype=np.float32)
     coordinates += rng.normal(scale=0.01, size=coordinates.shape).astype(np.float32)
@@ -109,7 +122,30 @@ def _disconnected_spectral_initialization(graph, features, metric, n_components,
     return _scale_and_perturb(coordinates, rng)
 
 
-def _disconnected_spectral_coordinates(graph, features, metric, n_components, rng, labels):
+def _centroid_distances(features, metric, groups):
+    centroids = np.array(
+        [np.asarray(features[rows].mean(axis=0)).ravel() for rows in groups], dtype=np.float64,
+    )
+    return pairwise_distances(centroids, metric=metric)
+
+
+def _mean_precomputed_distances(features, _metric, groups):
+    distances = np.zeros((len(groups), len(groups)), dtype=np.float64)
+    # Average ordered blocks before building the affinity, including any
+    # infinite distances introduced by the connectivity cutoff.
+    for source, rows in enumerate(groups):
+        for target, columns in enumerate(groups):
+            if source != target:
+                distances[source, target] = features[np.ix_(rows, columns)].mean(dtype=np.float64)
+    return distances
+
+
+def _disconnected_spectral_coordinates(
+    graph, features, metric, n_components, rng, labels, *,
+    eigenvectors=None, component_distances=_centroid_distances,
+):
+    if eigenvectors is None:
+        eigenvectors = partial(_spectral_eigenvectors, rng=rng)
     order = np.argsort(labels, kind="stable")
     groups = np.split(order, np.cumsum(np.bincount(labels))[:-1])
     count = len(groups)
@@ -117,11 +153,7 @@ def _disconnected_spectral_coordinates(graph, features, metric, n_components, rn
         axes = np.eye((count + 1) // 2, n_components)
         centers = np.concatenate((axes, -axes))[:count]
     else:
-        centroids = np.array(
-            [np.asarray(features[rows].mean(axis=0)).ravel() for rows in groups],
-            dtype=np.float64,
-        )
-        distances = pairwise_distances(centroids, metric=metric)
+        distances = component_distances(features, metric, groups)
         centers = SpectralEmbedding(
             n_components=n_components, affinity="precomputed", random_state=rng
         ).fit_transform(np.exp(-(distances**2)))
@@ -137,7 +169,7 @@ def _disconnected_spectral_coordinates(graph, features, metric, n_components, rn
         if len(rows) < min_spectral_size:
             local = rng.uniform(-radius, radius, (len(rows), n_components))
         else:
-            local = _spectral_eigenvectors(graph[rows][:, rows], n_components, rng)
+            local = eigenvectors(graph[rows][:, rows], n_components)
             local *= radius / np.max(np.abs(local))
         coordinates[rows] = center + local
     return coordinates

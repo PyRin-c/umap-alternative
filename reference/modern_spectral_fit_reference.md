@@ -86,8 +86,9 @@ reached `2.15e-6` at the final checkpoint. That case exercises an
 existing graph-arithmetic difference. The exact pruning fixture uses
 binary weights to isolate the spectral and epoch handoff.
 
-Disconnected spectral placement, recursive initialization and large
-or approximate graphs remain separate coverage. The connected solve
+See [Disconnected modern spectral initialization](modern_disconnected_spectral_reference.md)
+for component placement. Recursive initialization and large or approximate
+graphs remain separate coverage. The connected solve
 retains SciPy solver errors and makes no sign or basis guarantees for
 new spectra with tied eigenvalues.
 

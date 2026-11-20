@@ -104,15 +104,3 @@ def test_symmetric_spectral_fit_reproduces_the_repeated_eigenspace():
     observed = np.asarray(case["embedding_bits"], dtype=np.uint32).view(np.float32).reshape(-1, 2)
     expected = np.linalg.qr(observed.astype(np.float64))[0]
     np.testing.assert_allclose(actual @ actual.T, expected @ expected.T, rtol=0, atol=2e-6)
-
-
-def test_disconnected_modern_spectral_stops_before_using_caller_rng():
-    points = np.array([[0.0], [1.0], [2.0], [10.0], [11.0], [12.0]], dtype=np.float32)
-    rng = np.random.RandomState(11)
-    model = UMAP(
-        optimizer="adam", n_neighbors=3, n_epochs=2, random_state=rng,
-        n_jobs=1, disconnection_distance=3.0,
-    )
-    with pytest.raises(NotImplementedError, match="modern spectral initialization requires a connected graph"):
-        model.fit(points)
-    assert rng_checkpoint(rng) == {"cursor": 624, "gaussian_bits": None}

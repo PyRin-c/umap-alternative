@@ -11,6 +11,7 @@ import scipy
 from scipy.optimize import OptimizeWarning
 
 from umap_alternative._curve import _resolve_curve_params
+from umap_alternative.umap_ import find_ab_params
 
 
 RUNTIME = {
@@ -35,10 +36,11 @@ REFERENCE = json.loads(REFERENCE_PATH.read_text(encoding="utf-8"))
     REFERENCE["samples"],
     ids=[f"{sample['spread']}-{sample['min_dist']}" for sample in REFERENCE["samples"]],
 )
-def test_curve_matches_public_reference(sample):
+@pytest.mark.parametrize("fit_curve", [_resolve_curve_params, find_ab_params])
+def test_curve_matches_public_reference(sample, fit_curve):
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        actual = _resolve_curve_params(sample["spread"], sample["min_dist"])
+        actual = fit_curve(sample["spread"], sample["min_dist"])
 
     expected = np.array(sample["bits"], dtype=np.uint64)
     if all(REFERENCE["environment"][key] == value for key, value in RUNTIME.items()):

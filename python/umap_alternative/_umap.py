@@ -1066,6 +1066,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             exact_fit_input=fitted_input,
             inverse_cutoff=transform_cutoff,
             inverse_distances=inverse_distances,
+            fit_inverse_rows=inverse_rows,
             inverse_unique_fit=(
                 (X_checked, inverse_rows) if embedding_mode and inverse_rows is not None and not sparse
                 else None
@@ -1376,6 +1377,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             embedding,
             embedding_options=self._embedding_transform_options,
             transform_cutoff=self._transform_cutoff,
+            fit_inverse_rows=getattr(self, "_fit_inverse_rows", None),
         )
 
     def _update_sparse_features(self, X, training, metric, ensure_all_finite):
@@ -1427,6 +1429,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             combined.shape[1], (combined, metric), _csr_graph(components), k, embedding,
             embedding_options=self._embedding_transform_options,
             transform_cutoff=self._transform_cutoff, exact_fit_input=exact_input,
+            fit_inverse_rows=getattr(self, "_fit_inverse_rows", None),
         )
 
     def inverse_transform(self, X):
@@ -1555,6 +1558,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         self, n_features, transform_fit, graph, n_neighbors, embedding, *,
         embedding_options=None, transform_error=None, transform_cutoff=None, supervised=False,
         exact_fit_input=None, inverse_cutoff=None, inverse_distances=None, inverse_unique_fit=None,
+        fit_inverse_rows=None,
     ):
         if graph is not None:
             self.graph_ = graph
@@ -1580,6 +1584,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         self._inverse_cutoff = inverse_cutoff
         self._inverse_distances = inverse_distances
         self._inverse_unique_fit = inverse_unique_fit
+        self._fit_inverse_rows = fit_inverse_rows
         self._embedding_transform_options = None
         if embedding_options is not None:
             self._embedding_transform_options = {

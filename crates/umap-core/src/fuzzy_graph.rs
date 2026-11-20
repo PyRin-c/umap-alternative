@@ -9,9 +9,14 @@ use std::fmt;
 use crate::neighbors::Neighbor;
 
 mod composition;
+mod primitives;
 pub(crate) mod supplied_neighbors;
 
 pub use composition::{FuzzySetOperation, combine_fuzzy_graphs};
+pub use primitives::{
+    KnnDistances, KnnMemberships, KnnStageError, SmoothKnnConfig, compute_knn_memberships,
+    smooth_knn_distances,
+};
 
 const SMOOTH_TOLERANCE: f64 = 1e-5;
 const MIN_SCALE_MULTIPLIER: f64 = 0.001;
@@ -629,24 +634,27 @@ fn sorted_neighbor_distances(neighbors: &[Vec<Neighbor>]) -> Vec<f32> {
     distances
 }
 
-fn local_offset(positive: &[f32], local_connectivity: f64) -> f32 {
+fn local_offset<T>(positive: &[T], local_connectivity: f64) -> f32
+where
+    T: Copy + Into<f64> + std::ops::Sub<Output = T>,
+{
     if positive.is_empty() {
         return 0.0;
     }
     if local_connectivity > positive.len() as f64 {
-        return positive.iter().copied().fold(0.0, f32::max);
+        return positive.iter().copied().map(Into::into).fold(0.0, f64::max) as f32;
     }
     let whole = local_connectivity as usize;
     let fraction = local_connectivity - whole as f64;
     if whole == 0 {
-        return (fraction * f64::from(positive[0])) as f32;
+        return (fraction * positive[0].into()) as f32;
     }
     let base = positive[whole - 1];
     if fraction > SMOOTH_TOLERANCE {
         // Round the adjacent distance difference before interpolating the offset.
-        (f64::from(base) + fraction * f64::from(positive[whole] - base)) as f32
+        (base.into() + fraction * (positive[whole] - base).into()) as f32
     } else {
-        base
+        base.into() as f32
     }
 }
 
@@ -719,13 +727,24 @@ fn mean_distance(distances: &[f32]) -> f64 {
 }
 
 fn search_scale(offsets: &[f32], target: f64, inclusive_tolerance: bool) -> f32 {
+    bisect_scale(target, inclusive_tolerance, 64, |sigma| {
+        membership_sum(offsets, sigma)
+    })
+}
+
+fn bisect_scale(
+    target: f64,
+    inclusive_tolerance: bool,
+    iterations: usize,
+    membership_sum: impl Fn(f32) -> f64,
+) -> f32 {
     let mut lower = 0.0_f32;
     let mut upper = f32::INFINITY;
     let mut middle = 1.0_f32;
 
-    for _ in 0..64 {
+    for _ in 0..iterations {
         // A rounded f32 sum can cross the convergence threshold early.
-        let sum = membership_sum(offsets, middle);
+        let sum = membership_sum(middle);
         let residual = (sum - target).abs();
         if residual < SMOOTH_TOLERANCE || (inclusive_tolerance && residual == SMOOTH_TOLERANCE) {
             break;

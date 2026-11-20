@@ -18,7 +18,10 @@ use umap_core::fit::{
     fit_precomputed_graph_with_cutoff, fit_precomputed_graph_with_options,
     fit_sparse_precomputed_ranked_graph, fit_supplied_neighbors_graph,
 };
-use umap_core::fuzzy_graph::{CsrGraph, FuzzySetOperation, GraphOptions, combine_fuzzy_graphs};
+use umap_core::fuzzy_graph::{
+    CsrGraph, FuzzySetOperation, GraphOptions, KnnDistances, SmoothKnnConfig, combine_fuzzy_graphs,
+    compute_knn_memberships, smooth_knn_distances,
+};
 use umap_core::inverse::{
     DenseInverseError, DenseInverseInput, DenseInverseLayout, InverseTriangulation,
     dense_inverse_epochs, fit_dense_inverse_scales_with_metric,
@@ -47,6 +50,8 @@ use umap_core::update::{
 };
 
 type CsrComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
+type FloatBuffer = (Vec<f64>, bool);
+type NeighborMembershipComponents = (Vec<i32>, Vec<i32>, Vec<f32>, Option<Vec<f32>>);
 type RowGroups = (Vec<usize>, Vec<usize>, Vec<usize>);
 type CooComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
 type EmbeddingComponents = (CsrComponents, (usize, usize), Vec<f32>);
@@ -136,6 +141,80 @@ fn csr_components(graph: CsrGraph) -> CsrComponents {
         graph.indices,
         graph.data,
     )
+}
+
+enum KnnFloatBuffer {
+    Float32(Vec<f32>),
+    Float64(Vec<f64>),
+}
+
+impl KnnFloatBuffer {
+    fn new((values, narrow): FloatBuffer) -> Self {
+        if narrow {
+            Self::Float32(values.into_iter().map(|value| value as f32).collect())
+        } else {
+            Self::Float64(values)
+        }
+    }
+
+    fn borrowed(&self) -> KnnDistances<'_> {
+        match self {
+            Self::Float32(values) => KnnDistances::Float32(values),
+            Self::Float64(values) => KnnDistances::Float64(values),
+        }
+    }
+}
+
+#[pyfunction]
+fn _smooth_knn_distances(
+    py: Python<'_>,
+    distances: FloatBuffer,
+    shape: (usize, usize),
+    parameters: (f64, usize, f64, f64),
+) -> PyResult<(Vec<f32>, Vec<f32>)> {
+    let distances = KnnFloatBuffer::new(distances);
+    let (k, iterations, local_connectivity, bandwidth) = parameters;
+    let config = SmoothKnnConfig {
+        k,
+        iterations,
+        local_connectivity,
+        bandwidth,
+    };
+    py.detach(|| smooth_knn_distances(distances.borrowed(), shape, config))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn _compute_knn_memberships(
+    py: Python<'_>,
+    indices: Vec<i32>,
+    distances: Vec<f32>,
+    sigmas: Vec<f32>,
+    rhos: Vec<f32>,
+    shape: (usize, usize),
+    return_distances: bool,
+    bipartite: bool,
+) -> PyResult<NeighborMembershipComponents> {
+    let result = py
+        .detach(|| {
+            compute_knn_memberships(
+                &indices,
+                &distances,
+                &sigmas,
+                &rhos,
+                shape,
+                return_distances,
+                bipartite,
+            )
+        })
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok((
+        result.rows,
+        result.columns,
+        result.weights,
+        result.distances,
+    ))
 }
 
 #[pyfunction]
@@ -1352,6 +1431,8 @@ fn _inverse_transform_dense_embedding(
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", umap_core::VERSION)?;
+    module.add_function(wrap_pyfunction!(_smooth_knn_distances, module)?)?;
+    module.add_function(wrap_pyfunction!(_compute_knn_memberships, module)?)?;
     module.add_function(wrap_pyfunction!(_unique_csr_rows, module)?)?;
     module.add_function(wrap_pyfunction!(_combine_fuzzy_graphs, module)?)?;
     module.add_function(wrap_pyfunction!(_optimize_aligned_layout, module)?)?;

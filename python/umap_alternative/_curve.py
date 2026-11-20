@@ -23,6 +23,14 @@ def _membership(distance: np.ndarray, a: float, b: float) -> np.ndarray:
     return 1.0 / (1.0 + a * distance ** (2.0 * b))
 
 
+def find_ab_params(spread, min_dist):
+    """Fit the embedding curve coefficients at float64 precision."""
+    distance = np.linspace(0.0, 3.0 * spread, 300, dtype=np.float64)
+    target = np.exp(-np.maximum(distance - min_dist, 0.0) / spread)
+    (a, b), _ = curve_fit(_membership, distance, target)
+    return a, b
+
+
 def _resolve_curve_params(
     spread: float = 1.0,
     min_dist: float = 0.1,
@@ -52,7 +60,5 @@ def _resolve_curve_params(
     grid_end = 3.0 * spread
     if not isfinite(grid_end):
         raise ValueError("3 * spread must be finite in float64 to fit the curve")
-    distance = np.linspace(0.0, grid_end, 300, dtype=np.float64)
-    target = np.exp(-np.maximum(distance - min_dist, 0.0) / spread)
-    (a, b), _ = curve_fit(_membership, distance, target)
+    a, b = find_ab_params(spread, min_dist)
     return float(a), float(b)

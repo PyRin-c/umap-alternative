@@ -77,6 +77,8 @@ Euclidean、Manhattan、Chebyshev、cosine の互換レイアウトでは、CSR�
 
 特徴量の距離には `canberra` と `braycurtis` も指定できます。密・CSR の互換レイアウト学習・変換・更新と、密な逆変換を公開版と比較しています。[距離の比較記録](reference/ratio_metrics_reference.md)
 
+`umap_alternative.umap_` で近傍距離の平滑化、メンバーシップ、近傍配列からのグラフ構築を利用できます。孤立した入力行は `umap_alternative.utils.disconnected_vertices` で確認できます。[グラフ補助関数の参照記録](reference/graph_primitives_reference.md)
+
 ## 独立実装と数値互換性
 
 実装側は公開論文と自前の仕様を参照し、設計判断の根拠を記録します。上流の実装コード・コメント・テストは閲覧や転用の対象から外します。クリーンルームで実装を担当する場合は、上流ソースの断片を含む過去の調査履歴も共有対象から外します。[UMAP 原論文](https://arxiv.org/abs/1802.03426)

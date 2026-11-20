@@ -79,8 +79,8 @@ number of eligible vertices.
 
 | Optimizer | Fits | Epochs | Attractions | Accepted negatives | Exact epoch coordinates | Maximum absolute error |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Momentum | 23 | 183 | 2,450 | 6,457 | 8,123 / 11,632 | 1.79e-7 |
-| Adam | 15 | 108 | 1,516 | 3,637 | 5,071 / 6,972 | 4.30e-6 |
+| Momentum | 23 | 183 | 2,450 | 6,457 | 11,632 / 11,632 | 0 |
+| Adam | 15 | 108 | 1,516 | 3,637 | 6,972 / 6,972 | 0 |
 
 Momentum's counts and target multiplicities match the independent decode
 exactly. Adam's negative count is the native replay count, checked against
@@ -96,16 +96,18 @@ the controlled direction `arange(24) % 4`, a stable projection sort gives
 62 incorrect head-target multiplicity entries at epoch 1. NumPy's default
 sort matches this observation. The exact ordering of equal or numerically
 indistinguishable projection keys across BLAS and NumPy builds is open.
-The sampler reports `AmbiguousProjection` before an epoch whose negatives
-need that order. The fixture generator reproduces the tie independently.
+The Rust-owned projection sampler reports `AmbiguousProjection` before an
+epoch whose negatives need that order. The fixture generator reproduces
+the tie independently. The Python fit supplies the projected order using
+NumPy. [Seeded estimator fit study](modern_fit_reference.md)
 
-Coordinate accumulation and rounding still have the residuals above.
-Further coverage is needed for disconnected layouts, nondefault
+The estimator fit study establishes edge-order accumulation and separate
+rounding for Adam and momentum. Those changes remove the previous
+coordinate residuals in this sampling fixture. Further coverage is needed
+for larger graphs, nondefault
 `negative_sample_scale` and its adaptation parameter, and large dense
 graphs. The short-budget cutoff above 10,000 rows uses the existing
 compatibility layout's 200-epoch threshold and lacks a modern wheel witness.
-The native sampler exposes integer rates. Python fit integration remains
-separate.
 
 ## Reproduction
 
@@ -124,8 +126,6 @@ cargo test -p umap-core --lib --locked modern_rng_matches_public_seed_shuffle_an
 cargo test -p umap-core --test modern_sampling_fixtures --locked -- --nocapture
 ```
 
-Regeneration produced the fixture byte for byte. The locked workspace tests
-passed with 175 tests and one existing ignored test. Workspace Clippy passed
-with `-D warnings`, and `cargo fmt -p umap-core -- --check` passed. The
-workspace-wide format check reports an existing import wrap in
-`crates/umap-python/src/lib.rs` on the base commit.
+Regeneration produced the sampling fixture byte for byte. For the complete
+fit and workspace verification commands, see the
+[seeded estimator fit study](modern_fit_reference.md).

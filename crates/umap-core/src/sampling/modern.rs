@@ -13,7 +13,7 @@ use super::{EdgeSamplingCursor, SamplingError, seeded_train_positive_interval};
 #[derive(Clone, Copy, Debug)]
 pub struct ModernSamplingConfig {
     /// Requested negative sample rate. Zero disables repulsive samples.
-    pub negative_sample_rate: usize,
+    pub negative_sample_rate: f64,
     /// Exclude the source vertex and its retained graph neighbors from sampling.
     pub exclude_graph_neighbors: bool,
     /// Use a projected vertex order when the vertex count exceeds this value.
@@ -23,7 +23,7 @@ pub struct ModernSamplingConfig {
 impl Default for ModernSamplingConfig {
     fn default() -> Self {
         Self {
-            negative_sample_rate: 5,
+            negative_sample_rate: 5.0,
             exclude_graph_neighbors: false,
             negative_selection_range: 200_000,
         }
@@ -49,6 +49,7 @@ pub enum ModernSamplingError {
     Layout(ModernLayoutError),
     Schedule(SamplingError),
     SampleCapacity,
+    InvalidCandidateOrder,
     /// The projection is degenerate or two keys are within rounding error of
     /// one another. The wheel's order for this case is unresolved.
     AmbiguousProjection {
@@ -64,6 +65,10 @@ impl fmt::Display for ModernSamplingError {
             Self::Layout(error) => error.fmt(formatter),
             Self::Schedule(error) => error.fmt(formatter),
             Self::SampleCapacity => write!(formatter, "cannot store the epoch's negative samples"),
+            Self::InvalidCandidateOrder => write!(
+                formatter,
+                "negative candidates must be a vertex permutation"
+            ),
             Self::AmbiguousProjection { epoch } => {
                 write!(formatter, "ambiguous negative projection at epoch {epoch}")
             }
@@ -94,6 +99,7 @@ pub struct ModernSampledLayout {
     ambiguous_projection: bool,
     positive: Vec<(usize, usize)>,
     negative: Vec<(usize, usize)>,
+    negative_starts: Vec<usize>,
 }
 
 impl ModernSampledLayout {
@@ -105,6 +111,20 @@ impl ModernSampledLayout {
         layout: ModernLayoutConfig,
         sampling: ModernSamplingConfig,
         caller_rng: &mut Mt19937,
+    ) -> Result<Self, ModernSamplingError> {
+        let sampler = Self::with_supplied_candidates(graph, coordinates, layout, sampling)?;
+        // The public caller's RNG consumes the seed triplet before any shuffle.
+        draw_negative_seed(|| caller_rng.next_u32());
+        Ok(sampler)
+    }
+
+    /// Start with an external candidate stream. The caller owns the RNG
+    /// handoff and supplies a permutation for every epoch.
+    pub fn with_supplied_candidates(
+        graph: &CsrGraph,
+        coordinates: Vec<f32>,
+        layout: ModernLayoutConfig,
+        sampling: ModernSamplingConfig,
     ) -> Result<Self, ModernSamplingError> {
         let n_rows = graph.n_rows;
         if n_rows == 0 || n_rows > i32::MAX as usize {
@@ -118,6 +138,12 @@ impl ModernSampledLayout {
                 indices: graph.indices.len(),
                 data: graph.data.len(),
             }));
+        }
+        let rate = sampling.negative_sample_rate;
+        if !rate.is_finite() || rate < 0.0 {
+            return Err(ModernSamplingError::Schedule(
+                SamplingError::InvalidNegativeSampleRate { rate },
+            ));
         }
         let n_components = layout.n_components;
         let n_epochs = layout.n_epochs;
@@ -159,12 +185,19 @@ impl ModernSampledLayout {
                 {
                     let mut cursor = EdgeSamplingCursor::from_positive_interval(
                         interval,
-                        sampling.negative_sample_rate.max(1) as f64,
+                        if rate == 0.0 { 1.0 } else { rate },
                     )
                     .map_err(ModernSamplingError::Schedule)?;
                     // The multiplication follows the division. Rewriting it
                     // as a scaled rate changes when some backlogs truncate.
                     cursor.negative_interval *= 1.5;
+                    if !cursor.negative_interval.is_finite() {
+                        return Err(ModernSamplingError::Schedule(
+                            SamplingError::InvalidNegativeInterval {
+                                interval: cursor.negative_interval,
+                            },
+                        ));
+                    }
                     cursor.next_negative = cursor.negative_interval;
                     cursors.push(cursor);
                     indices.push(graph.indices[edge]);
@@ -173,8 +206,6 @@ impl ModernSampledLayout {
             indptr.push(indices.len());
         }
 
-        // The public caller's RNG consumes the seed triplet before any shuffle.
-        draw_negative_seed(|| caller_rng.next_u32());
         Ok(Self {
             layout: layout_state,
             n_epochs,
@@ -191,6 +222,7 @@ impl ModernSampledLayout {
             ambiguous_projection: false,
             positive: Vec::new(),
             negative: Vec::new(),
+            negative_starts: Vec::new(),
         })
     }
 
@@ -216,12 +248,55 @@ impl ModernSampledLayout {
         caller_rng: &mut Mt19937,
         gaussian_cache: &mut Option<f64>,
     ) -> Result<ModernEpoch<'_>, ModernSamplingError> {
+        self.apply_epoch(None)?;
+        let n_rows = self.shuffled.len();
+        // Full-range Adam shuffles two independent orders each epoch. The
+        // second order supplies the next epoch's negative candidates.
+        if let Some(order) = &mut self.adam_shuffle {
+            shuffle(order, caller_rng);
+        }
+        shuffle(&mut self.shuffled, caller_rng);
+        if n_rows > self.sampling.negative_selection_range {
+            self.ambiguous_projection = project_vertices(
+                self.layout.coordinates(),
+                self.n_components,
+                caller_rng,
+                gaussian_cache,
+                &mut self.direction,
+                &mut self.projection,
+            );
+        }
+        Ok(self.epoch_result())
+    }
+
+    /// Dispatch an epoch using a vertex permutation supplied by the caller.
+    /// This supports NumPy's projection sort, including ties.
+    pub fn step_with_candidate_order(
+        &mut self,
+        order: &[usize],
+    ) -> Result<ModernEpoch<'_>, ModernSamplingError> {
+        let n_rows = self.shuffled.len();
+        if order.len() != n_rows {
+            return Err(ModernSamplingError::InvalidCandidateOrder);
+        }
+        let mut seen = vec![false; n_rows];
+        for &vertex in order {
+            if vertex >= n_rows || std::mem::replace(&mut seen[vertex], true) {
+                return Err(ModernSamplingError::InvalidCandidateOrder);
+            }
+        }
+        self.apply_epoch(Some(order))?;
+        Ok(self.epoch_result())
+    }
+
+    fn apply_epoch(&mut self, supplied_order: Option<&[usize]>) -> Result<(), ModernSamplingError> {
         let epoch = self.next_epoch();
         if epoch == self.n_epochs {
             return Err(ModernSamplingError::Layout(ModernLayoutError::EpochLimit));
         }
         self.positive.clear();
         self.negative.clear();
+        self.negative_starts.clear();
         self.pending_cursors.clone_from(&self.cursors);
         let n_rows = self.shuffled.len();
         let exclude = self.sampling.exclude_graph_neighbors;
@@ -240,7 +315,8 @@ impl ModernSampledLayout {
                     continue;
                 }
                 self.positive.push((head, tail));
-                if self.sampling.negative_sample_rate == 0 || all_excluded {
+                self.negative_starts.push(self.negative.len());
+                if self.sampling.negative_sample_rate == 0.0 || all_excluded {
                     continue;
                 }
                 let count = cursor
@@ -250,7 +326,7 @@ impl ModernSampledLayout {
                     continue;
                 }
 
-                if self.ambiguous_projection {
+                if supplied_order.is_none() && self.ambiguous_projection {
                     return Err(ModernSamplingError::AmbiguousProjection { epoch });
                 }
                 self.negative
@@ -261,7 +337,9 @@ impl ModernSampledLayout {
                 let mut position = start;
                 let mut remaining = count;
                 while remaining != 0 {
-                    let target = if self.projection.is_empty() {
+                    let target = if let Some(order) = supplied_order {
+                        order[position]
+                    } else if self.projection.is_empty() {
                         self.shuffled[position]
                     } else {
                         self.projection[position].vertex
@@ -277,31 +355,20 @@ impl ModernSampledLayout {
                 }
             }
         }
+        self.negative_starts.push(self.negative.len());
         self.layout
-            .step(&self.positive, &self.negative)
+            .step_scheduled(&self.positive, &self.negative, &self.negative_starts)
             .map_err(ModernSamplingError::Layout)?;
         std::mem::swap(&mut self.cursors, &mut self.pending_cursors);
-        // Full-range Adam shuffles two independent orders each epoch. The
-        // second order supplies the next epoch's negative candidates.
-        if let Some(order) = &mut self.adam_shuffle {
-            shuffle(order, caller_rng);
-        }
-        shuffle(&mut self.shuffled, caller_rng);
-        if n_rows > self.sampling.negative_selection_range {
-            self.ambiguous_projection = project_vertices(
-                self.layout.coordinates(),
-                self.n_components,
-                caller_rng,
-                gaussian_cache,
-                &mut self.direction,
-                &mut self.projection,
-            );
-        }
-        Ok(ModernEpoch {
+        Ok(())
+    }
+
+    fn epoch_result(&self) -> ModernEpoch<'_> {
+        ModernEpoch {
             positive: &self.positive,
             negative: &self.negative,
             coordinates: self.layout.coordinates(),
-        })
+        }
     }
 }
 

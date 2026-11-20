@@ -149,53 +149,107 @@ impl ModernLayout {
         positive: &[(usize, usize)],
         negative: &[(usize, usize)],
     ) -> Result<&[f32], ModernLayoutError> {
+        let samples = positive
+            .iter()
+            .map(|&edge| (edge, false))
+            .chain(negative.iter().map(|&edge| (edge, true)));
+        self.step_samples(samples, false)
+    }
+
+    /// Apply each scheduled attraction immediately followed by its
+    /// repulsions. The starts include the final end of the negative array.
+    pub(crate) fn step_scheduled(
+        &mut self,
+        positive: &[(usize, usize)],
+        negative: &[(usize, usize)],
+        negative_starts: &[usize],
+    ) -> Result<&[f32], ModernLayoutError> {
+        debug_assert_eq!(negative_starts.len(), positive.len() + 1);
+        let samples =
+            positive
+                .iter()
+                .zip(negative_starts.windows(2))
+                .flat_map(|(&edge, bounds)| {
+                    std::iter::once((edge, false)).chain(
+                        negative[bounds[0]..bounds[1]]
+                            .iter()
+                            .map(|&edge| (edge, true)),
+                    )
+                });
+        self.step_samples(samples, true)
+    }
+
+    fn step_samples(
+        &mut self,
+        samples: impl Iterator<Item = ((usize, usize), bool)>,
+        scheduled: bool,
+    ) -> Result<&[f32], ModernLayoutError> {
         if self.epoch == self.config.n_epochs {
             return Err(ModernLayoutError::EpochLimit);
         }
 
         let components = self.config.n_components;
         let n_rows = self.coordinates.len() / components;
-        self.forces.fill(0.0);
-        for (samples, repulsive) in [(positive, false), (negative, true)] {
-            for &(source, target) in samples {
-                for row in [source, target] {
-                    if row >= n_rows {
-                        return Err(ModernLayoutError::InvalidRow { row, n_rows });
-                    }
-                }
-                if source == target || (repulsive && self.config.repulsion_strength == 0.0) {
-                    continue;
-                }
-                let source = source * components..(source + 1) * components;
-                let target = target * components..(target + 1) * components;
-                let head = &self.coordinates[source.clone()];
-                let tail = &self.coordinates[target];
-                let q = f64::from(DistanceReduction::Sequential.squared(head, tail));
-                if !q.is_finite() {
-                    return Err(ModernLayoutError::NonFiniteArithmetic);
-                }
-                if q == 0.0 {
-                    continue;
-                }
+        let update = EpochUpdate::new(self.config, self.epoch, scheduled);
+        let (distance, repulsion_strength) = if scheduled {
+            // The seeded layouts share a blocked squared-distance reduction.
+            (
+                DistanceReduction::SeededCompatibility,
+                f64::from(self.config.repulsion_strength as f32),
+            )
+        } else {
+            (
+                DistanceReduction::Sequential,
+                self.config.repulsion_strength,
+            )
+        };
+        let sample_scale = if let EpochUpdate::ScheduledMomentum { alpha, carry } = update {
+            for (total, &[velocity, _]) in self.forces.iter_mut().zip(&self.moments) {
+                *total = (carry * f64::from(velocity)) as f32;
+            }
+            alpha
+        } else {
+            self.forces.fill(0.0);
+            1.0
+        };
 
-                let curve = 1.0 + self.config.a * q.powf(self.config.b);
-                if !curve.is_finite() {
-                    return Err(ModernLayoutError::NonFiniteArithmetic);
+        for ((source, target), repulsive) in samples {
+            for row in [source, target] {
+                if row >= n_rows {
+                    return Err(ModernLayoutError::InvalidRow { row, n_rows });
                 }
-                let scale = if repulsive {
-                    let norm = q.sqrt();
-                    let magnitude = (2.0 * self.config.b / ((0.001 + q) * curve)) * norm;
-                    self.config.repulsion_strength * (2.0 * magnitude.tanh() / norm)
-                } else {
-                    -2.0 * self.config.a * self.config.b * q.powf(self.config.b - 1.0) / curve
-                };
-                for ((total, &head), &tail) in self.forces[source].iter_mut().zip(head).zip(tail) {
-                    *total = (f64::from(*total) + scale * f64::from(head - tail)) as f32;
-                }
+            }
+            if source == target || (repulsive && repulsion_strength == 0.0) {
+                continue;
+            }
+            let source = source * components..(source + 1) * components;
+            let target = target * components..(target + 1) * components;
+            let head = &self.coordinates[source.clone()];
+            let tail = &self.coordinates[target];
+            let q = f64::from(distance.squared(head, tail));
+            if !q.is_finite() {
+                return Err(ModernLayoutError::NonFiniteArithmetic);
+            }
+            if q == 0.0 {
+                continue;
+            }
+
+            let curve = 1.0 + self.config.a * q.powf(self.config.b);
+            if !curve.is_finite() {
+                return Err(ModernLayoutError::NonFiniteArithmetic);
+            }
+            let scale = if repulsive {
+                let norm = q.sqrt();
+                let magnitude = (2.0 * self.config.b / ((0.001 + q) * curve)) * norm;
+                repulsion_strength * (2.0 * magnitude.tanh() / norm)
+            } else {
+                -2.0 * self.config.a * self.config.b * q.powf(self.config.b - 1.0) / curve
+            } * sample_scale;
+            for ((total, &head), &tail) in self.forces[source].iter_mut().zip(head).zip(tail) {
+                *total = (f64::from(*total) + scale * f64::from(head - tail)) as f32;
             }
         }
 
-        let update = EpochUpdate::new(self.config, self.epoch);
         for i in 0..self.coordinates.len() {
             let force = self.forces[i];
             let (coordinate, moments) = update.apply(self.coordinates[i], self.moments[i], force);
@@ -222,19 +276,23 @@ const BETA2: f64 = 0.99_f32 as f64;
 
 enum EpochUpdate {
     Momentum { alpha: f64, carry: f64 },
+    ScheduledMomentum { alpha: f64, carry: f64 },
     Adam { alpha: f64, bias1: f64, bias2: f64 },
 }
 
 impl EpochUpdate {
-    fn new(config: ModernLayoutConfig, epoch: usize) -> Self {
+    fn new(config: ModernLayoutConfig, epoch: usize, scheduled: bool) -> Self {
         let epochs = config.n_epochs;
         match config.optimizer {
             ModernOptimizer::Momentum => {
                 let remaining = 1.0 - epoch as f64 / epochs as f64;
                 let previous = 1.0 - epoch.saturating_sub(1) as f64 / epochs as f64;
-                Self::Momentum {
-                    alpha: 0.125 * config.learning_rate * remaining * remaining,
-                    carry: 0.5 - 0.125 * previous * previous,
+                let alpha = 0.125 * config.learning_rate * remaining * remaining;
+                let carry = 0.5 - 0.125 * previous * previous;
+                if scheduled {
+                    Self::ScheduledMomentum { alpha, carry }
+                } else {
+                    Self::Momentum { alpha, carry }
                 }
             }
             ModernOptimizer::Adam => {
@@ -261,6 +319,7 @@ impl EpochUpdate {
                 let update = (carry * f64::from(first) + alpha * f64::from(force)) as f32;
                 (coordinate + update, [update, 0.0])
             }
+            Self::ScheduledMomentum { .. } => (coordinate + force, [force, 0.0]),
             Self::Adam {
                 alpha,
                 bias1,

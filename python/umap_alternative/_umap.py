@@ -191,41 +191,99 @@ def _fit_spectral_embedding(graph, features, metric, rng, **layout_options):
     return _fit_graph_embedding(graph, features, metric, rng, None, spectral=True, **layout_options)
 
 
-def _fit_modern_initialization(components, rng, initial, n_components, rescale, scale_factor):
-    if not isinstance(rng, np.random.RandomState):
-        rng = np.random.RandomState(rng)
-    algorithm, words, cursor, has_gaussian, gaussian = rng.get_state()
-    coordinates, (words, cursor, gaussian) = _native._initialize_modern_layout(
+def _modern_rng_state(rng):
+    _, words, cursor, has_gaussian, gaussian = rng.get_state()
+    return words.tolist(), cursor, gaussian if has_gaussian else None
+
+
+def _restore_modern_rng(rng, state):
+    words, cursor, gaussian = state
+    rng.set_state((
+        "MT19937", np.asarray(words, dtype=np.uint32), cursor,
+        gaussian is not None, 0.0 if gaussian is None else gaussian,
+    ))
+
+
+def _fit_modern_initialization(
+    components, rng, initial, n_components, rescale, scale_factor, n_epochs, repulsion_strength,
+):
+    n_rows = components[0][0]
+    if rescale == "graph_edge":
+        shape, indptr, indices, weights = components
+        weights = np.asarray(weights, dtype=np.float32)
+        budget = n_epochs if n_epochs > 10 else _default_epochs(n_rows)
+        weak = weights < np.float32(weights.max() / budget)
+        if weak.any():
+            weights[weak] = 0.0
+            components = (shape, indptr, indices, weights.tolist())
+    coordinates, state = _native._initialize_modern_layout(
         components,
-        (words.tolist(), cursor, gaussian if has_gaussian else None),
+        _modern_rng_state(rng),
         n_components=n_components,
         init="random" if initial is None else "explicit",
-        init_rescale="unscaled" if rescale == "isotropic" else rescale,
+        init_rescale=rescale if rescale == "graph_edge" else "unscaled",
         init_scale_factor=scale_factor,
         coordinates=initial,
     )
-    has_gaussian = gaussian is not None
-    rng.set_state(
-        (algorithm, np.asarray(words, dtype=np.uint32), cursor, has_gaussian,
-         gaussian if has_gaussian else 0.0)
-    )
-    # The wheel draws its optimizer seed even when the epoch budget is zero.
-    rng.randint(-2**31 + 1, 2**31 - 1, size=3)
-    n_rows = components[0][0]
+    _restore_modern_rng(rng, state)
     coordinates = np.asarray(coordinates, dtype=np.float32).reshape(n_rows, n_components)
-    if rescale == "isotropic":
+    if rescale != "graph_edge":
         # NumPy's float32 log and exp can round differently from scalar libm.
         lower, upper = np.percentile(coordinates, (5, 95), axis=0).astype(np.float32)
         spans = upper - lower
         spans[spans == 0] = 1.0
-        mean_span = np.exp(np.log(spans).mean())
-        target_span = 3.0 * np.log10(n_rows) * scale_factor
-        coordinates *= np.float32(target_span / mean_span)
+        span = np.exp(np.log(spans).mean()) if rescale == "isotropic" else spans.astype(np.float64)
+        target_span = 3.0 * np.log10(n_rows) * np.log2(1.0 + repulsion_strength) * scale_factor
+        coordinates *= np.asarray(target_span / span, dtype=np.float32)
     return coordinates
 
 
 def _rank_tied_dense_distances(distances, k):
     return np.argsort(np.asarray(distances, dtype=np.float32))[:k].tolist()
+
+
+def _fit_modern_embedding(
+    components, rng, initial, *, optimizer, n_components, n_epochs,
+    rescale, scale_factor, checkpoint_epochs, negative_selection_range,
+    exclude_graph_neighbors, repulsion_strength, **layout_options,
+):
+    if not isinstance(rng, np.random.RandomState):
+        rng = np.random.RandomState(rng)
+    embedding = _fit_modern_initialization(
+        components, rng, initial, n_components, rescale, scale_factor, n_epochs, repulsion_strength,
+    )
+    if n_epochs == 0:
+        rng.randint(-2**31 + 1, 2**31 - 2, 3)
+        return embedding, None if checkpoint_epochs is None else [embedding.copy()]
+
+    projector = None
+    if len(embedding) > negative_selection_range:
+        shape = embedding.shape
+        order = np.arange(len(embedding), dtype=np.int32)
+
+        def projector(epoch, values):
+            if epoch == 0:
+                rng.randint(-2**31 + 1, 2**31 - 2, 3)
+            rng.shuffle(order)
+            direction = rng.randn(n_components)
+            direction /= np.linalg.norm(direction)
+            coords = np.asarray(values, dtype=np.float32).reshape(shape)
+            return np.argsort(coords @ direction).tolist()
+
+    shape = embedding.shape
+    values, state, snapshots = _native._fit_modern_layout(
+        components, embedding.ravel().tolist(), _modern_rng_state(rng),
+        optimizer=optimizer, n_components=n_components, n_epochs=n_epochs,
+        checkpoint_epochs=checkpoint_epochs, project=projector,
+        exclude_graph_neighbors=exclude_graph_neighbors,
+        repulsion_strength=repulsion_strength, **layout_options,
+    )
+    if projector is None:
+        _restore_modern_rng(rng, state)
+    history = None if checkpoint_epochs is None else [
+        np.asarray(values, dtype=np.float32).reshape(shape) for values in snapshots
+    ]
+    return np.asarray(values, dtype=np.float32).reshape(shape), history
 
 
 def _fit_neighbor_arrays(indices, distances, k, graph_options):
@@ -453,8 +511,8 @@ class UMAP(BaseEstimator, TransformerMixin):
     ``[0, 2**32 - 1]``, independent of ``random_state``. The normalized fitted
     input returns ``embedding_`` itself. Sparse Euclidean features also
     support this shortcut, with a float64 copy for float64 queries.
-    A singleton has a zero embedding and
-    no graph. Modern layouts support random or explicit initialization at zero epochs.
+    A singleton has a zero embedding and no graph. Seeded modern Adam and
+    momentum layouts accept random or explicit initialization.
     For a fitted dense Euclidean embedding, ``inverse_transform`` reconstructs
     the original features as a new float32 array. It warns when any query
     requires extrapolation outside the convex hull of the fitted layout.
@@ -496,6 +554,8 @@ class UMAP(BaseEstimator, TransformerMixin):
         target_n_neighbors=-1,
         init_rescale="isotropic",
         init_scale_factor=1.0,
+        exclude_graph_neighbors=False,
+        negative_selection_range=200_000,
     ):
         self.n_components = n_components
         self.n_neighbors = n_neighbors
@@ -529,6 +589,8 @@ class UMAP(BaseEstimator, TransformerMixin):
         self.target_n_neighbors = target_n_neighbors
         self.init_rescale = init_rescale
         self.init_scale_factor = init_scale_factor
+        self.exclude_graph_neighbors = exclude_graph_neighbors
+        self.negative_selection_range = negative_selection_range
 
     def fit(self, X, y=None):
         """Fit the fuzzy graph and, in embedding mode, the training layout."""
@@ -609,6 +671,9 @@ class UMAP(BaseEstimator, TransformerMixin):
                 scale_factor = _finite_float(self.init_scale_factor, "init_scale_factor")
                 if scale_factor <= 0:
                     raise ValueError("init_scale_factor must be positive")
+                selection_range = _finite_float(
+                    self.negative_selection_range, "negative_selection_range"
+                )
             initial_coordinates = self._embedding_init(
                 n_rows, embedding_options["n_components"], modern=modern
             )
@@ -780,12 +845,15 @@ class UMAP(BaseEstimator, TransformerMixin):
         if modern:
             if embedding_options["negative_sample_rate"] == 0:
                 warnings.warn("divide by zero encountered in divide", RuntimeWarning, stacklevel=2)
-            embedding = _fit_modern_initialization(
-                components, embedding_options["seed"], initial_coordinates,
-                embedding_options["n_components"], self.init_rescale, scale_factor,
+            layout_options = embedding_options.copy()
+            rng = layout_options.pop("seed")
+            embedding, history = _fit_modern_embedding(
+                components, rng, initial_coordinates,
+                optimizer="momentum" if self.optimizer == "momentum" else "adam",
+                rescale=self.init_rescale, scale_factor=scale_factor,
+                checkpoint_epochs=checkpoint_epochs, negative_selection_range=selection_range,
+                exclude_graph_neighbors=bool(self.exclude_graph_neighbors), **layout_options,
             )
-            if checkpoint_epochs is not None:
-                history = [embedding.copy()]
             embedding[np.diff(graph.indptr) == 0] = np.nan
         elif spectral:
             rng = np.random.RandomState(embedding_options.pop("seed"))
@@ -1208,9 +1276,10 @@ class UMAP(BaseEstimator, TransformerMixin):
             n_epochs = _default_epochs(n_rows, densmap)
         else:
             n_epochs = checkpoint_epochs[-1] if checkpoint_epochs else _validate_epochs(self.n_epochs)
-        if modern and n_epochs > 0:
-            setting = f"optimizer={self.optimizer!r}" if self.optimizer else "compatibility_layout=False"
-            raise NotImplementedError(f"positive epochs with {setting} are not implemented")
+        if modern and n_epochs > 0 and self.optimizer == "compatibility":
+            raise NotImplementedError(
+                "optimizer='compatibility' with compatibility_layout=False supports zero epochs"
+            )
 
         seed = self.random_state
         if seed is None and n_rows == 1:

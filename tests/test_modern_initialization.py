@@ -42,7 +42,7 @@ def test_modern_initialization_and_rng_state(case_name):
 
     # These three words belong to the optimizer, after the native stage.
     rng.set_state((algorithm, np.array(words, dtype=np.uint32), position, gaussian is not None, gaussian or 0.0))
-    rng.randint(-2**31 + 1, 2**31 - 1, size=3)
+    rng.randint(-2**31 + 1, 2**31 - 2, 3)
     _, _, position, has_gaussian, cached = rng.get_state()
     assert position == case["rng"]["position"]
     assert (cached if has_gaussian else None) == case["rng"]["gaussian"]

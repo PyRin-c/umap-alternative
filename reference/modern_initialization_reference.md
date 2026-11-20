@@ -26,12 +26,17 @@ including powers of ten outside the float32 normal range, ties around
 half the edge weight, self-loops, zero weights, and distances whose squares
 underflow. Native Rust isotropic checkpoints allow a relative error of
 `1.5e-6` for float32 logarithm and exponential rounding. The Python
-estimator uses NumPy's isotropic rescaling after Rust centers the
+estimator uses NumPy's robust-span rescaling after Rust centers the
 coordinates. The zero-epoch Python tests
 check the exact graph, coordinates, RNG cursor, Gaussian cache and next
 four words for selected cases. They exercise Adam and momentum selection
 and the implicit optimizer with `compatibility_layout=False`. Invalid
 shapes and scale settings are checked before the first coordinate draw.
+
+The [estimator fit study](modern_fit_reference.md) covers how the sampler's
+cutoff affects graph-edge initialization and how repulsion strength sets
+the target for robust-span initialization. The Python estimator uses the
+same initialization path for zero and positive epoch budgets.
 
 Rust spectral handoff tests use captured eigenvectors and allow an absolute
 error of `1e-5`. Supplying the recorded recursive coordinates to the
@@ -40,9 +45,9 @@ recursive model reproduces the observed caller RNG checkpoints, with
 coordinate errors up to 10.48 on a held-out graph. Direct calls to
 `simplicial_set_embedding` without an estimator can use a different robust
 target. The fixture records two such calls with a zero target span. The
-Python estimator currently supports random and explicit zero-epoch
-layouts. Recursive and modern spectral initialization, positive optimizer
-epochs, and transform and update parity for modern fits remain open.
+Python estimator supports random and explicit modern layouts. Recursive
+and modern spectral initialization and transform and update parity for
+modern fits remain open.
 
 ## Reproduce
 

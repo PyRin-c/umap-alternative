@@ -53,7 +53,7 @@ Wheel は `target/wheels/` に生成されます。Python パッケージ名は 
 
 密な特徴量では `fit(X, y)` と `fit_transform(X, y)` で教師あり埋め込みを作れます。`target_metric="categorical"` では `-1` が未ラベルを表します。連続値の `y` には `target_metric="euclidean"`、`"manhattan"`、`"chebyshev"` を指定できます。[教師あり埋め込みの参照記録](reference/supervised_embedding_reference.md)
 
-密な入力の現代レイアウトは、`n_epochs=0` で `init="random"` または NumPy の初期座標を使えます。`compatibility_layout=False` か `optimizer="adam"` または `"momentum"` で選択し、`init_rescale` と `init_scale_factor` で初期座標を調整できます。[現代レイアウト初期化の比較記録](reference/modern_initialization_reference.md)
+密な入力の現代レイアウトは、乱数シードを指定し、`init="random"` または NumPy の初期座標で学習できます。`compatibility_layout=False` か `optimizer="adam"` または `"momentum"` で選択し、`init_rescale` と `init_scale_factor` で初期座標を調整できます。エポック番号のリストを指定すると、対応する座標を `embedding_list_` に格納します。[現代レイアウトの比較記録](reference/modern_fit_reference.md)
 
 Adam と momentum による正のエポック数の学習は未実装です。固定シードの検証条件と適用範囲は [スペクトル初期化を使った学習の参照記録](reference/spectral_fit_reference.md) と [ランダム初期化と初期座標を指定した学習の参照記録](reference/seeded_fit_reference.md) を参照してください。
 

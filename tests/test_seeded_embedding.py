@@ -257,11 +257,12 @@ def test_seeded_fit_warns_when_n_jobs_is_overridden():
 
 
 @pytest.mark.parametrize("optimizer", ["adam", "momentum"])
-def test_modern_optimizer_cannot_use_seeded_compatibility_path(optimizer):
+def test_modern_optimizer_opts_in_when_compatibility_is_unspecified(optimizer):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        with pytest.raises(NotImplementedError, match=optimizer):
-            embedding_model(compatibility_layout=None, optimizer=optimizer).fit(WEIGHTED)
+        implicit = embedding_model(compatibility_layout=None, optimizer=optimizer).fit_transform(WEIGHTED)
+        explicit = embedding_model(compatibility_layout=False, optimizer=optimizer).fit_transform(WEIGHTED)
+        assert_embedding_bits(implicit, explicit.view(np.uint32))
         with pytest.raises(ValueError, match="requires compatibility_layout=False"):
             embedding_model(optimizer=optimizer).fit(WEIGHTED)
 
@@ -269,7 +270,7 @@ def test_modern_optimizer_cannot_use_seeded_compatibility_path(optimizer):
 @pytest.mark.parametrize(
     "overrides,exception,match",
     [
-        ({"compatibility_layout": False}, NotImplementedError, "compatibility_layout=False"),
+        ({"compatibility_layout": False, "optimizer": "compatibility"}, NotImplementedError, "zero epochs"),
         ({"optimizer": "sgd"}, ValueError, "Unknown optimizer"),
         ({"init": "tswspectral"}, NotImplementedError, "tswspectral"),
         ({"init": EXPLICIT.tolist()}, ValueError, "string or ndarray"),

@@ -20,7 +20,7 @@ struct Case {
     n_rows: usize,
     n_components: usize,
     n_epochs: usize,
-    negative_sample_rate: usize,
+    negative_sample_rate: f64,
     exclude_graph_neighbors: bool,
     negative_selection_range: usize,
     curve: [f64; 2],
@@ -57,23 +57,12 @@ struct RandomContinuation {
     next_words: [u32; 4],
 }
 
-fn check_coordinates(
-    actual: &[f32],
-    expected: &[u32],
-    tolerance: f32,
-    context: &str,
-) -> (usize, f32) {
-    assert_eq!(actual.len(), expected.len(), "{context}");
-    let mut exact = 0;
-    let mut max_error = 0.0_f32;
-    for (&actual, &expected) in actual.iter().zip(expected) {
-        exact += usize::from(actual.to_bits() == expected);
-        let expected = f32::from_bits(expected);
-        let error = (actual - expected).abs();
-        max_error = max_error.max(error);
-        assert!(error <= tolerance, "{context}: {actual} vs {expected}");
-    }
-    (exact, max_error)
+fn check_coordinates(actual: &[f32], expected: &[u32], context: &str) {
+    let actual: Vec<_> = actual
+        .iter()
+        .map(|coordinate| coordinate.to_bits())
+        .collect();
+    assert_eq!(actual, expected, "{context}");
 }
 
 fn run_fixture(optimizer: ModernOptimizer) {
@@ -83,12 +72,6 @@ fn run_fixture(optimizer: ModernOptimizer) {
     let mut total_positive = 0;
     let mut total_negative = 0;
     let mut coordinate_count = 0;
-    let mut coordinate_exact = 0;
-    let mut coordinate_error = 0.0_f32;
-    let tolerance = match optimizer {
-        ModernOptimizer::Momentum => 2.0e-7,
-        ModernOptimizer::Adam => 4.5e-6,
-    };
     for case in fixture.cases {
         let (snapshots, events, continuation) = match optimizer {
             ModernOptimizer::Momentum => {
@@ -157,10 +140,8 @@ fn run_fixture(optimizer: ModernOptimizer) {
                 accepted.sort_unstable();
                 assert_eq!(accepted, case.negative[epoch], "{context}");
             }
-            let (exact, error) = check_coordinates(step.coordinates, expected, tolerance, &context);
+            check_coordinates(step.coordinates, expected, &context);
             coordinate_count += expected.len();
-            coordinate_exact += exact;
-            coordinate_error = coordinate_error.max(error);
             epochs += 1;
             total_positive += step.positive.len();
             total_negative += step.negative.len();
@@ -174,7 +155,6 @@ fn run_fixture(optimizer: ModernOptimizer) {
         check_coordinates(
             sampled.coordinates(),
             snapshots.last().unwrap(),
-            tolerance,
             &format!("{optimizer:?} {} final", case.name),
         );
         assert_eq!(
@@ -196,7 +176,7 @@ fn run_fixture(optimizer: ModernOptimizer) {
         cases += 1;
     }
     eprintln!(
-        "{optimizer:?}: {cases} cases, {epochs} epochs, {total_positive} positive, {total_negative} negative, {coordinate_exact}/{coordinate_count} exact coordinates, max abs {coordinate_error}"
+        "{optimizer:?}: {cases} cases, {epochs} epochs, {total_positive} positive, {total_negative} negative, {coordinate_count} exact coordinates"
     );
 }
 

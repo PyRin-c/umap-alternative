@@ -26,9 +26,11 @@ use umap_core::inverse::{
 use umap_core::modern_initialization::{
     ModernInit, ModernInitConfig, ModernInitRescale, initialize_modern_layout,
 };
+use umap_core::modern_layout::{ModernLayoutConfig, ModernOptimizer};
 use umap_core::neighbors::DistanceMetric;
 use umap_core::parametric::prepare_parametric_edges;
 use umap_core::rng::Mt19937;
+use umap_core::sampling::{ModernSampledLayout, ModernSamplingConfig};
 use umap_core::sparse::{fit_sparse_euclidean_graph_with_cutoff, fit_sparse_graph_with_options};
 use umap_core::transform::{
     CooGraph, DenseEmbeddingTransformConfig, transform_dense_embedding_with_options,
@@ -43,6 +45,7 @@ type EmbeddingComponents = (CsrComponents, (usize, usize), Vec<f32>);
 type RngState = (Vec<u32>, usize);
 type GaussianRngState = (Vec<u32>, usize, Option<f64>);
 type GraphEmbeddingComponents = ((usize, usize), Vec<f32>, RngState, Vec<Vec<f32>>);
+type ModernEmbeddingComponents = (Vec<f32>, GaussianRngState, Vec<Vec<f32>>);
 type RadiusInput = (Vec<f32>, usize, String);
 type DensityInput = ((f64, f64, f64), RadiusInput);
 type AlignedEmbeddingComponents = (Vec<Vec<f32>>, Option<RngState>);
@@ -548,6 +551,110 @@ fn _initialize_modern_layout(
     Ok((coordinates, (words.to_vec(), cursor, gaussian)))
 }
 
+/// Apply modern epochs to already initialized coordinates.
+#[pyfunction]
+#[pyo3(signature = (
+    components, coordinates, rng_state, *, optimizer, n_components, n_epochs, a, b,
+    learning_rate, repulsion_strength, negative_sample_rate, exclude_graph_neighbors,
+    checkpoint_epochs=None, project=None
+))]
+#[allow(clippy::too_many_arguments)]
+fn _fit_modern_layout(
+    py: Python<'_>,
+    components: CsrComponents,
+    coordinates: Vec<f32>,
+    rng_state: GaussianRngState,
+    optimizer: &str,
+    n_components: usize,
+    n_epochs: usize,
+    a: f64,
+    b: f64,
+    learning_rate: f64,
+    repulsion_strength: f64,
+    negative_sample_rate: f64,
+    exclude_graph_neighbors: bool,
+    checkpoint_epochs: Option<Vec<usize>>,
+    project: Option<Py<PyAny>>,
+) -> PyResult<ModernEmbeddingComponents> {
+    let ((n_rows, n_cols), indptr, indices, data) = components;
+    let graph = CsrGraph {
+        n_rows,
+        n_cols,
+        indptr,
+        indices,
+        data,
+    };
+    let optimizer = match optimizer {
+        "adam" => ModernOptimizer::Adam,
+        "momentum" => ModernOptimizer::Momentum,
+        _ => return Err(PyValueError::new_err("invalid modern optimizer")),
+    };
+    let config = ModernLayoutConfig {
+        optimizer,
+        n_components,
+        n_epochs,
+        learning_rate,
+        a,
+        b,
+        repulsion_strength,
+    };
+    // The Python projector owns the rank order and caller RNG on that path.
+    let sampling = ModernSamplingConfig {
+        negative_sample_rate,
+        exclude_graph_neighbors,
+        negative_selection_range: if project.is_some() { 0 } else { n_rows },
+    };
+    let (words, cursor, mut gaussian) = rng_state;
+    let mut rng = Mt19937::from_state(&words, cursor)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+
+    let use_projection = project.is_some();
+    let mut sampled = py
+        .detach(|| {
+            if use_projection {
+                ModernSampledLayout::with_supplied_candidates(&graph, coordinates, config, sampling)
+            } else {
+                ModernSampledLayout::new(&graph, coordinates, config, sampling, &mut rng)
+            }
+        })
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let mut order = if use_projection {
+        (0..n_rows).collect()
+    } else {
+        Vec::new()
+    };
+    let mut history = Vec::new();
+    let mut checkpoints = checkpoint_epochs.into_iter().flatten().peekable();
+    for epoch in 0..n_epochs {
+        py.detach(|| {
+            if use_projection {
+                sampled.step_with_candidate_order(&order)
+            } else {
+                sampled.step(&mut rng, &mut gaussian)
+            }
+            .map(|_| ())
+        })
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        if checkpoints.next_if_eq(&epoch).is_some() {
+            history.push(sampled.coordinates().to_vec());
+        }
+        if let Some(project) = &project {
+            order = project
+                .call1(py, (epoch, sampled.coordinates().to_vec()))?
+                .extract(py)?;
+        }
+    }
+    if checkpoints.next_if_eq(&n_epochs).is_some() {
+        history.push(sampled.coordinates().to_vec());
+    }
+    let (words, cursor) = rng.state();
+    Ok((
+        sampled.into_coordinates(),
+        (words.to_vec(), cursor, gaussian),
+        history,
+    ))
+}
+
 /// Fit a fuzzy graph from dense features and one categorical label per row.
 #[pyfunction]
 #[pyo3(signature = (data, n_rows, n_features, k, metric, labels, target_weight, *, graph_options=None))]
@@ -1002,6 +1109,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_density_radius_log_inputs, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_graph_embedding_with_rng, module)?)?;
     module.add_function(wrap_pyfunction!(_initialize_modern_layout, module)?)?;
+    module.add_function(wrap_pyfunction!(_fit_modern_layout, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_categorical_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_continuous_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_precomputed_graph, module)?)?;

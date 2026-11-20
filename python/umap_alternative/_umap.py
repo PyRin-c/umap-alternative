@@ -301,6 +301,33 @@ def _sparse_tie_ranker(metric):
     return _rank_tied_manhattan_distances if metric == "manhattan" else _rank_tied_dense_distances
 
 
+def _modern_projector(rng, shape, *, draw_seed):
+    order = np.arange(shape[0], dtype=np.int32)
+
+    def project(epoch, values):
+        if draw_seed and epoch == 0:
+            rng.randint(-2**31 + 1, 2**31 - 2, 3)
+        rng.shuffle(order)
+        direction = rng.randn(shape[1])
+        direction /= np.linalg.norm(direction)
+        coords = np.asarray(values, dtype=np.float32).reshape(shape)
+        return np.argsort(coords @ direction).tolist()
+
+    return project
+
+
+def _refine_recursive_level(graph, coordinates, n_epochs, rng, *, a, b):
+    shape = coordinates.shape
+    components = graph.shape, graph.indptr.tolist(), graph.indices.tolist(), graph.data.tolist()
+    values, _, _ = _native._fit_modern_layout(
+        components, coordinates.ravel().tolist(), _modern_rng_state(rng),
+        optimizer="adam", n_components=shape[1], n_epochs=n_epochs, a=a, b=b,
+        learning_rate=0.5, repulsion_strength=1.0, negative_sample_rate=1.0,
+        exclude_graph_neighbors=False, project=_modern_projector(rng, shape, draw_seed=False),
+    )
+    return np.asarray(values, dtype=np.float32).reshape(shape)
+
+
 def _fit_modern_embedding(
     components, rng, initial, *, optimizer, n_components, n_epochs,
     rescale, scale_factor, checkpoint_epochs, negative_selection_range,
@@ -316,21 +343,10 @@ def _fit_modern_embedding(
         rng.randint(-2**31 + 1, 2**31 - 2, 3)
         return embedding, None if checkpoint_epochs is None else [embedding.copy()]
 
-    projector = None
-    if len(embedding) > negative_selection_range:
-        shape = embedding.shape
-        order = np.arange(len(embedding), dtype=np.int32)
-
-        def projector(epoch, values):
-            if epoch == 0:
-                rng.randint(-2**31 + 1, 2**31 - 2, 3)
-            rng.shuffle(order)
-            direction = rng.randn(n_components)
-            direction /= np.linalg.norm(direction)
-            coords = np.asarray(values, dtype=np.float32).reshape(shape)
-            return np.argsort(coords @ direction).tolist()
-
     shape = embedding.shape
+    projector = (
+        _modern_projector(rng, shape, draw_seed=True) if len(embedding) > negative_selection_range else None
+    )
     values, state, snapshots = _native._fit_modern_layout(
         components, embedding.ravel().tolist(), _modern_rng_state(rng),
         optimizer=optimizer, n_components=n_components, n_epochs=n_epochs,
@@ -578,8 +594,8 @@ class UMAP(BaseEstimator, TransformerMixin):
     CSC, and COO queries. Float64 queries return float64 coordinates for this path.
     A singleton has a zero embedding and no graph. Seeded modern Adam and
     momentum layouts accept spectral, random, and explicit initialization.
-    Dense recursive initialization supports the PCA base case and coarsening
-    with one eligible hub per non-hub component and zero coarse epochs.
+    Dense recursive initialization supports the PCA base case and coarsening.
+    Use up to one coarse epoch for multiple levels or up to three for one level.
     For a fitted dense embedding, ``inverse_transform`` reconstructs
     the original features as a new float32 array. It warns when any query
     requires extrapolation outside the convex hull of the fitted layout.
@@ -1004,6 +1020,7 @@ class UMAP(BaseEstimator, TransformerMixin):
                     _modern_recursive_initialization, features=X_checked, options=recursive_options,
                     ratio=self.recursive_coarsening_ratio,
                     weights=self.coarse_layout_weights if self.coarsen_on_layout_weights else "fuzzy_union",
+                    refine=partial(_refine_recursive_level, a=layout_options["a"], b=layout_options["b"]),
                 )
             embedding, history = _fit_modern_embedding(
                 components, rng, initial_coordinates,

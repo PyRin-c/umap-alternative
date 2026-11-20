@@ -30,7 +30,7 @@ use umap_core::modern_initialization::{
 use umap_core::modern_layout::{ModernLayoutConfig, ModernOptimizer};
 use umap_core::neighbors::DistanceMetric;
 use umap_core::parametric::prepare_parametric_edges;
-use umap_core::rng::Mt19937;
+use umap_core::rng::{Mt19937, recursive_part_labels};
 use umap_core::sampling::{ModernSampledLayout, ModernSamplingConfig};
 use umap_core::sparse::{
     CsrFeatures, SparseTieDistances, fit_sparse_euclidean_graph_with_cutoff,
@@ -682,6 +682,15 @@ fn _initialize_modern_layout(
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     let (words, cursor) = rng.state();
     Ok((coordinates, (words.to_vec(), cursor, gaussian)))
+}
+
+#[pyfunction]
+fn _recursive_part_labels(
+    seed: [i64; 3],
+    rows: Vec<usize>,
+    n_parts: std::num::NonZeroUsize,
+) -> Vec<usize> {
+    recursive_part_labels(seed, &rows, n_parts)
 }
 
 /// Apply modern epochs to already initialized coordinates.
@@ -1362,6 +1371,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_fit_graph_embedding_with_rng, module)?)?;
     module.add_function(wrap_pyfunction!(_initialize_modern_layout, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_modern_layout, module)?)?;
+    module.add_function(wrap_pyfunction!(_recursive_part_labels, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_categorical_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_continuous_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_precomputed_graph, module)?)?;

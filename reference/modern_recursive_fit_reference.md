@@ -1,5 +1,9 @@
 # Seeded modern recursive initialization
 
+The [contraction follow-up](modern_recursive_contraction_reference.md)
+replays the six residual probes below and records new holdouts. The
+measurements in this file describe the original implementation.
+
 The reference generator uses `UMAP.fit` and `UMAP.fit_transform` from the
 pinned `umap-learn==0.6.0` wheel. It records the CSR, every requested epoch
 checkpoint, each initialization sketch and seed draw, and the caller

@@ -3,8 +3,10 @@
 import numbers
 
 import numpy as np
-from scipy.sparse.csgraph import connected_components
+from scipy.sparse import csr_matrix
 from sklearn.utils.extmath import randomized_svd
+
+from . import _native
 
 
 _BASE_INIT_THRESHOLD = 1024
@@ -59,67 +61,87 @@ def _validate_recursive_initialization(ratio, weights, kwds):
     return kwds
 
 
-def _recursive_partition(graph, n_parts):
-    degrees = np.asarray(graph.sum(axis=1)).ravel()
-    order = np.argsort(degrees, kind="stable")
-    rows, hubs = order[:-n_parts], order[-n_parts:]
-    if degrees[rows].min() == 0 or degrees[rows[-1]] == degrees[hubs[0]]:
-        raise NotImplementedError("recursive coarsening requires positive degrees and unambiguous hubs")
-
-    # Each component of the non-hub rows must attach to a single hub.
-    # Propagation order cannot change the labels in this case.
-    count, groups = connected_components(graph[rows][:, rows], directed=False)
-    attached = graph[rows][:, hubs].tocoo()
-    first = np.full(count, n_parts, dtype=np.intp)
-    last = np.full(count, -1, dtype=np.intp)
-    np.minimum.at(first, groups[attached.row], attached.col)
-    np.maximum.at(last, groups[attached.row], attached.col)
-    if np.any(first != last):
-        raise NotImplementedError("recursive coarsening with competing or missing hubs is not implemented")
-    labels = np.empty(len(degrees), dtype=np.intp)
+def _recursive_partition(graph, n_parts, seed, *, layout_graph=None):
+    degree_graph = graph if layout_graph is None else layout_graph
+    degrees = np.asarray(degree_graph.sum(axis=1)).ravel()
+    hubs = np.argsort(degrees, kind="stable")[-n_parts:]
+    labels = np.full(len(degrees), -1, dtype=np.intp)
     labels[hubs] = np.arange(n_parts)
-    labels[rows] = first[groups]
-    return labels, hubs, degrees
+    while True:
+        known = np.flatnonzero(labels >= 0)
+        pending = np.flatnonzero(labels < 0)
+        if not len(pending):
+            break
+        indicator = csr_matrix(
+            (np.ones(len(known), dtype=np.float32), (known, labels[known])),
+            shape=(len(labels), n_parts),
+        )
+        # Score the whole frontier before assigning any of its rows. Sparse
+        # product order supplies the tie order when two parts have equal support.
+        support = graph[pending] @ indicator
+        for local, row in enumerate(pending):
+            start, stop = support.indptr[local:local + 2]
+            if start != stop:
+                best = start + np.argmax(support.data[start:stop])
+                if support.data[best] >= 1.0:
+                    labels[row] = support.indices[best]
+        if np.all(labels[pending] < 0):
+            break
+
+    # A weakly attached row can copy the first known neighbor in CSR order.
+    # Sweep in row order while any of the pending rows can still acquire labels.
+    while np.any(labels[pending] < 0):
+        previous = np.count_nonzero(labels[pending] < 0)
+        for row in pending:
+            start, stop = graph.indptr[row:row + 2]
+            neighbors = labels[graph.indices[start:stop]]
+            known = neighbors[neighbors >= 0]
+            if len(known):
+                labels[row] = known[0]
+        if np.count_nonzero(labels[pending] < 0) == previous:
+            break
+
+    missing = np.flatnonzero(labels < 0)
+    if len(missing):
+        labels[missing] = _native._recursive_part_labels(seed.tolist(), missing.tolist(), n_parts)
+    return labels
 
 
-def _coarse_graph(graph, labels, hubs, weights, remove_diagonal):
-    # Cross-part edges join hubs because every non-hub row has a single
-    # possible label. The hub subgraph therefore stores all cross-part weights.
-    coarse = graph[hubs][:, hubs].astype(np.float64)
-    coarse.setdiag(0.0)
+def _coarse_graphs(graph, labels, n_parts, weights, remove_diagonal):
+    edges = graph.tocoo()
+    source, target = labels[edges.row], labels[edges.col]
+    keep = source != target if weights == "transition" or remove_diagonal else slice(None)
+    source, target, values = source[keep], target[keep], edges.data[keep]
+    shape = (n_parts, n_parts)
     if weights == "transition":
+        # The next contraction uses raw support and ranks hubs by the
+        # normalized layout degrees. Expansion also uses the layout weights.
+        coarse = csr_matrix((values, (source, target)), shape=shape)
         totals = np.asarray(coarse.sum(axis=1)).ravel()
         inverse = np.divide(1.0, totals, out=np.zeros_like(totals), where=totals > 0)
         transition = coarse.multiply(inverse[:, None]).tocsr()
-        coarse = transition + transition.T - transition.multiply(transition.T)
-    elif not remove_diagonal:
-        edges = graph.tocoo()
-        internal = labels[edges.row] == labels[edges.col]
-        complements = np.ones(len(hubs), dtype=np.float64)
-        np.multiply.at(complements, labels[edges.row[internal]], 1.0 - edges.data[internal])
-        coarse.setdiag(1.0 - complements)
+        layout = transition + transition.T - transition.multiply(transition.T)
+        layout.eliminate_zeros()
+        return coarse, layout
+    elif len(values):
+        order = np.lexsort((target, source))
+        source, target, values = source[order], target[order], values[order]
+        starts = np.r_[0, np.flatnonzero((source[1:] != source[:-1]) | (target[1:] != target[:-1])) + 1]
+        complements = np.multiply.reduceat((1.0 - values).astype(np.float64), starts)
+        coarse = csr_matrix((1.0 - complements, (source[starts], target[starts])), shape=shape)
+    else:
+        coarse = csr_matrix(shape, dtype=np.float32)
     coarse.eliminate_zeros()
-    return coarse.astype(np.float32)
+    coarse.sort_indices()
+    coarse = coarse.astype(np.float32)
+    return coarse, coarse
 
 
-def _recursive_levels(graph, threshold, ratio, weights, options):
-    levels = []
-    while graph.shape[0] > threshold:
-        if options.get("n_embedding_epochs") != 0:
-            raise NotImplementedError("recursive coarsening requires n_embedding_epochs=0")
-        size = graph.shape[0]
-        n_parts = max(size // ratio, min(threshold, size // 2))
-        labels, hubs, degrees = _recursive_partition(graph, n_parts)
-        levels.append((graph, labels, degrees))
-        if n_parts <= threshold:
-            break
-        graph = _coarse_graph(graph, labels, hubs, weights, options.get("remove_coarse_diagonal", False))
-    return levels
-
-
-def _expand_layout(graph, labels, degrees, child, anchor):
+def _expand_layout(graph, labels, child, anchor):
+    degrees = np.asarray(graph.sum(axis=1)).ravel()
     expanded = child[labels]
-    expanded = 0.5 * (expanded + (graph @ expanded) / degrees[:, None])
+    averages = np.divide(graph @ expanded, degrees[:, None], out=np.zeros_like(expanded), where=degrees[:, None] > 0)
+    expanded = 0.5 * (expanded + averages)
     expanded -= expanded.mean(axis=0)
     left, _, right = np.linalg.svd(expanded.T @ (anchor - anchor.mean(axis=0)))
     if np.linalg.det(left @ right) < 0:
@@ -127,8 +149,8 @@ def _expand_layout(graph, labels, degrees, child, anchor):
     return expanded @ (left @ right)
 
 
-def _modern_recursive_initialization(graph, features, n_components, rng, options, ratio, weights):
-    """Return prepared coordinates for the base case or an unambiguous hierarchy."""
+def _modern_recursive_initialization(graph, features, n_components, rng, options, ratio, weights, refine):
+    """Return prepared coordinates for the base case or a contracted hierarchy."""
     threshold = options.get("base_init_threshold", _BASE_INIT_THRESHOLD)
     if n_components > min(features.shape):
         raise NotImplementedError("recursive initialization requires enough rows and features for n_components")
@@ -136,16 +158,37 @@ def _modern_recursive_initialization(graph, features, n_components, rng, options
         raise NotImplementedError("recursive PCA anchor subsampling is not implemented")
     if not np.isfinite(features).all():
         raise ValueError("recursive PCA requires finite distances")
-    levels = _recursive_levels(graph, threshold, ratio, weights, options)
+    coarse_epochs = options.get("n_embedding_epochs")
+    if graph.shape[0] > threshold and coarse_epochs not in (0, 1, 2, 3):
+        raise NotImplementedError("recursive coarsening supports zero to three explicit coarse epochs")
+    if graph.shape[0] // ratio > threshold and coarse_epochs in (2, 3):
+        raise NotImplementedError("multiple recursive levels support zero or one coarse epoch")
+    levels = []
+    contraction_graph = graph
     anchors = [_sampled_pca_anchor(features, n_components, rng)]
-    for _, labels, _ in levels:
-        rng.randint(-2**31 + 1, 2**31 - 2, 3)
+    while graph.shape[0] > threshold:
+        size = graph.shape[0]
+        target = min(threshold, size // 2) if not levels else 2
+        n_parts = max(2, size // ratio, target)
+        seed = rng.randint(-2**31 + 1, 2**31 - 2, 3)
+        labels = _recursive_partition(contraction_graph, n_parts, seed, layout_graph=graph)
         counts = np.bincount(labels)
         means = np.zeros((len(counts), n_components), dtype=np.float32)
         np.add.at(means, labels, anchors[-1])
         means /= counts[:, None]
         anchors.append(means)
+        child = None
+        if n_parts > threshold or coarse_epochs:
+            contraction_graph, child = _coarse_graphs(
+                contraction_graph, labels, n_parts, weights, options.get("remove_coarse_diagonal", False),
+            )
+        levels.append((graph, labels, child))
+        if n_parts <= threshold:
+            break
+        graph = child
     layout = _recursive_base(anchors[-1], depth=len(anchors))
-    for (graph, labels, degrees), anchor in zip(reversed(levels), reversed(anchors[:-1]), strict=True):
-        layout = _expand_layout(graph, labels, degrees, layout, anchor)
+    for (parent, labels, child), anchor in zip(reversed(levels), reversed(anchors[:-1]), strict=True):
+        if coarse_epochs:
+            layout = refine(child, layout, coarse_epochs, rng)
+        layout = _expand_layout(parent, labels, layout, anchor)
     return layout

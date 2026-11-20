@@ -335,6 +335,22 @@ pub(crate) fn sample_absolute_vertex(lanes: &mut [i64; 3], n_vertices: usize) ->
     next_negative_word(lanes).unsigned_abs() as usize % n_vertices
 }
 
+/// Select a fallback part for each unassigned row using independent row offsets.
+pub fn recursive_part_labels(
+    seed: [i64; 3],
+    rows: &[usize],
+    n_parts: std::num::NonZeroUsize,
+) -> Vec<usize> {
+    rows.iter()
+        .map(|&row| {
+            sample_vertex(
+                &mut seed.map(|lane| lane.wrapping_add(row as i64)),
+                n_parts.get(),
+            )
+        })
+        .collect()
+}
+
 fn next_negative_word(lanes: &mut [i64; 3]) -> i32 {
     lanes[0] = advance_lane(lanes[0], 0xffff_fffe, 13, 12, 19);
     lanes[1] = advance_lane(lanes[1], 0xffff_fff8, 2, 4, 25);

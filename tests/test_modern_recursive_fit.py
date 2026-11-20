@@ -82,19 +82,6 @@ def test_modern_recursive_fit(case, method):
         np.testing.assert_allclose(actual, expected, rtol=0, atol=6e-6 if epoch == 0 else 3e-6)
 
 
-@pytest.mark.parametrize("case", REFERENCE["probes"], ids=lambda case: case["name"])
-def test_unverified_recursive_branches_preserve_caller_rng(case):
-    rng = TracedRandomState(case["seed"])
-    data = make_data(case["data"])
-    model = UMAP(**case["options"], random_state=rng, n_jobs=1)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        with pytest.raises(NotImplementedError, match="recursive coarsening"):
-            model.fit(data)
-    assert not rng.normal_calls
-    assert rng_checkpoint(rng) == case["rng_start"]
-
-
 @pytest.mark.parametrize("ratio,weights,message", [
     (5, "transition", "recursive_coarsening_ratio"),
     (2.0, "transition", "recursive_coarsening_ratio"),

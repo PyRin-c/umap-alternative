@@ -28,12 +28,6 @@ EXPECTED_BITS = np.array(
     ],
     dtype=np.uint32,
 )
-# The native graph primitive currently differs from the captured public wheel
-# by one ULP at the two symmetric 1-3/3-1 memberships.  Keep the residual
-# explicit while asserting every other data bit exactly.
-NATIVE_RESIDUAL_BITS = {4: 1058390033, 8: 1058390033}
-
-
 def graph_model(**kwargs):
     parameters = dict(
         n_components=2,
@@ -61,10 +55,7 @@ def assert_baseline_graph(graph):
     np.testing.assert_array_equal(graph.indices, EXPECTED_INDICES)
     actual_bits = graph.data.view(np.uint32)
     for position, (actual, expected) in enumerate(zip(actual_bits, EXPECTED_BITS)):
-        if position in NATIVE_RESIDUAL_BITS:
-            assert int(actual) == NATIVE_RESIDUAL_BITS[position]
-        else:
-            assert int(actual) == int(expected)
+        assert int(actual) == int(expected), (position, int(actual), int(expected))
 
 
 def test_graph_fit_is_sklearn_shaped_and_matches_public_csr_contract():

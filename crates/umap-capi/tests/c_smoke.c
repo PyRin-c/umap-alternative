@@ -747,6 +747,121 @@ static void check_directed_graph_transform(void) {
     CHECK(umap_capi_coo_graph_release(graph) == UMAP_CAPI_STATUS_OK);
 }
 
+static void check_dense_update(void) {
+    /* Close-pair jitter and optimizer checkpoints from the public update-layout fixture. */
+    const float combined[] = {
+        0.0f, 0.0f, 0.0f,
+        0.2f, 0.07f, 0.1f,
+        0.25f, 0.89f, 0.13f,
+        0.76f, 0.1f, 0.83f,
+        0.99f, 0.95f, 0.37f,
+        1.9f, 1.31f, 0.33f,
+        2.61f, 1.7f, 0.9f,
+        3.3f, 1.2f, 1.1f,
+        0.31f, 0.9f, 0.2f,
+        0.305f, 0.91f, 0.205f,
+    };
+    const uint32_t initial[] = {
+        1082309325, 1091744602, 1087988334, 1088210070, 1069873797, 1060110722,
+        1081684873, 1091066003, 1082368327, 1089405340, 0, 1092616192, 1092616192,
+        0, 1081437117, 1058502120, 1077207337, 1082295373, 1077196900, 1082301952,
+    };
+    const uint32_t optimized[] = {
+        1082513110, 1091659266, 1087546951, 1088518834, 1069873797, 1060110722,
+        1081982604, 1090794034, 1082097466, 1089268539, 1034155853, 1092564056,
+        1092538578, 1005109337, 1081743926, 1058384350, 1077300694, 1082434718,
+        1077284236, 1082411564,
+    };
+    const size_t indptr[] = {0, 3, 7, 12, 15, 22, 25, 28, 31, 37, 40};
+    const size_t columns[] = {
+        1, 2, 8, 0, 2, 3, 8, 0, 1, 4, 8, 9, 1, 4, 8, 2, 3, 5, 6, 7,
+        8, 9, 4, 6, 7, 4, 5, 7, 4, 5, 6, 0, 1, 2, 3, 4, 9, 2, 4, 8,
+    };
+    const uint32_t weights[] = {
+        1065353216, 1057122905, 1056647969, 1065353216, 1057067398, 1065353216,
+        1056759340, 1057122905, 1057067398, 1037220775, 1065353215, 1065308232,
+        1065353216, 1059695368, 1051502904, 1037220775, 1059695368, 1065353216,
+        1043941809, 1052612122, 1065353216, 1064125748, 1065353216, 1065197112,
+        1059460393, 1043941809, 1065197112, 1065353216, 1052612122, 1059460393,
+        1065353216, 1056647969, 1056759340, 1065353215, 1051502904, 1065353216,
+        1065353216, 1065308232, 1064125748, 1065353216,
+    };
+    const umap_capi_dense_embedding_config_t fit_config = {
+        .n_neighbors = 4, .n_components = 2, .n_epochs = 30,
+        .a = 1.7, .b = 0.9, .learning_rate = 0.13,
+        .repulsion_strength = 1.0, .negative_sample_rate = 2.0,
+        .metric = UMAP_CAPI_METRIC_EUCLIDEAN, .init = UMAP_CAPI_INIT_RANDOM, .seed = 42,
+    };
+    umap_capi_dense_update_config_t update_config = {
+        .n_neighbors = 4, .a = 1.7, .b = 0.9, .learning_rate = 0.13,
+        .repulsion_strength = 1.0, .negative_sample_rate = 2.0,
+        .local_connectivity = 1.0, .set_op_mix_ratio = 1.0, .transform_seed = 42,
+    };
+    umap_capi_dense_embedding_t *fitted = NULL;
+    CHECK(umap_capi_fit_dense_embedding_seeded(combined, 24, 8, 3, &fit_config, &fitted)
+        == UMAP_CAPI_STATUS_OK);
+    umap_capi_dense_embedding_view_t original = {0};
+    CHECK(umap_capi_dense_embedding_view(fitted, &original) == UMAP_CAPI_STATUS_OK);
+    CHECK(original.coordinates_len == 16);
+    float before[16];
+    memcpy(before, original.coordinates, sizeof before);
+
+    for (size_t epochs = 0; epochs <= 2; ++epochs) {
+        update_config.n_epochs = epochs;
+        umap_capi_dense_embedding_t *updated = NULL;
+        CHECK(umap_capi_update_dense_embedding(
+            combined, COUNT(combined), 10, 3, fitted, &update_config, &updated
+        ) == UMAP_CAPI_STATUS_OK);
+        CHECK(updated != NULL && updated != fitted);
+        umap_capi_dense_embedding_view_t view = {0};
+        CHECK(umap_capi_dense_embedding_view(updated, &view) == UMAP_CAPI_STATUS_OK);
+        CHECK(view.n_rows == 10 && view.n_components == 2 && view.coordinates_len == COUNT(initial));
+        check_bits(view.coordinates, epochs == 2 ? optimized : initial, COUNT(initial));
+        CHECK(view.graph.n_rows == 10 && view.graph.n_cols == 10);
+        CHECK(view.graph.indptr_len == COUNT(indptr));
+        CHECK(view.graph.indices_len == COUNT(columns) && view.graph.data_len == COUNT(weights));
+        CHECK(memcmp(view.graph.indptr, indptr, sizeof indptr) == 0);
+        CHECK(memcmp(view.graph.indices, columns, sizeof columns) == 0);
+        check_bits(view.graph.data, weights, COUNT(weights));
+        CHECK(umap_capi_dense_embedding_release(updated) == UMAP_CAPI_STATUS_OK);
+    }
+
+    umap_capi_dense_embedding_t *unchanged = fitted;
+    CHECK(umap_capi_update_dense_embedding(
+        combined, COUNT(combined), 10, 3, fitted, NULL, &unchanged
+    ) == UMAP_CAPI_STATUS_NULL_ARGUMENT);
+    CHECK(unchanged == fitted);
+    CHECK(umap_capi_update_dense_embedding(
+        combined, COUNT(combined), SIZE_MAX, 3, fitted, &update_config, &unchanged
+    ) == UMAP_CAPI_STATUS_INVALID_SHAPE);
+    CHECK(unchanged == fitted);
+    CHECK(umap_capi_update_dense_embedding(
+        combined, 24, 8, 3, fitted, &update_config, &unchanged
+    ) == UMAP_CAPI_STATUS_INVALID_SHAPE);
+    CHECK(unchanged == fitted);
+    CHECK(umap_capi_update_dense_embedding(
+        combined, COUNT(combined) - 1, 10, 3, fitted, &update_config, &unchanged
+    ) == UMAP_CAPI_STATUS_INVALID_LENGTH);
+    CHECK(unchanged == fitted);
+    CHECK(umap_capi_update_dense_embedding(
+        combined, COUNT(combined), 10, 3, MISALIGNED(umap_capi_dense_embedding_t, fitted),
+        &update_config, &unchanged
+    ) == UMAP_CAPI_STATUS_INVALID_POINTER);
+    CHECK(unchanged == fitted);
+    update_config.n_neighbors = 9;
+    CHECK(umap_capi_update_dense_embedding(
+        combined, COUNT(combined), 10, 3, fitted, &update_config, &unchanged
+    ) == UMAP_CAPI_STATUS_INVALID_K);
+    CHECK(unchanged == fitted);
+    update_config.n_neighbors = 4;
+    update_config.set_op_mix_ratio = 1.0000000000000002;
+    CHECK(umap_capi_update_dense_embedding(
+        combined, COUNT(combined), 10, 3, fitted, &update_config, &unchanged
+    ) == UMAP_CAPI_STATUS_INVALID_CONFIG);
+    CHECK(unchanged == fitted && memcmp(original.coordinates, before, sizeof before) == 0);
+    CHECK(umap_capi_dense_embedding_release(fitted) == UMAP_CAPI_STATUS_OK);
+}
+
 int main(void) {
     check_graph_only();
     check_graph_options();
@@ -759,5 +874,6 @@ int main(void) {
     check_transform_cutoff();
     check_transform_boundaries();
     check_directed_graph_transform();
+    check_dense_update();
     return EXIT_SUCCESS;
 }

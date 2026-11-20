@@ -1,4 +1,4 @@
-//! C ABI for native dense UMAP graph and embedding fits and transforms.
+//! C ABI for native dense UMAP graph and embedding fits, transforms, and updates.
 //!
 //! Opaque handles own their result arrays. Callers must keep a handle alive
 //! while reading its borrowed views and release it exactly once. The public
@@ -24,7 +24,9 @@ use umap_core::optimize::OptimizeError;
 use umap_core::sampling::{EdgeSamplingCursor, SamplingError};
 
 mod transform;
+mod update;
 pub use transform::*;
+pub use update::*;
 
 /// Successful C ABI operation.
 pub const STATUS_OK: u32 = 0;
@@ -88,7 +90,7 @@ pub struct UmapCapiCsrView {
     pub data: *const f32,
 }
 
-/// Opaque owning result of [`umap_capi_fit_dense_embedding_seeded`].
+/// Opaque owning result of a dense embedding fit or update.
 #[repr(C)]
 pub struct UmapCapiDenseEmbedding {
     _private: [u8; 0],
@@ -603,8 +605,8 @@ pub unsafe extern "C" fn umap_capi_fit_dense_embedding_seeded(
 ///
 /// # Safety
 ///
-/// `embedding` must be a live handle returned by
-/// [`umap_capi_fit_dense_embedding_seeded`]. `out_view` must point to writable
+/// `embedding` must be a live handle returned by a dense embedding fit or
+/// update. `out_view` must point to writable
 /// aligned storage for one [`UmapCapiDenseEmbeddingView`] outside the handle's
 /// storage. The borrowed arrays must only be read while the handle is live.
 #[unsafe(no_mangle)]
@@ -645,7 +647,7 @@ pub unsafe extern "C" fn umap_capi_dense_embedding_view(
 /// # Safety
 ///
 /// `embedding` may be null, which is a no-op. Otherwise it must be a live
-/// handle returned by [`umap_capi_fit_dense_embedding_seeded`]. Access to the
+/// handle returned by a dense embedding fit or update. Access to the
 /// handle and its borrowed arrays must end before release. The handle may
 /// only be released once.
 #[unsafe(no_mangle)]
@@ -662,7 +664,7 @@ pub unsafe extern "C" fn umap_capi_dense_embedding_release(
         }
 
         // SAFETY: The caller returns ownership of the exact allocation from
-        // `Box::into_raw` in the seeded embedding fit.
+        // `Box::into_raw` in a dense embedding fit or update.
         unsafe { drop(Box::from_raw(embedding)) };
         STATUS_OK
     })

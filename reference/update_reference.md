@@ -97,6 +97,12 @@ shortcut to include all appended rows. A graph-only fit publishes the
 expanded graph and preserves the previous exact-input shortcut when the
 missing embedding raises `AttributeError`.
 
+In C, `umap_capi_update_dense_embedding` borrows a fitted embedding handle
+and a contiguous matrix with the appended rows at the end. It returns a
+second handle with the updated coordinates and CSR graph. Both handles use
+the existing embedding view and release calls. The C11 smoke test covers
+there being zero, one, and two update epochs after a seeded dense fit.
+
 The public update sets weights below `max(weight) / sampling_epochs` to
 positive zero while preserving the CSR positions. The duplicate-row case
 stores two zeros for weights below the default sampling cutoff. In a separate

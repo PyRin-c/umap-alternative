@@ -1,5 +1,5 @@
 /*
- * Stable C-facing declarations for dense UMAP graph and embedding fits and transforms.
+ * Stable C-facing declarations for dense UMAP graph and embedding fits, transforms, and updates.
  *
  * The ABI uses uint32_t status and metric values and size_t dimensions.  The
  * numeric values below are part of the ABI; callers should not depend on the
@@ -19,7 +19,7 @@ extern "C" {
  * private and must not be allocated, copied, or inspected by callers. */
 typedef struct umap_capi_csr_graph umap_capi_csr_graph_t;
 
-/* An owning result returned by umap_capi_fit_dense_embedding_seeded. */
+/* An owning result returned by a dense embedding fit or update. */
 typedef struct umap_capi_dense_embedding umap_capi_dense_embedding_t;
 
 typedef uint32_t umap_capi_status_t;
@@ -102,6 +102,25 @@ typedef struct umap_capi_dense_embedding_config {
     size_t init_len;
     const float *init_coordinates;
 } umap_capi_dense_embedding_config_t;
+
+/*
+ * Use the effective fitted neighbor count, curve parameters and learning
+ * rate. n_epochs is the update epoch count, with zero selecting initialization.
+ * Repulsion and the negative-sample rate apply to this update. Use 1.0 for
+ * both graph options to select the default connectivity and set operation.
+ */
+typedef struct umap_capi_dense_update_config {
+    size_t n_neighbors;
+    size_t n_epochs;
+    double a;
+    double b;
+    double learning_rate;
+    double repulsion_strength;
+    double negative_sample_rate;
+    double local_connectivity;
+    double set_op_mix_ratio;
+    uint32_t transform_seed;
+} umap_capi_dense_update_config_t;
 
 /*
  * Coordinates are read-only row-major floats with n_rows * n_components
@@ -207,18 +226,39 @@ umap_capi_status_t umap_capi_fit_dense_embedding_seeded(
     umap_capi_dense_embedding_t **out_embedding);
 
 /*
- * Fill a caller-owned view, leaving it untouched on error.  embedding must
- * be a live handle returned by umap_capi_fit_dense_embedding_seeded.  out_view
- * must point to one aligned writable view outside the handle's storage.
+ * Append rows to a dense Euclidean embedding. Pass the original feature
+ * rows in fitted order followed by at least one new row. data_len must equal
+ * n_rows * n_features. fitted must be a live handle from a dense fit or
+ * update. The fitted handle supplies the original row count and coordinate
+ * width. n_neighbors must be between one and the original row count.
+ *
+ * All input pointers must refer to aligned readable storage throughout
+ * the call. out_embedding must point to an aligned writable slot outside
+ * that storage. The existing handle and input arrays are read-only. Success
+ * returns a separate owning handle. Failure leaves the output slot untouched.
+ */
+umap_capi_status_t umap_capi_update_dense_embedding(
+    const float *data,
+    size_t data_len,
+    size_t n_rows,
+    size_t n_features,
+    const umap_capi_dense_embedding_t *fitted,
+    const umap_capi_dense_update_config_t *config,
+    umap_capi_dense_embedding_t **out_embedding);
+
+/*
+ * Fill a caller-owned view, leaving it untouched on error. embedding must
+ * be a live handle returned by a dense fit or update. out_view must point
+ * to one aligned writable view outside the handle's storage.
  */
 umap_capi_status_t umap_capi_dense_embedding_view(
     const umap_capi_dense_embedding_t *embedding,
     umap_capi_dense_embedding_view_t *out_view);
 
 /*
- * Release the fit handle exactly once.  This releases both the coordinates
+ * Release the embedding handle exactly once. This releases both the coordinates
  * and graph and invalidates every borrowed pointer.  NULL is a no-op.  Any
- * non-NULL argument must be a live embedding handle returned by the fit.
+ * non-NULL argument must be a live handle returned by a dense fit or update.
  */
 umap_capi_status_t umap_capi_dense_embedding_release(
     umap_capi_dense_embedding_t *embedding);

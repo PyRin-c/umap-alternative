@@ -141,7 +141,7 @@ pub fn update_dense_embedding(
     let mut embedding = prepare_with_rng(
         data, n_rows, n_features, n_existing, fitted, config, &mut rng,
     )?;
-    zero_weak_memberships(&mut embedding.graph, layout.n_epochs);
+    zero_weak_memberships(&mut embedding.graph, layout.n_epochs, false);
     optimize_update_layout(
         &mut embedding.coordinates,
         &embedding.graph,

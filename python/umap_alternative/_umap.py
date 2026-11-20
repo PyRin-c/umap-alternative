@@ -86,8 +86,8 @@ _COMPATIBILITY_WARNING = (
 )
 
 
-def _default_epochs(n_rows):
-    return 500 if n_rows <= 10_000 else 200
+def _default_epochs(n_rows, densmap=False):
+    return (500 if n_rows <= 10_000 else 200) + (200 if densmap else 0)
 
 
 def _csr_graph(components):
@@ -103,20 +103,39 @@ def _csr_graph(components):
     )
 
 
+_EPOCHS_ERROR = "n_epochs must be a nonnegative integer or a list of nonnegative integers"
+
+
+def _epoch_checkpoints(n_epochs):
+    if not isinstance(n_epochs, (list, tuple, np.ndarray)):
+        return None
+    if isinstance(n_epochs, np.ndarray) and n_epochs.ndim != 1:
+        raise ValueError(_EPOCHS_ERROR)
+    if len(n_epochs) == 0 or any(
+        not isinstance(epoch, numbers.Integral) or epoch < 0 for epoch in n_epochs
+    ):
+        raise ValueError(_EPOCHS_ERROR)
+    return sorted({int(epoch) for epoch in n_epochs})
+
+
 def _validate_epochs(n_epochs):
-    if isinstance(n_epochs, (list, tuple)):
-        raise NotImplementedError("embedding supports a scalar n_epochs")
+    checkpoints = _epoch_checkpoints(n_epochs)
+    if checkpoints is not None:
+        return checkpoints[-1]
     if isinstance(n_epochs, bool) or not isinstance(n_epochs, numbers.Integral) or n_epochs < 0:
-        raise ValueError("n_epochs must be a nonnegative integer")
+        raise ValueError(_EPOCHS_ERROR)
     return int(n_epochs)
 
 
 def _fit_graph_embedding(
-    graph, features, metric, rng, initial, *, spectral, n_epochs, n_components, **layout_options
+    graph, features, metric, rng, initial, *, spectral, n_epochs, n_components,
+    checkpoint_epochs=None, densmap=None, **layout_options
 ):
     # Public graph_ retains the CSR entries whose memberships were zeroed.
     # Fits of at most ten epochs use the default budget for this cutoff.
-    sampling_epochs = n_epochs if n_epochs > 10 else _default_epochs(graph.shape[0])
+    sampling_epochs = n_epochs if n_epochs > 10 else _default_epochs(
+        graph.shape[0], densmap is not None
+    )
     unsampled = graph.data < np.float32(graph.data.max() / sampling_epochs)
     sampling_graph = graph
     if np.any(unsampled):
@@ -138,12 +157,17 @@ def _fit_graph_embedding(
         initial = rng.uniform(-10, 10, (graph.shape[0], n_components)).astype(np.float32)
         initial = initial.ravel().tolist()
     algorithm, words, cursor, has_gaussian, cached_gaussian = rng.get_state()
-    shape, coordinates, (words, cursor) = _native._fit_graph_embedding_with_rng(
+    density = None if densmap is None else (
+        densmap, (features.ravel().tolist(), features.shape[1], metric),
+    )
+    shape, coordinates, (words, cursor), snapshots = _native._fit_graph_embedding_with_rng(
         (graph.shape, graph.indptr.tolist(), graph.indices.tolist(), graph.data.tolist()),
         initial,
         (words.tolist(), cursor),
         n_epochs=n_epochs,
         n_components=n_components,
+        checkpoint_epochs=checkpoint_epochs,
+        density=density,
         **layout_options,
     )
     rng.set_state(
@@ -152,7 +176,10 @@ def _fit_graph_embedding(
     embedding = np.asarray(coordinates, dtype=np.float32).reshape(shape)
     # Isolated rows participate in normalization and sampling before masking.
     embedding[np.diff(sampling_graph.indptr) == 0] = np.nan
-    return embedding
+    history = None if checkpoint_epochs is None else [
+        np.asarray(values, dtype=np.float32).reshape(shape) for values in snapshots
+    ]
+    return embedding, history
 
 
 def _fit_spectral_embedding(graph, features, metric, rng, **layout_options):
@@ -321,6 +348,10 @@ class UMAP(BaseEstimator, TransformerMixin):
         precomputed_knn=_DEFAULT_PRECOMPUTED_KNN,
         disconnection_distance=None,
         output_dens=False,
+        densmap=False,
+        dens_lambda=2.0,
+        dens_frac=0.3,
+        dens_var_shift=0.1,
     ):
         self.n_components = n_components
         self.n_neighbors = n_neighbors
@@ -347,11 +378,17 @@ class UMAP(BaseEstimator, TransformerMixin):
         self.precomputed_knn = precomputed_knn
         self.disconnection_distance = disconnection_distance
         self.output_dens = output_dens
+        self.densmap = densmap
+        self.dens_lambda = dens_lambda
+        self.dens_frac = dens_frac
+        self.dens_var_shift = dens_var_shift
 
     def fit(self, X, y=None):
         """Fit the fuzzy graph and, in embedding mode, the training layout."""
 
         self._validate_mode()
+        density_options = self._density_options()
+        densmap = density_options if getattr(self, "densmap", False) else None
         sparse = issparse(X)
         metric = self._validate_metric(sparse=sparse)
         graph_options = self._graph_options()
@@ -371,7 +408,7 @@ class UMAP(BaseEstimator, TransformerMixin):
                 raise TypeError("sparse input is not supported in embedding mode")
             if y is not None:
                 raise TypeError("sparse input is not supported for supervised fitting")
-        if embedding_mode and (precomputed or angular):
+        if embedding_mode and angular:
             raise NotImplementedError(f"metric={metric!r} requires transform_mode='graph'")
         if embedding_mode and y is not None:
             raise NotImplementedError("supervised embedding fit is not implemented")
@@ -398,9 +435,13 @@ class UMAP(BaseEstimator, TransformerMixin):
             if n_rows != n_features:
                 raise ValueError("precomputed distances must be a square matrix")
             warnings.warn(_PRECOMPUTED_WARNING, UserWarning, stacklevel=2)
+            if embedding_mode:
+                transform_fit = (X_checked.copy(), metric)
         spectral = False
+        checkpoint_epochs = None
         if embedding_mode:
-            embedding_options = self._embedding_options(n_rows)
+            checkpoint_epochs = _epoch_checkpoints(self.n_epochs)
+            embedding_options = self._embedding_options(n_rows, densmap is not None, checkpoint_epochs)
             initial_coordinates = self._embedding_init(n_rows, embedding_options["n_components"])
             spectral = isinstance(self.init, str) and self.init == "spectral"
         supplied_requested = self.precomputed_knn is not _DEFAULT_PRECOMPUTED_KNN
@@ -418,11 +459,11 @@ class UMAP(BaseEstimator, TransformerMixin):
                 "disconnection_distance with computed neighbors requires unsupervised dense features"
             )
         supplied = self._supplied_neighbors(n_rows, n_neighbors)
-        if getattr(self, "output_dens", False) and embedding_mode and (
-            metric != "euclidean" or supplied is not None or np.isfinite(cutoff)
+        if embedding_mode and (densmap is not None or getattr(self, "output_dens", False)) and (
+            supplied is not None or np.isfinite(cutoff)
         ):
             raise NotImplementedError(
-                "output_dens requires dense Euclidean features with computed neighbors and no cutoff"
+                "density fitting requires computed neighbors without a finite cutoff"
             )
         requested_neighbors = n_neighbors
 
@@ -442,6 +483,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             n_neighbors = n_rows - 1
 
         embedding = None
+        history = None
         transform_error = None
         transform_cutoff = cutoff if angular else None
         removed = 0
@@ -475,7 +517,8 @@ class UMAP(BaseEstimator, TransformerMixin):
             )
         elif precomputed:
             components = _native._fit_precomputed_graph(
-                X_checked.ravel(order="C").tolist(), n_rows, n_neighbors, graph_options=graph_options
+                X_checked.ravel(order="C").tolist(), n_rows, n_neighbors,
+                graph_options=(graph_options or (1.0, 1.0)) if embedding_mode else graph_options,
             )
         elif sparse:
             components = _native._fit_sparse_graph(
@@ -490,7 +533,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         else:
             values = X_checked.ravel(order="C").tolist()
             dense_args = (values, n_rows, n_features, n_neighbors, metric)
-            if embedding_mode and not spectral:
+            if embedding_mode and not spectral and densmap is None and checkpoint_epochs is None:
                 components, embedding_shape, coordinates = _native._fit_dense_embedding(
                     *dense_args,
                     initial_coordinates=initial_coordinates,
@@ -525,16 +568,22 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise ValueError("zero-size array to reduction operation maximum which has no identity")
         if spectral:
             rng = np.random.RandomState(embedding_options.pop("seed"))
-            embedding = _fit_spectral_embedding(graph, X_checked, metric, rng, **embedding_options)
-        elif embedding_mode and graph_from_neighbors:
+            embedding, history = _fit_spectral_embedding(
+                graph, X_checked, metric, rng, checkpoint_epochs=checkpoint_epochs,
+                densmap=densmap, **embedding_options,
+            )
+        elif embedding_mode and embedding is None:
             rng = np.random.RandomState(embedding_options.pop("seed"))
-            embedding = _fit_graph_embedding(
-                graph, X_checked, metric, rng, initial_coordinates, spectral=False, **embedding_options
+            embedding, history = _fit_graph_embedding(
+                graph, X_checked, metric, rng, initial_coordinates, spectral=False,
+                checkpoint_epochs=checkpoint_epochs, densmap=densmap, **embedding_options,
             )
         elif embedding is not None:
             embedding[np.diff(graph.indptr) == 0] = np.nan
         if embedding_mode and getattr(self, "output_dens", False):
-            self._store_density_diagnostics(X_checked, graph, embedding)
+            self._store_density_diagnostics(X_checked, graph, embedding, metric)
+        if history is not None:
+            self.embedding_list_ = history
         return self._store_fit(
             n_features, transform_fit, graph, n_neighbors, embedding,
             embedding_options=embedding_options if embedding_mode else None,
@@ -584,6 +633,8 @@ class UMAP(BaseEstimator, TransformerMixin):
             queries.view(np.uint32), fitted_input.view(np.uint32)
         ):
             return self.embedding_ if self.transform_mode == "embedding" else self.graph_
+        if getattr(self, "densmap", False):
+            raise NotImplementedError("Transforming data into an existing embedding not supported for densMAP.")
         if metric == "precomputed":
             raise NotImplementedError("transform with metric='precomputed' is not implemented")
         transform_error = getattr(self, "_supplied_transform_error", None)
@@ -646,7 +697,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         """Append dense Euclidean features and update the fitted embedding in place."""
         if not hasattr(self, "_graph_transform_fit"):
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '_raw_data'")
-        if self._graph_transform_fit is None:
+        if self._graph_transform_fit is None or self._graph_transform_fit[1] == "precomputed":
             raise ValueError("Update does not currently support precomputed metrics")
         if not hasattr(self, "n_neighbors_"):
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '_supervised'")
@@ -698,7 +749,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         graph = _csr_graph(components)
         embedding = np.asarray(coordinates, dtype=np.float32).reshape(shape)
         if getattr(self, "output_dens", False):
-            self._store_density_diagnostics(combined, graph, embedding)
+            self._store_density_diagnostics(combined, graph, embedding, metric)
         self._store_fit(
             n_features,
             (combined, metric),
@@ -713,6 +764,8 @@ class UMAP(BaseEstimator, TransformerMixin):
 
         if not hasattr(self, "_graph_transform_fit"):
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '_sparse_data'")
+        if getattr(self, "densmap", False):
+            raise ValueError("Inverse transform not available for densMAP.")
         transform_fit = self._graph_transform_fit
         if transform_fit is None:
             raise ValueError("Inverse transform not available for given metric.")
@@ -873,7 +926,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         if compatibility is not None and not compatibility:
             raise NotImplementedError("embedding with compatibility_layout=False is not implemented")
 
-    def _embedding_options(self, n_rows):
+    def _embedding_options(self, n_rows, densmap, checkpoint_epochs):
         self._validate_embedding_optimizer()
         n_components = self.n_components
         if isinstance(n_components, (bool, np.bool_)):
@@ -886,7 +939,10 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise ValueError("n_components must be a whole number")
         n_components = int(n_components)
 
-        n_epochs = _default_epochs(n_rows) if self.n_epochs is None else _validate_epochs(self.n_epochs)
+        if self.n_epochs is None:
+            n_epochs = _default_epochs(n_rows, densmap)
+        else:
+            n_epochs = checkpoint_epochs[-1] if checkpoint_epochs else _validate_epochs(self.n_epochs)
 
         seed = self.random_state
         if seed is None and n_rows == 1:
@@ -932,13 +988,24 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise ValueError("negative_sample_rate must be positive")
         return repulsion_strength, negative_sample_rate
 
-    def _store_density_diagnostics(self, features, graph, embedding):
+    def _density_options(self):
+        strength = _finite_float(getattr(self, "dens_lambda", 2.0), "dens_lambda")
+        fraction = _finite_float(getattr(self, "dens_frac", 0.3), "dens_frac")
+        shift = _finite_float(getattr(self, "dens_var_shift", 0.1), "dens_var_shift")
+        if strength < 0:
+            raise ValueError("dens_lambda cannot be negative")
+        if not 0 <= fraction <= 1:
+            raise ValueError("dens_frac must be between 0.0 and 1.0")
+        if shift < 0:
+            raise ValueError("dens_var_shift cannot be negative")
+        return strength, fraction, shift
+
+    def _store_density_diagnostics(self, features, graph, embedding, metric):
         if self.n_neighbors >= len(embedding):
             warnings.warn(_DENSITY_NEIGHBOR_WARNING, UserWarning, stacklevel=3)
-        original, embedded = _native._dense_euclidean_radius_log_inputs(
+        original, embedded = _native._density_radius_log_inputs(
             (graph.shape, graph.indptr.tolist(), graph.indices.tolist(), graph.data.tolist()),
-            features.ravel().tolist(),
-            features.shape[1],
+            (features.ravel().tolist(), features.shape[1], metric),
             embedding.ravel().tolist(),
             embedding.shape[1],
             self.n_neighbors,

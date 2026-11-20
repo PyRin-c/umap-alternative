@@ -158,6 +158,41 @@ eight epochs. The short weak-edge run has more float32 steps near zero
 despite the same maximum absolute difference. The remaining numerical
 differences bound the replay to the tested precision.
 
+## Seeded fitting
+
+`UMAP(densmap=True)` uses the serial Rust optimizer for dense features and
+dense precomputed distances. It uses the same random, explicit, and
+spectral initialization as compatibility UMAP. The Python defaults are
+`dens_lambda=2.0`, `dens_frac=0.3`, and `dens_var_shift=0.1`. For small
+datasets, the default density fit runs 700 epochs. An explicit count
+through ten still uses 700 as the sampling budget for the graph cutoff.
+The eight-row cutoff probe retains two memberships of about 0.00174360
+at two epochs. The plain UMAP control stores zero at those positions.
+
+The Python list, tuple, and one-dimensional integer-array forms of
+`n_epochs` fit to the maximum requested epoch and store the distinct
+checkpoints in ascending order in `embedding_list_`. A checkpoint
+contains the layout after that epoch's updates. The maximum key denotes
+the final result. `output_dens=True` adds the two diagnostic radii.
+Transforming the original fitting input returns the fitted embedding.
+Held-out and inverse transforms have the public densMAP errors.
+
+For dense features, Rust callers can use
+`umap_core::densmap::fit_dense_densmap_seeded`. The C11 function
+`umap_capi_fit_dense_densmap_seeded` takes the seeded fit configuration
+and three density parameters, then returns the standard owning graph and
+embedding handle. The dense pair smoke test matches the public CSR and
+coordinate bits at zero, one, and two epochs. The Python adapter matches
+the precomputed training graph in the existing finite replay cases. Active
+coordinates retain the arithmetic residuals reported above. Inputs with
+undefined density statistics still produce a native arithmetic error.
+The Python adapter currently requires internally computed neighbors and an
+infinite distance cutoff. Density-preserving incremental updates remain
+open. A public Windows probe that fitted eight rows at four epochs and
+appended two rows with `densmap=True, n_epochs=[2, 4, 6]` exited with an
+access violation. The corresponding plain fit updated to the same
+coordinates as a scalar six-epoch update.
+
 ## Reproduction
 
 Run from the repository root. Pass the corresponding capture path via

@@ -2,12 +2,20 @@
 
 use std::fmt;
 
-use crate::density::{DensityError, RadiusSpace, radii_and_weights_from_edge_distances};
-use crate::embedding::EmbeddingLayoutConfig;
+use crate::density::{
+    DensityError, OriginalRadiusInput, RadiusSpace, original_log_inputs_and_weights,
+    radii_and_weights_from_edge_distances,
+};
+use crate::embedding::{
+    DenseEmbedding, DenseEmbeddingConfig, DenseEmbeddingFitError, EmbeddingLayoutConfig,
+    prepare_dense_embedding, serial_negative_sampler, zero_weak_memberships,
+};
 use crate::fuzzy_graph::CsrGraph;
+use crate::initialization::normalize_columns;
 use crate::layout::{DistanceReduction, LayoutError};
 use crate::numeric::pairwise_sum;
 use crate::optimize::{OptimizeError, OptimizeMode, optimize_csr_with_density};
+use crate::rng::Mt19937;
 
 /// Settings for the density correlation objective.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -49,13 +57,15 @@ impl DensmapOptions {
     }
 }
 
-/// Failures in the supplied-graph densMAP optimizer.
+/// Failures in density-preserving fitting and optimization.
 #[derive(Clone, Debug, PartialEq)]
 pub enum DensmapError {
     /// A density option is outside its supported finite range.
     InvalidOption { parameter: &'static str, value: f64 },
     /// The supplied graph or its input-space distances cannot be reduced.
     OriginalRadii(DensityError),
+    /// Graph fitting, layout initialization, or sampler initialization failed.
+    Preparation(DenseEmbeddingFitError),
     /// A compatibility schedule, sample, or layout update failed.
     Optimize(OptimizeError),
 }
@@ -69,6 +79,7 @@ impl fmt::Display for DensmapError {
             Self::OriginalRadii(error) => {
                 write!(formatter, "original log-radius reduction failed: {error}")
             }
+            Self::Preparation(error) => error.fmt(formatter),
             Self::Optimize(error) => error.fmt(formatter),
         }
     }
@@ -79,6 +90,7 @@ impl std::error::Error for DensmapError {
         match self {
             Self::InvalidOption { .. } => None,
             Self::OriginalRadii(error) => Some(error),
+            Self::Preparation(error) => Some(error),
             Self::Optimize(error) => Some(error),
         }
     }
@@ -106,13 +118,139 @@ pub fn optimize_densmap_csr(
     negative_sampler: impl FnMut(usize) -> usize,
     checkpoint: impl FnMut(usize, &[f32]),
 ) -> Result<(), DensmapError> {
-    options.validate()?;
-    let density = if layout.n_epochs > 1 && options.active_at(layout.n_epochs - 1, layout.n_epochs)
-    {
-        Some(DensityOptimizer::new(graph, edge_distances, options)?)
+    let density = prepare_density(layout.n_epochs, options, || {
+        radii_and_weights_from_edge_distances(graph, edge_distances, RadiusSpace::Original)
+    })?;
+    optimize_layout(
+        embedding,
+        graph,
+        layout,
+        negative_sampler,
+        density,
+        Some(checkpoint),
+    )
+}
+
+/// Normalize a layout and fit a supplied graph with optional density preservation.
+///
+/// Supply a graph with its sampling cutoff already applied and a caller RNG at
+/// the end of initialization. When enabled, density radii use the input-space
+/// distances on this graph. The callback receives each completed epoch and the
+/// final coordinates, using the same keys as [`optimize_densmap_csr`].
+/// On error the caller RNG keeps its original state.
+pub fn fit_graph_with_checkpoints(
+    graph: CsrGraph,
+    initial: &[f32],
+    layout: &EmbeddingLayoutConfig<impl Copy + Into<f64>, impl Copy + Into<f64>>,
+    density: Option<(OriginalRadiusInput<'_>, DensmapOptions)>,
+    caller_rng: &mut Mt19937,
+    checkpoint: Option<impl FnMut(usize, &[f32])>,
+) -> Result<DenseEmbedding, DensmapError> {
+    let mut coordinates = initial.to_vec();
+    normalize_columns(&mut coordinates, graph.n_rows, layout.n_components)
+        .map_err(|error| DensmapError::Preparation(error.into()))?;
+    fit_initialized_graph(graph, coordinates, layout, density, caller_rng, checkpoint)
+}
+
+/// Fit a dense fuzzy graph and a seeded density-preserving embedding.
+///
+/// Dense feature distances follow `config.metric`. The optimizer uses the
+/// fitted graph with weak memberships set to zero as prescribed by the density
+/// sampling budget. Explicit (rather than seeded random) initialization uses
+/// `explicit_seed` for negative sampling.
+pub fn fit_dense_densmap_seeded(
+    data: &[f32],
+    n_rows: usize,
+    n_features: usize,
+    config: &DenseEmbeddingConfig<impl Copy + Into<f64>, impl Copy + Into<f64>>,
+    explicit_seed: u32,
+    options: DensmapOptions,
+) -> Result<DenseEmbedding, DensmapError> {
+    let (mut graph, coordinates, caller_rng) =
+        prepare_dense_embedding(data, n_rows, n_features, config, None)
+            .map_err(DensmapError::Preparation)?;
+    zero_weak_memberships(&mut graph, config.n_epochs, true);
+    let input = OriginalRadiusInput::Dense {
+        values: data,
+        n_features,
+        metric: config.metric,
+    };
+    let mut caller_rng = caller_rng.unwrap_or_else(|| Mt19937::new(explicit_seed));
+    fit_initialized_graph(
+        graph,
+        coordinates,
+        &config.layout_config(),
+        Some((input, options)),
+        &mut caller_rng,
+        None::<fn(usize, &[f32])>,
+    )
+}
+
+fn fit_initialized_graph(
+    graph: CsrGraph,
+    mut coordinates: Vec<f32>,
+    layout: &EmbeddingLayoutConfig<impl Copy + Into<f64>, impl Copy + Into<f64>>,
+    density: Option<(OriginalRadiusInput<'_>, DensmapOptions)>,
+    caller_rng: &mut Mt19937,
+    checkpoint: Option<impl FnMut(usize, &[f32])>,
+) -> Result<DenseEmbedding, DensmapError> {
+    let shape = (graph.n_rows, layout.n_components);
+    let mut next_rng = caller_rng.clone();
+    let mut sampler = serial_negative_sampler(&mut next_rng, &coordinates, shape.0, shape.1)
+        .map_err(|error| DensmapError::Preparation(error.into()))?;
+    let density = if let Some((input, options)) = density {
+        prepare_density(layout.n_epochs, options, || {
+            original_log_inputs_and_weights(&graph, input)
+                .map(|(inputs, weights)| (inputs.into_iter().map(f32::ln).collect(), weights))
+        })?
     } else {
         None
     };
+    optimize_layout(
+        &mut coordinates,
+        &graph,
+        layout,
+        |row| {
+            sampler
+                .sample(row)
+                .expect("optimizer source row is in bounds")
+        },
+        density,
+        checkpoint,
+    )?;
+    *caller_rng = next_rng;
+    Ok(DenseEmbedding {
+        graph,
+        coordinates,
+        shape,
+    })
+}
+
+fn prepare_density(
+    n_epochs: usize,
+    options: DensmapOptions,
+    input_radii: impl FnOnce() -> Result<(Vec<f32>, Vec<f32>), DensityError>,
+) -> Result<Option<DensityOptimizer>, DensmapError> {
+    options.validate()?;
+    if n_epochs <= 1 || !options.active_at(n_epochs - 1, n_epochs) {
+        return Ok(None);
+    }
+    let (radii, incident_weights) = input_radii().map_err(DensmapError::OriginalRadii)?;
+    Ok(Some(DensityOptimizer::new(
+        radii,
+        &incident_weights,
+        options,
+    )))
+}
+
+fn optimize_layout(
+    embedding: &mut [f32],
+    graph: &CsrGraph,
+    layout: &EmbeddingLayoutConfig<impl Copy + Into<f64>, impl Copy + Into<f64>>,
+    negative_sampler: impl FnMut(usize) -> usize,
+    density: Option<DensityOptimizer>,
+    checkpoint: Option<impl FnMut(usize, &[f32])>,
+) -> Result<(), DensmapError> {
     optimize_csr_with_density(
         embedding,
         layout.n_components,
@@ -126,7 +264,7 @@ pub fn optimize_densmap_csr(
         negative_sampler,
         OptimizeMode::SeededCompatibility,
         density,
-        Some(checkpoint),
+        checkpoint,
     )
     .map_err(DensmapError::Optimize)
 }
@@ -140,33 +278,27 @@ pub(crate) struct DensityOptimizer {
 }
 
 impl DensityOptimizer {
-    fn new(
-        graph: &CsrGraph,
-        distances: &[f32],
-        options: DensmapOptions,
-    ) -> Result<Self, DensmapError> {
-        let (mut original, incident_weights) =
-            radii_and_weights_from_edge_distances(graph, distances, RadiusSpace::Original)
-                .map_err(DensmapError::OriginalRadii)?;
-        let mut squared_deviations = vec![0.0; graph.n_rows];
+    fn new(mut original: Vec<f32>, incident_weights: &[f32], options: DensmapOptions) -> Self {
+        let n_rows = original.len();
+        let mut squared_deviations = vec![0.0; n_rows];
         let mean = mean(&original);
         let standard_deviation = variance(&original, mean, &mut squared_deviations).sqrt();
         for radius in &mut original {
             *radius = (*radius - mean) / standard_deviation;
         }
 
-        Ok(Self {
+        Self {
             options,
             original,
-            membership_sum: f64::from(pairwise_sum(&incident_weights)) * 0.5,
+            membership_sum: f64::from(pairwise_sum(incident_weights)) * 0.5,
             epoch: DensityEpoch {
-                affinity_sums: vec![0.0; graph.n_rows],
-                log_radii: vec![0.0; graph.n_rows],
-                correlation_weights: vec![0.0; graph.n_rows],
+                affinity_sums: vec![0.0; n_rows],
+                log_radii: vec![0.0; n_rows],
+                correlation_weights: vec![0.0; n_rows],
                 scale: 0.0,
             },
             squared_deviations,
-        })
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

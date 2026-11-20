@@ -862,6 +862,60 @@ static void check_dense_update(void) {
     CHECK(umap_capi_dense_embedding_release(fitted) == UMAP_CAPI_STATUS_OK);
 }
 
+static void check_dense_densmap(void) {
+    /* Dense feature replay of the public densMAP first-active pair probe. */
+    const float features[] = {0.0f, 0.2f, 4.0f, 4.8f, 10.0f, 11.4f};
+    const float initial[] = {0.0f, 2.0f, 3.0f, 4.0f, 7.0f, 10.0f};
+    const uint32_t initial_bits[] = {
+        0, 1073741824, 1077936128, 1082130432, 1088421888, 1092616192,
+    };
+    const uint32_t active_bits[] = {
+        1063147213, 1066456218, 1077233916, 1082481537, 1088170878, 1092741697,
+    };
+    const size_t indptr[] = {0, 1, 2, 3, 4, 5, 6};
+    const size_t indices[] = {1, 0, 3, 2, 5, 4};
+    umap_capi_dense_embedding_config_t config = {
+        .n_neighbors = 2, .n_components = 1, .a = 1.7, .b = 0.9, .learning_rate = 0.1,
+        .repulsion_strength = 0.0, .negative_sample_rate = 1.0,
+        .metric = UMAP_CAPI_METRIC_EUCLIDEAN, .init = UMAP_CAPI_INIT_EXPLICIT, .seed = 42,
+        .init_len = COUNT(initial), .init_coordinates = initial,
+    };
+    umap_capi_densmap_options_t density = {
+        .dens_lambda = 2.0, .dens_frac = 1.0, .dens_var_shift = 0.1,
+    };
+    for (size_t epochs = 0; epochs <= 2; ++epochs) {
+        config.n_epochs = epochs;
+        umap_capi_dense_embedding_t *handle = NULL;
+        CHECK(umap_capi_fit_dense_densmap_seeded(
+            features, COUNT(features), COUNT(features), 1, &config, &density, &handle
+        ) == UMAP_CAPI_STATUS_OK);
+        umap_capi_dense_embedding_view_t view = {0};
+        CHECK(umap_capi_dense_embedding_view(handle, &view) == UMAP_CAPI_STATUS_OK);
+        CHECK(view.n_rows == COUNT(features) && view.n_components == 1);
+        CHECK(view.coordinates_len == COUNT(initial_bits));
+        check_bits(view.coordinates, epochs < 2 ? initial_bits : active_bits, COUNT(initial_bits));
+        CHECK(view.graph.indptr_len == COUNT(indptr) && view.graph.indices_len == COUNT(indices));
+        CHECK(memcmp(view.graph.indptr, indptr, sizeof indptr) == 0);
+        CHECK(memcmp(view.graph.indices, indices, sizeof indices) == 0);
+        CHECK(view.graph.data_len == COUNT(indices));
+        for (size_t i = 0; i < view.graph.data_len; ++i) {
+            CHECK(view.graph.data[i] == 1.0f);
+        }
+        umap_capi_dense_embedding_t *unchanged = handle;
+        CHECK(umap_capi_fit_dense_densmap_seeded(
+            features, COUNT(features), COUNT(features), 1, &config, NULL, &unchanged
+        ) == UMAP_CAPI_STATUS_NULL_ARGUMENT);
+        CHECK(unchanged == handle);
+        umap_capi_densmap_options_t invalid = density;
+        invalid.dens_frac = 1.0000000000000002;
+        CHECK(umap_capi_fit_dense_densmap_seeded(
+            features, COUNT(features), COUNT(features), 1, &config, &invalid, &unchanged
+        ) == UMAP_CAPI_STATUS_INVALID_CONFIG);
+        CHECK(unchanged == handle);
+        CHECK(umap_capi_dense_embedding_release(handle) == UMAP_CAPI_STATUS_OK);
+    }
+}
+
 int main(void) {
     check_graph_only();
     check_graph_options();
@@ -875,5 +929,6 @@ int main(void) {
     check_transform_boundaries();
     check_directed_graph_transform();
     check_dense_update();
+    check_dense_densmap();
     return EXIT_SUCCESS;
 }

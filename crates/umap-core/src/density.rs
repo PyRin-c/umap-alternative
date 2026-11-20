@@ -8,7 +8,9 @@ use std::fmt;
 use crate::fuzzy_graph::{
     CsrGraph, GraphError, fuzzy_simplicial_set, fuzzy_simplicial_set_with_neighbor_target,
 };
-use crate::neighbors::{KnnError, Neighbor, collect_neighbors, euclidean_distance_wide};
+use crate::neighbors::{
+    DistanceMetric, KnnError, Neighbor, collect_neighbors, euclidean_distance_wide,
+};
 
 pub(crate) const LOG_OFFSET: f32 = 1e-8;
 
@@ -19,6 +21,22 @@ pub enum RadiusSpace {
     Original,
     /// Use unsquared distances on a graph refit on the embedding.
     Embedding,
+}
+
+/// Row-major input used to recover distances along a fitted graph.
+#[derive(Clone, Copy, Debug)]
+pub enum OriginalRadiusInput<'a> {
+    /// Feature rows to compare using the fitted metric.
+    Dense {
+        /// Feature values in row-major order.
+        values: &'a [f32],
+        /// Number of features per observation.
+        n_features: usize,
+        /// Distance used to fit the graph.
+        metric: DistanceMetric,
+    },
+    /// Square row-major array of unsquared, possibly asymmetric distances.
+    Precomputed(&'a [f32]),
 }
 
 /// Input or graph refit failures in the density diagnostics.
@@ -117,6 +135,42 @@ pub(crate) fn radii_and_weights_from_edge_distances(
     }
     let (values, weights) = reduce_radius_log_inputs(graph, space, |_, _, entry| distances[entry])?;
     Ok((values.into_iter().map(f32::ln).collect(), weights))
+}
+
+/// Compute the input-space diagnostic logarithm arguments using the fitted graph.
+pub fn original_radius_log_inputs(
+    graph: &CsrGraph,
+    input: OriginalRadiusInput<'_>,
+) -> Result<Vec<f32>, DensityError> {
+    original_log_inputs_and_weights(graph, input).map(|(values, _)| values)
+}
+
+pub(crate) fn original_log_inputs_and_weights(
+    graph: &CsrGraph,
+    input: OriginalRadiusInput<'_>,
+) -> Result<(Vec<f32>, Vec<f32>), DensityError> {
+    let space = RadiusSpace::Original;
+    match input {
+        OriginalRadiusInput::Dense {
+            values,
+            n_features,
+            metric,
+        } => {
+            validate_coordinates(values, graph.n_rows, n_features, space)?;
+            reduce_radius_log_inputs(graph, space, |row, column, _| {
+                metric.distance(
+                    coordinate_row(values, n_features, row),
+                    coordinate_row(values, n_features, column),
+                )
+            })
+        }
+        OriginalRadiusInput::Precomputed(distances) => {
+            validate_coordinates(distances, graph.n_rows, graph.n_rows, space)?;
+            reduce_radius_log_inputs(graph, space, |row, column, _| {
+                distances[row * graph.n_rows + column]
+            })
+        }
+    }
 }
 
 /// Compute original radii using a fitted graph and row-major Euclidean input.

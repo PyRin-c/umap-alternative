@@ -11,6 +11,8 @@ use std::mem::{align_of, size_of};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::slice;
 
+use umap_core::density::DensityError;
+use umap_core::densmap::{DensmapError, DensmapOptions, fit_dense_densmap_seeded};
 use umap_core::embedding::{
     DenseEmbedding, DenseEmbeddingConfig, DenseEmbeddingFitError, DenseEmbeddingInit,
     fit_dense_embedding_seeded,
@@ -126,6 +128,18 @@ pub struct UmapCapiDenseEmbeddingConfig {
     pub init_len: usize,
     /// Row-major explicit coordinates, null for random initialization.
     pub init_coordinates: *const f32,
+}
+
+/// Density correlation settings for a seeded densMAP fit.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct UmapCapiDensmapOptions {
+    /// Finite nonnegative weight for the density objective.
+    pub dens_lambda: f64,
+    /// Fraction of epochs eligible for density updates, from zero to one.
+    pub dens_frac: f64,
+    /// Finite nonnegative variance shift.
+    pub dens_var_shift: f64,
 }
 
 /// Caller-owned destination for a result's borrowed coordinates and CSR graph.
@@ -349,12 +363,28 @@ fn map_embedding_error(error: DenseEmbeddingFitError) -> u32 {
     }
 }
 
+fn map_densmap_error(error: DensmapError) -> u32 {
+    match error {
+        DensmapError::InvalidOption { .. } => STATUS_INVALID_CONFIG,
+        DensmapError::Preparation(error) => map_embedding_error(error),
+        DensmapError::OriginalRadii(DensityError::Matrix(error)) => map_knn_error(error),
+        DensmapError::OriginalRadii(DensityError::InvalidDistance { distance, .. })
+            if !distance.is_finite() =>
+        {
+            STATUS_NONFINITE_INPUT
+        }
+        DensmapError::OriginalRadii(_) => STATUS_INTERNAL_ERROR,
+        DensmapError::Optimize(error) => map_embedding_error(error.into()),
+    }
+}
+
 unsafe fn fit_dense_embedding_impl(
     data: *const f32,
     data_len: usize,
     n_rows: usize,
     n_features: usize,
     config: *const UmapCapiDenseEmbeddingConfig,
+    density: Option<DensmapOptions>,
     out_embedding: *mut *mut UmapCapiDenseEmbedding,
 ) -> Result<(), u32> {
     validate_required_pointer(out_embedding)?;
@@ -418,8 +448,13 @@ unsafe fn fit_dense_embedding_impl(
     // SAFETY: The pointer and dimensions were checked above. The caller
     // promises readable storage for `data_len` contiguous values.
     let data = unsafe { input_slice(data, data_len) };
-    let embedding = fit_dense_embedding_seeded(data, n_rows, n_features, &core_config, config.seed)
-        .map_err(map_embedding_error)?;
+    let embedding = if let Some(options) = density {
+        fit_dense_densmap_seeded(data, n_rows, n_features, &core_config, config.seed, options)
+            .map_err(map_densmap_error)?
+    } else {
+        fit_dense_embedding_seeded(data, n_rows, n_features, &core_config, config.seed)
+            .map_err(map_embedding_error)?
+    };
     let handle = Box::into_raw(Box::new(embedding)).cast::<UmapCapiDenseEmbedding>();
 
     // SAFETY: The output pointer was checked above, and the caller promises
@@ -595,7 +630,62 @@ pub unsafe extern "C" fn umap_capi_fit_dense_embedding_seeded(
     catch_status(|| {
         // SAFETY: The caller guarantees valid storage as documented above.
         unsafe {
-            fit_dense_embedding_impl(data, data_len, n_rows, n_features, config, out_embedding)
+            fit_dense_embedding_impl(
+                data,
+                data_len,
+                n_rows,
+                n_features,
+                config,
+                None,
+                out_embedding,
+            )
+        }
+        .map_or_else(|status| status, |()| STATUS_OK)
+    })
+}
+
+/// Fit a seeded dense embedding with the densMAP density objective.
+///
+/// Returns the fitted CSR and coordinates through the existing embedding handle.
+/// Failure leaves the output slot untouched.
+///
+/// # Safety
+///
+/// Follow the storage and handle rules of [`umap_capi_fit_dense_embedding_seeded`].
+/// `density` must also point to one readable, aligned configuration whose
+/// storage stays valid for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn umap_capi_fit_dense_densmap_seeded(
+    data: *const f32,
+    data_len: usize,
+    n_rows: usize,
+    n_features: usize,
+    config: *const UmapCapiDenseEmbeddingConfig,
+    density: *const UmapCapiDensmapOptions,
+    out_embedding: *mut *mut UmapCapiDenseEmbedding,
+) -> u32 {
+    catch_status(|| {
+        if let Err(status) = validate_required_pointer(density) {
+            return status;
+        }
+        // SAFETY: The pointer is aligned and the caller supplies initialized storage.
+        let density = unsafe { density.read() };
+        let density = DensmapOptions {
+            dens_lambda: density.dens_lambda,
+            dens_frac: density.dens_frac,
+            dens_var_shift: density.dens_var_shift,
+        };
+        // SAFETY: The caller supplies the readable input and writable output slots.
+        unsafe {
+            fit_dense_embedding_impl(
+                data,
+                data_len,
+                n_rows,
+                n_features,
+                config,
+                Some(density),
+                out_embedding,
+            )
         }
         .map_or_else(|status| status, |()| STATUS_OK)
     })

@@ -41,6 +41,8 @@ Wheel は `target/wheels/` に生成されます。Python パッケージ名は 
 
 `output_dens=True` を指定した密な Euclidean 埋め込みでは、`fit_transform` が埋め込み、元空間の対数半径、埋め込み空間の対数半径を返します。近傍を内部で計算し、有限の切断距離を使わない場合に利用できます。[半径の参照記録](reference/densmap_reference.md)
 
+`densmap=True` の直列学習は、密な特徴量と密な事前計算距離に対応します。複数の epoch を指定すると、`embedding_list_` に各時点の座標が入ります。C の密入力は `umap_capi_fit_dense_densmap_seeded` で学習できます。[densMAP の比較結果と精度差](reference/densmap_layout_reference.md)
+
 埋め込みでは教師あり入力、疎行列、事前計算済み距離、Adam と momentum は未実装です。固定シードの検証条件と適用範囲は [スペクトル初期化を使った学習の参照記録](reference/spectral_fit_reference.md) と [ランダム初期化と初期座標を指定した学習の参照記録](reference/seeded_fit_reference.md) を参照してください。
 
 `UMAP(transform_mode="graph").fit(X)` と `fit_transform(X)` は、Euclidean、Manhattan、Chebyshev、cosine の教師なし学習で SciPy の CSR、CSC、COO 形式の疎な特徴量を受け取ります。入力を変更せずに CSR に変換し、`float32` の CSR グラフを作ります。Cosine は圧縮形式の行に格納された重複要素を保持して距離を計算します。距離ゼロの同順位により自分自身が近傍から外れる場合は `ValueError` になります。疎行列での事前計算済み距離と変換は未実装です。形式ごとの検証結果は [疎グラフの参照記録](reference/sparse_graph_reference.md) を参照してください。

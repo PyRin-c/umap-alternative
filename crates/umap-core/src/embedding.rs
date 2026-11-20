@@ -84,7 +84,7 @@ pub struct DenseEmbeddingConfig<T = f32, R = f32> {
 }
 
 impl<T: Copy, R: Copy> DenseEmbeddingConfig<T, R> {
-    fn layout_config(&self) -> EmbeddingLayoutConfig<T, R> {
+    pub(crate) fn layout_config(&self) -> EmbeddingLayoutConfig<T, R> {
         EmbeddingLayoutConfig {
             n_components: self.n_components,
             a: self.a,
@@ -264,17 +264,18 @@ pub fn fit_dense_embedding_seeded_with_graph_options(
     let (mut graph, coordinates, caller_rng) =
         prepare_dense_embedding(data, n_rows, n_features, config, graph_options)?;
     if graph_options.is_some() {
-        zero_weak_memberships(&mut graph, config.n_epochs);
+        zero_weak_memberships(&mut graph, config.n_epochs, false);
     }
     let mut caller_rng = caller_rng.unwrap_or_else(|| Mt19937::new(explicit_seed));
     finish_seeded_embedding(graph, coordinates, &config.layout_config(), &mut caller_rng)
 }
 
-pub(crate) fn zero_weak_memberships(graph: &mut CsrGraph, n_epochs: usize) {
-    let sampling_epochs = match n_epochs {
-        epochs if epochs > 10 => epochs,
-        _ if graph.n_rows <= 10_000 => 500,
-        _ => 200,
+pub(crate) fn zero_weak_memberships(graph: &mut CsrGraph, n_epochs: usize, densmap: bool) {
+    let sampling_epochs = if n_epochs > 10 {
+        n_epochs
+    } else {
+        let default_epochs = if graph.n_rows <= 10_000 { 500 } else { 200 };
+        default_epochs + if densmap { 200 } else { 0 }
     };
     let maximum = graph.data.iter().copied().fold(0.0_f32, f32::max);
     let cutoff = maximum / sampling_epochs as f32;
@@ -317,24 +318,7 @@ fn finish_seeded_embedding(
     caller_rng: &mut Mt19937,
 ) -> Result<DenseEmbedding, DenseEmbeddingFitError> {
     let mut sampler =
-        SerialNegativeSampler::new(caller_rng, &coordinates, graph.n_rows, config.n_components)
-            .map_err(|error| match error {
-                NegativeSamplerError::InvalidShape {
-                    n_rows,
-                    n_components,
-                    values,
-                } => InitializationError::InvalidShape {
-                    n_rows,
-                    n_components,
-                    values,
-                },
-                NegativeSamplerError::NonFiniteHeadCoordinate { head, value } => {
-                    InitializationError::NonFiniteValue {
-                        index: head * config.n_components,
-                        value,
-                    }
-                }
-            })?;
+        serial_negative_sampler(caller_rng, &coordinates, graph.n_rows, config.n_components)?;
     finish_embedding(
         graph,
         coordinates,
@@ -348,7 +332,34 @@ fn finish_seeded_embedding(
     )
 }
 
-fn prepare_dense_embedding(
+pub(crate) fn serial_negative_sampler(
+    caller_rng: &mut Mt19937,
+    coordinates: &[f32],
+    n_rows: usize,
+    n_components: usize,
+) -> Result<SerialNegativeSampler, InitializationError> {
+    SerialNegativeSampler::new(caller_rng, coordinates, n_rows, n_components).map_err(|error| {
+        match error {
+            NegativeSamplerError::InvalidShape {
+                n_rows,
+                n_components,
+                values,
+            } => InitializationError::InvalidShape {
+                n_rows,
+                n_components,
+                values,
+            },
+            NegativeSamplerError::NonFiniteHeadCoordinate { head, value } => {
+                InitializationError::NonFiniteValue {
+                    index: head * n_components,
+                    value,
+                }
+            }
+        }
+    })
+}
+
+pub(crate) fn prepare_dense_embedding(
     data: &[f32],
     n_rows: usize,
     n_features: usize,

@@ -103,6 +103,12 @@ typedef struct umap_capi_dense_embedding_config {
     const float *init_coordinates;
 } umap_capi_dense_embedding_config_t;
 
+typedef struct umap_capi_densmap_options {
+    double dens_lambda;
+    double dens_frac;
+    double dens_var_shift;
+} umap_capi_densmap_options_t;
+
 /*
  * Use the effective fitted neighbor count, curve parameters and learning
  * rate. n_epochs is the update epoch count, with zero selecting initialization.
@@ -223,6 +229,21 @@ umap_capi_status_t umap_capi_fit_dense_embedding_seeded(
     size_t n_rows,
     size_t n_features,
     const umap_capi_dense_embedding_config_t *config,
+    umap_capi_dense_embedding_t **out_embedding);
+
+/*
+ * Fit a seeded dense embedding with the density objective. The storage and
+ * handle rules of umap_capi_fit_dense_embedding_seeded apply. density points
+ * to initialized, aligned storage. dens_frac is in [0, 1], and dens_lambda
+ * and dens_var_shift are nonnegative. All three parameters must be finite.
+ */
+umap_capi_status_t umap_capi_fit_dense_densmap_seeded(
+    const float *data,
+    size_t data_len,
+    size_t n_rows,
+    size_t n_features,
+    const umap_capi_dense_embedding_config_t *config,
+    const umap_capi_densmap_options_t *density,
     umap_capi_dense_embedding_t **out_embedding);
 
 /*

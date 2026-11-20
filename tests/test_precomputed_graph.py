@@ -124,8 +124,6 @@ def test_precomputed_rejects_inputs_outside_the_supported_graph_path(distances, 
         precomputed_model(n_neighbors=2).fit(distances)
 
 
-def test_precomputed_requires_graph_mode_and_the_public_metric_name():
-    with pytest.raises(NotImplementedError, match="transform_mode='graph'"):
-        UMAP(metric="precomputed").fit([[0]])
+def test_precomputed_requires_the_public_metric_name():
     with pytest.raises(ValueError, match="metric is neither callable nor a recognised string"):
         UMAP(metric="Precomputed", transform_mode="graph").fit([[0]])

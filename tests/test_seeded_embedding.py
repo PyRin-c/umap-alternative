@@ -274,8 +274,8 @@ def test_modern_optimizer_cannot_use_seeded_compatibility_path(optimizer):
         ({"init": "tswspectral"}, NotImplementedError, "tswspectral"),
         ({"init": EXPLICIT.tolist()}, ValueError, "string or ndarray"),
         ({"init": EXPLICIT[[0, 1, 1, 3, 4, 5, 6, 7]]}, NotImplementedError, "repeated rows"),
-        ({"n_epochs": [0, 2]}, NotImplementedError, "scalar n_epochs"),
-        ({"metric": "precomputed"}, NotImplementedError, "precomputed"),
+        ({"n_epochs": [0, -2]}, ValueError, "list of nonnegative integers"),
+        ({"metric": "precomputed"}, ValueError, "distances must be a square matrix"),
     ],
 )
 def test_unsupported_embedding_features_fail_explicitly(overrides, exception, match):

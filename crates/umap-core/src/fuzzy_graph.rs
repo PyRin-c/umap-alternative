@@ -1,13 +1,15 @@
 //! First-pass fuzzy graph construction for dense UMAP neighbors.
 //!
 //! The implementation here follows the fuzzy-simplicial-set construction from
-//! the UMAP paper, with local connectivity fixed to one. It deliberately stops
-//! at a deterministic CSR graph. The categorical path also adjusts and
-//! renormalizes memberships before returning the graph.
+//! the UMAP paper. The result is a deterministic CSR graph. The categorical
+//! path also adjusts and renormalizes memberships before returning the graph.
 
 use std::fmt;
 
 use crate::neighbors::Neighbor;
+
+const SMOOTH_TOLERANCE: f64 = 1e-5;
+const MIN_SCALE_MULTIPLIER: f64 = 0.001;
 
 /// A square compressed-sparse-row fuzzy graph.
 #[derive(Clone, Debug, PartialEq)]
@@ -20,9 +22,72 @@ pub struct CsrGraph {
     pub indptr: Vec<usize>,
     /// Sorted column indices for each row.
     pub indices: Vec<usize>,
-    /// Fuzzy-union membership for each entry in [`CsrGraph::indices`].
+    /// Fuzzy membership for each entry in [`CsrGraph::indices`].
     pub data: Vec<f32>,
 }
+
+/// Validated local connectivity and set-operation mix for fuzzy graphs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GraphOptions {
+    local_connectivity: f64,
+    set_op_mix_ratio: f64,
+}
+
+impl GraphOptions {
+    /// Set the local connectivity and the weight of the fuzzy union.
+    ///
+    /// Local connectivity must be finite and non-negative. The mix ratio must
+    /// be in `0..=1`, with zero selecting intersection and one selecting union.
+    pub fn new(local_connectivity: f64, set_op_mix_ratio: f64) -> Result<Self, GraphOptionsError> {
+        if !local_connectivity.is_finite() || local_connectivity < 0.0 {
+            return Err(GraphOptionsError::InvalidLocalConnectivity { local_connectivity });
+        }
+        if !(0.0..=1.0).contains(&set_op_mix_ratio) {
+            return Err(GraphOptionsError::InvalidSetOpMixRatio { set_op_mix_ratio });
+        }
+        Ok(Self {
+            local_connectivity,
+            set_op_mix_ratio,
+        })
+    }
+}
+
+impl Default for GraphOptions {
+    fn default() -> Self {
+        Self {
+            local_connectivity: 1.0,
+            set_op_mix_ratio: 1.0,
+        }
+    }
+}
+
+/// Validation failures for [`GraphOptions::new`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum GraphOptionsError {
+    /// Local connectivity must be finite and non-negative.
+    InvalidLocalConnectivity { local_connectivity: f64 },
+    /// The set-operation mix ratio must be finite and in `0..=1`.
+    InvalidSetOpMixRatio { set_op_mix_ratio: f64 },
+}
+
+impl fmt::Display for GraphOptionsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidLocalConnectivity { local_connectivity } => write!(
+                formatter,
+                "local connectivity {local_connectivity} must be finite and non-negative"
+            ),
+            Self::InvalidSetOpMixRatio { set_op_mix_ratio } => {
+                write!(
+                    formatter,
+                    "set operation mix ratio {set_op_mix_ratio} must be in 0..=1"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for GraphOptionsError {}
 
 /// Validation failures for [`fuzzy_simplicial_set`].
 #[derive(Clone, Debug, PartialEq)]
@@ -154,6 +219,39 @@ impl std::error::Error for GraphError {}
 /// membership underflows to zero. CSR columns are strictly ascending within
 /// every row, and the output is square with shape `n_rows x n_rows`.
 pub fn fuzzy_simplicial_set(neighbors: &[Vec<Neighbor>]) -> Result<CsrGraph, GraphError> {
+    build_fuzzy_graph(neighbors, GraphOptions::default(), true)
+}
+
+/// Build a UMAP fuzzy graph with explicit local connectivity and mix options.
+///
+/// Neighbor rows follow the validation rules of [`fuzzy_simplicial_set`].
+/// Local connectivity indexes the sorted positive distances, interpolating
+/// fractional ranks and saturating at the largest available distance. Rows
+/// without a positive distance use a zero offset. For ranks of one or higher,
+/// fractional parts at most `1e-5` leave the offset at the lower distance.
+///
+/// The minimum scale is `0.001` times the mean distance of the row when its
+/// offset is positive, or the mean across all neighbor rows otherwise. The
+/// means include the zero self distances. These scale floors and the
+/// omission of zero weights also apply with [`GraphOptions::default`].
+/// [`fuzzy_simplicial_set`] keeps its original scale and explicit-zero behavior.
+///
+/// For reciprocal directed memberships `a` and `b`, the weight is
+/// `mix * (a + b - a * b) + (1 - mix) * (a * b)`. An absent directed
+/// membership is zero. The result is square CSR with ascending columns and
+/// no diagonal. At mix zero, only positive reciprocal products are stored.
+pub fn fuzzy_simplicial_set_with_options(
+    neighbors: &[Vec<Neighbor>],
+    options: GraphOptions,
+) -> Result<CsrGraph, GraphError> {
+    build_fuzzy_graph(neighbors, options, false)
+}
+
+fn build_fuzzy_graph(
+    neighbors: &[Vec<Neighbor>],
+    options: GraphOptions,
+    preserve_default_behavior: bool,
+) -> Result<CsrGraph, GraphError> {
     let n_rows = neighbors.len();
     if n_rows == 0 {
         return Ok(CsrGraph {
@@ -226,10 +324,18 @@ pub fn fuzzy_simplicial_set(neighbors: &[Vec<Neighbor>]) -> Result<CsrGraph, Gra
         }
     }
 
+    let sorted_distances =
+        (!preserve_default_behavior).then(|| sorted_neighbor_distances(neighbors));
+    let batch_floor = sorted_distances.as_deref().map_or(0.0, batch_scale_floor);
     let mut directed = Vec::with_capacity(n_rows);
     for (row_index, row) in neighbors.iter().enumerate() {
-        let rho = local_offset(row_index, row);
-        let sigma = distance_scale(row_index, row, rho);
+        let (rho, sigma) = if let Some(distances) = &sorted_distances {
+            let distances = &distances[row_index * k..(row_index + 1) * k];
+            row_parameters(distances, options.local_connectivity, batch_floor)
+        } else {
+            let rho = default_local_offset(row);
+            (rho, default_distance_scale(row_index, row, rho))
+        };
         let mut memberships = row
             .iter()
             .filter(|neighbor| neighbor.index != row_index)
@@ -250,6 +356,8 @@ pub fn fuzzy_simplicial_set(neighbors: &[Vec<Neighbor>]) -> Result<CsrGraph, Gra
     let mut indptr = Vec::with_capacity(n_rows + 1);
     let mut indices = Vec::new();
     let mut data = Vec::new();
+    let mix = options.set_op_mix_ratio as f32;
+    let intersection_mix = (1.0 - options.set_op_mix_ratio) as f32;
     indptr.push(0);
     for (row_index, columns) in support.iter_mut().enumerate() {
         columns.sort_unstable();
@@ -257,7 +365,12 @@ pub fn fuzzy_simplicial_set(neighbors: &[Vec<Neighbor>]) -> Result<CsrGraph, Gra
         for &column in columns.iter() {
             let forward = find_membership(&directed[row_index], column);
             let reverse = find_membership(&directed[column], row_index);
-            let weight = fuzzy_union(forward, reverse).clamp(0.0, 1.0);
+            let union = fuzzy_union(forward, reverse);
+            let intersection = forward * reverse;
+            let weight = (mix * union + intersection_mix * intersection).clamp(0.0, 1.0);
+            if weight == 0.0 && !preserve_default_behavior {
+                continue;
+            }
             indices.push(column);
             data.push(weight);
         }
@@ -336,15 +449,15 @@ fn fuzzy_union(forward: f32, reverse: f32) -> f32 {
     forward + reverse - forward * reverse
 }
 
-fn local_offset(row_index: usize, row: &[Neighbor]) -> f32 {
+fn default_local_offset(row: &[Neighbor]) -> f32 {
     row.iter()
-        .filter(|neighbor| neighbor.index != row_index && neighbor.distance > 0.0)
         .map(|neighbor| neighbor.distance)
+        .filter(|&distance| distance > 0.0)
         .min_by(|left, right| left.total_cmp(right))
         .unwrap_or(0.0)
 }
 
-fn distance_scale(row_index: usize, row: &[Neighbor], rho: f32) -> f32 {
+fn default_distance_scale(row_index: usize, row: &[Neighbor], rho: f32) -> f32 {
     let target = (row.len() as f64).log2();
     let offsets = row
         .iter()
@@ -376,14 +489,105 @@ fn distance_scale(row_index: usize, row: &[Neighbor], rho: f32) -> f32 {
         return (max_offset * 0.001).max(f32::MIN_POSITIVE);
     }
 
+    search_scale(&offsets, target, true).max(f32::MIN_POSITIVE)
+}
+
+fn sorted_neighbor_distances(neighbors: &[Vec<Neighbor>]) -> Vec<f32> {
+    let mut distances = Vec::with_capacity(neighbors.len() * neighbors[0].len());
+    for row in neighbors {
+        let start = distances.len();
+        distances.extend(row.iter().map(|neighbor| neighbor.distance));
+        distances[start..].sort_unstable_by(f32::total_cmp);
+    }
+    distances
+}
+
+fn local_offset(distances: &[f32], local_connectivity: f64) -> f32 {
+    let positive = &distances[distances.partition_point(|&distance| distance == 0.0)..];
+    if positive.is_empty() {
+        return 0.0;
+    }
+    if local_connectivity >= positive.len() as f64 {
+        return positive[positive.len() - 1];
+    }
+    let whole = local_connectivity as usize;
+    let fraction = local_connectivity - whole as f64;
+    if whole == 0 {
+        return (fraction * f64::from(positive[0])) as f32;
+    }
+    let base = positive[whole - 1];
+    if fraction > SMOOTH_TOLERANCE {
+        // Round the adjacent distance difference before interpolating the offset.
+        (f64::from(base) + fraction * f64::from(positive[whole] - base)) as f32
+    } else {
+        base
+    }
+}
+
+fn row_parameters(distances: &[f32], local_connectivity: f64, batch_floor: f32) -> (f32, f32) {
+    let rho = local_offset(distances, local_connectivity);
+    let target = (distances.len() as f64).log2();
+    // Omit one zero for self. The other zero-distance candidates still
+    // contribute unit memberships, irrespective of the order of the ties.
+    let offsets = distances[1..]
+        .iter()
+        .map(|&distance| (distance - rho).max(0.0))
+        .collect::<Vec<_>>();
+    let floor = if rho > 0.0 {
+        (MIN_SCALE_MULTIPLIER * mean_distance(distances)) as f32
+    } else {
+        batch_floor
+    };
+    (rho, search_scale(&offsets, target, false).max(floor))
+}
+
+fn batch_scale_floor(distances: &[f32]) -> f32 {
+    // The batch mean rounds before multiplication. The row mean stays wide.
+    let mean = mean_distance(distances) as f32;
+    (MIN_SCALE_MULTIPLIER * f64::from(mean)) as f32
+}
+
+fn mean_distance(distances: &[f32]) -> f64 {
+    // The public Windows probes distinguish these two f32 reduction groupings.
+    let (blocks, tail) = distances.as_chunks::<32>();
+    let mut lanes = [0.0; 32];
+    for block in blocks {
+        for (sum, &distance) in lanes.iter_mut().zip(block) {
+            *sum += distance;
+        }
+    }
+    let [a, b, c, d, e, f, g, h] =
+        std::array::from_fn(|i| (lanes[i] + lanes[i + 8]) + (lanes[i + 16] + lanes[i + 24]));
+    let wide_sum = ((a + e) + (c + g)) + ((b + f) + (d + h));
+
+    let (blocks, tail) = tail.as_chunks::<4>();
+    let [a, b, c, d] = blocks
+        .iter()
+        .fold([wide_sum, 0.0, 0.0, 0.0], |[a, b, c, d], block| {
+            [a + block[0], b + block[1], c + block[2], d + block[3]]
+        });
+    let sum = tail
+        .iter()
+        .fold((a + c) + (b + d), |sum, value| sum + value);
+    let sum = if sum.is_finite() {
+        f64::from(sum)
+    } else {
+        // Finite distances can overflow an f32 sum even when their mean fits.
+        distances.iter().map(|&d| f64::from(d)).sum::<f64>()
+    };
+    sum / distances.len() as f64
+}
+
+fn search_scale(offsets: &[f32], target: f64, inclusive_tolerance: bool) -> f32 {
     let mut lower = 0.0_f32;
     let mut upper = f32::INFINITY;
     let mut middle = 1.0_f32;
 
     for _ in 0..64 {
         // A rounded f32 sum can cross the convergence threshold early.
-        let sum = membership_sum(&offsets, middle);
-        if (sum - target).abs() <= 1e-5 {
+        let sum = membership_sum(offsets, middle);
+        let residual = (sum - target).abs();
+        if residual < SMOOTH_TOLERANCE || (inclusive_tolerance && residual == SMOOTH_TOLERANCE) {
             break;
         }
         if sum > target {
@@ -398,7 +602,7 @@ fn distance_scale(row_index: usize, row: &[Neighbor], rho: f32) -> f32 {
         };
     }
 
-    middle.max(f32::MIN_POSITIVE)
+    middle
 }
 
 fn membership_sum(offsets: &[f32], sigma: f32) -> f64 {
@@ -421,6 +625,10 @@ fn find_membership(row: &[(usize, f32)], index: usize) -> f32 {
     row.binary_search_by_key(&index, |(candidate, _)| *candidate)
         .map_or(0.0, |position| row[position].1)
 }
+
+#[cfg(test)]
+#[path = "fuzzy_graph/options_tests.rs"]
+mod options_tests;
 
 #[cfg(test)]
 mod tests {

@@ -8,11 +8,11 @@
 //!
 //! `2 * a * b * q^(b - 1) * (y_i - y_j) / (1 + a * q^b)`.
 //!
-//! The public update functions apply one gradient descent step in `f32`
-//! arithmetic.  Attractive edge updates are symmetric, while a negative
-//! example updates only the explicitly supplied current endpoint.  The
-//! scheduler below adds only the public attractive edge-sampling rule; random
-//! negative sampling remains outside this module.
+//! Attractive edge updates are symmetric and store coordinates in `f32`.
+//! Their distance arithmetic uses `f32`, and the force and coordinate
+//! addition use `f64`. A negative example updates the supplied current
+//! endpoint using `f32` arithmetic. The scheduler applies the attractive
+//! edge-sampling rule.
 
 use std::fmt;
 
@@ -120,7 +120,7 @@ pub enum LayoutError {
         value: f32,
     },
     /// The squared distance or objective derivative overflowed or became
-    /// undefined in `f32` arithmetic.
+    /// undefined.
     NonFiniteArithmetic {
         /// Description of the intermediate that was not finite.
         quantity: &'static str,
@@ -232,20 +232,21 @@ impl std::error::Error for LayoutError {}
 ///
 /// The endpoint vectors are interpreted as Euclidean coordinates.  The loss
 /// for this edge is `log(1 + a * d^(2b))`, where `d` is their Euclidean
-/// distance.  The update uses its exact derivative in `f32` arithmetic and
-/// moves both endpoints toward one another using the same step computed from
-/// the original coordinates.  A zero-distance edge is a valid no-op.
+/// distance. Differences are computed in `f32`, and each squared component
+/// is added with one rounding using `f32::mul_add`. The curve, learning rate,
+/// and coordinate addition use `f64`, with the result rounded to `f32` for
+/// storage. Both endpoints use the same step from the original coordinates.
+/// A zero-distance edge is a valid no-op.
 ///
-/// No force clipping is applied.  If a finite input nevertheless overflows a
-/// distance, derivative, or resulting coordinate in `f32`, the function
-/// returns [`LayoutError::NonFiniteArithmetic`] or
-/// [`LayoutError::NonFiniteUpdate`] without modifying either endpoint.
+/// A non-finite distance, derivative, or stored coordinate returns
+/// [`LayoutError::NonFiniteArithmetic`] or [`LayoutError::NonFiniteUpdate`]
+/// before either endpoint is modified.
 pub fn attractive_update_pair(
     head: &mut [f32],
     tail: &mut [f32],
-    a: f32,
-    b: f32,
-    learning_rate: f32,
+    a: impl Into<f64>,
+    b: impl Into<f64>,
+    learning_rate: impl Into<f64>,
 ) -> Result<(), LayoutError> {
     if head.is_empty() || head.len() != tail.len() {
         return Err(if head.len() != tail.len() {
@@ -261,17 +262,16 @@ pub fn attractive_update_pair(
         });
     }
 
+    let (a, b, learning_rate) = (a.into(), b.into(), learning_rate.into());
     validate_parameters(a, b, learning_rate)?;
     validate_endpoint(head, "head")?;
     validate_endpoint(tail, "tail")?;
 
-    // Compute the squared distance in a fixed component order.  Keeping this
-    // and all subsequent arithmetic in f32 makes the primitive deterministic
-    // for a given f32 input and avoids an implicit precision contract.
+    // Accumulate in component order with one rounding per squared component.
     let mut distance_squared = 0.0_f32;
     for (&head_value, &tail_value) in head.iter().zip(tail.iter()) {
         let difference = tail_value - head_value;
-        distance_squared += difference * difference;
+        distance_squared = difference.mul_add(difference, distance_squared);
     }
 
     if !distance_squared.is_finite() {
@@ -288,39 +288,46 @@ pub fn attractive_update_pair(
         return Ok(());
     }
 
+    let distance_squared = f64::from(distance_squared);
     let distance_power_b = distance_squared.powf(b);
-    let denominator = 1.0_f32 + a * distance_power_b;
     if !distance_power_b.is_finite() {
         return Err(LayoutError::NonFiniteArithmetic {
             quantity: "distance power",
-            value: distance_power_b,
+            value: distance_power_b as f32,
         });
     }
+    let denominator = 1.0 + a * distance_power_b;
     if !denominator.is_finite() || denominator <= 0.0 {
         return Err(LayoutError::NonFiniteArithmetic {
             quantity: "objective denominator",
-            value: denominator,
+            value: denominator as f32,
         });
     }
-    let gradient_scale = (2.0_f32 * a * b * distance_squared.powf(b - 1.0_f32)) / denominator;
+    let gradient_scale = (2.0 * a * b * distance_squared.powf(b - 1.0)) / denominator;
     if !gradient_scale.is_finite() {
         return Err(LayoutError::NonFiniteArithmetic {
             quantity: "gradient scale",
-            value: gradient_scale,
+            value: gradient_scale as f32,
         });
     }
     let step = learning_rate * gradient_scale;
     if !step.is_finite() {
         return Err(LayoutError::NonFiniteArithmetic {
             quantity: "gradient step",
-            value: step,
+            value: step as f32,
         });
     }
 
+    let updated_endpoints = |head: f32, tail: f32| {
+        let difference = f64::from(tail - head);
+        let displacement = step * difference;
+        (
+            (f64::from(head) + displacement) as f32,
+            (f64::from(tail) - displacement) as f32,
+        )
+    };
     for (component, (&head_value, &tail_value)) in head.iter().zip(tail.iter()).enumerate() {
-        let difference = tail_value - head_value;
-        let new_head = head_value + step * difference;
-        let new_tail = tail_value - step * difference;
+        let (new_head, new_tail) = updated_endpoints(head_value, tail_value);
 
         if !new_head.is_finite() {
             return Err(LayoutError::NonFiniteUpdate {
@@ -338,10 +345,8 @@ pub fn attractive_update_pair(
         }
     }
 
-    for component in 0..head.len() {
-        let difference = tail[component] - head[component];
-        head[component] += step * difference;
-        tail[component] -= step * difference;
+    for (head, tail) in head.iter_mut().zip(tail.iter_mut()) {
+        (*head, *tail) = updated_endpoints(*head, *tail);
     }
 
     Ok(())
@@ -391,7 +396,7 @@ pub fn negative_example_update(
         });
     }
 
-    validate_parameters(a, b, learning_rate)?;
+    validate_parameters(a.into(), b.into(), learning_rate.into())?;
     validate_repulsion_strength(repulsion_strength)?;
     validate_endpoint(current, "current")?;
     validate_endpoint(other, "other")?;
@@ -499,9 +504,9 @@ pub fn attractive_update(
     n_components: usize,
     head_row: usize,
     tail_row: usize,
-    a: f32,
-    b: f32,
-    learning_rate: f32,
+    a: impl Into<f64>,
+    b: impl Into<f64>,
+    learning_rate: impl Into<f64>,
 ) -> Result<(), LayoutError> {
     if n_components == 0 || !embedding.len().is_multiple_of(n_components) {
         return Err(LayoutError::InvalidShape {
@@ -510,6 +515,7 @@ pub fn attractive_update(
         });
     }
 
+    let (a, b, learning_rate) = (a.into(), b.into(), learning_rate.into());
     validate_parameters(a, b, learning_rate)?;
 
     let n_rows = embedding.len() / n_components;
@@ -566,10 +572,11 @@ pub fn attractive_update_csr(
     embedding: &mut [f32],
     n_components: usize,
     graph: &CsrGraph,
-    a: f32,
-    b: f32,
-    learning_rate: f32,
+    a: impl Into<f64>,
+    b: impl Into<f64>,
+    learning_rate: impl Into<f64>,
 ) -> Result<(), LayoutError> {
+    let (a, b, learning_rate) = (a.into(), b.into(), learning_rate.into());
     validate_csr_inputs(embedding, n_components, graph, a, b, learning_rate)?;
 
     for row in 0..graph.n_rows {
@@ -607,10 +614,9 @@ pub fn attractive_update_csr(
 /// This ordering follows the public UMAP epoch schedule: with an edge weight
 /// of one, `n_epochs = 1` performs no update (its first due epoch is one),
 /// while `n_epochs = 2` performs one update at the initial learning rate.
-/// `n_epochs = 0` is a validated no-op.  All arithmetic affecting embedding
-/// coordinates uses the [`attractive_update`] `f32` kernel; due times and the
-/// decay fraction use `f64` so schedule precision is independent of the
-/// embedding component count.
+/// `n_epochs = 0` is a validated no-op. Due times and the decayed rate are
+/// kept in `f64` across epochs. Coordinates are updated by
+/// [`attractive_update`].
 ///
 /// This function intentionally implements only attractive updates.  It does
 /// not draw negative samples and does not apply repulsive forces.  The graph
@@ -621,11 +627,12 @@ pub fn attractive_optimize_csr(
     embedding: &mut [f32],
     n_components: usize,
     graph: &CsrGraph,
-    a: f32,
-    b: f32,
-    learning_rate: f32,
+    a: impl Into<f64>,
+    b: impl Into<f64>,
+    learning_rate: impl Into<f64>,
     n_epochs: usize,
 ) -> Result<(), LayoutError> {
+    let (a, b, learning_rate) = (a.into(), b.into(), learning_rate.into());
     validate_csr_inputs(embedding, n_components, graph, a, b, learning_rate)?;
 
     // UMAP's edge sampling interval is n_epochs / (n_epochs * weight), which
@@ -665,7 +672,7 @@ pub fn attractive_optimize_csr(
 
         // The current alpha is used for this whole epoch.  Updating after the
         // body intentionally makes the first due epoch use the initial rate.
-        alpha = (f64::from(learning_rate) * (1.0 - (epoch_as_f64 / n_epochs as f64))) as f32;
+        alpha = learning_rate * (1.0 - epoch_as_f64 / n_epochs as f64);
     }
 
     Ok(())
@@ -675,9 +682,9 @@ pub(crate) fn validate_csr_inputs(
     embedding: &[f32],
     n_components: usize,
     graph: &CsrGraph,
-    a: f32,
-    b: f32,
-    learning_rate: f32,
+    a: impl Into<f64>,
+    b: impl Into<f64>,
+    learning_rate: impl Into<f64>,
 ) -> Result<(), LayoutError> {
     if n_components == 0 {
         return Err(LayoutError::InvalidShape {
@@ -709,7 +716,7 @@ pub(crate) fn validate_csr_inputs(
         });
     }
 
-    validate_parameters(a, b, learning_rate)?;
+    validate_parameters(a.into(), b.into(), learning_rate.into())?;
     if let Some((index, value)) = embedding
         .iter()
         .copied()
@@ -772,23 +779,23 @@ pub(crate) fn validate_csr_inputs(
     Ok(())
 }
 
-fn validate_parameters(a: f32, b: f32, learning_rate: f32) -> Result<(), LayoutError> {
+fn validate_parameters(a: f64, b: f64, learning_rate: f64) -> Result<(), LayoutError> {
     if !a.is_finite() || a <= 0.0 {
         return Err(LayoutError::InvalidParameter {
             parameter: "a",
-            value: a,
+            value: a as f32,
         });
     }
     if !b.is_finite() || b <= 0.0 {
         return Err(LayoutError::InvalidParameter {
             parameter: "b",
-            value: b,
+            value: b as f32,
         });
     }
     if !learning_rate.is_finite() || learning_rate < 0.0 {
         return Err(LayoutError::InvalidParameter {
             parameter: "learning_rate",
-            value: learning_rate,
+            value: learning_rate as f32,
         });
     }
     Ok(())
@@ -1018,7 +1025,7 @@ mod tests {
 
         let mut expected = [0.0_f32, 2.0];
         attractive_update(&mut expected, 1, 0, 1, 1.0, 1.0, 0.1).unwrap();
-        let decayed_rate = (0.1_f64 * (1.0 - 1.0_f64 / 3.0)) as f32;
+        let decayed_rate = 0.1 * (1.0 - 1.0 / 3.0);
         attractive_update(&mut expected, 1, 0, 1, 1.0, 1.0, decayed_rate).unwrap();
         assert_eq!(scheduled, expected);
     }

@@ -233,9 +233,11 @@ impl std::error::Error for LayoutError {}
 /// The endpoint vectors are interpreted as Euclidean coordinates.  The loss
 /// for this edge is `log(1 + a * d^(2b))`, where `d` is their Euclidean
 /// distance. Differences are computed in `f32`, and each squared component
-/// is added with one rounding using `f32::mul_add`. The curve, learning rate,
-/// and coordinate addition use `f64`, with the result rounded to `f32` for
-/// storage. Both endpoints use the same step from the original coordinates.
+/// is added with one rounding using `f32::mul_add`. Each gradient component
+/// is clipped to `[-4, 4]` before scaling by the learning rate. The curve,
+/// gradient, and coordinate addition use `f64`, with the result rounded to
+/// `f32` for storage. Both endpoints use the same step from the original
+/// coordinates.
 /// A zero-distance edge is a valid no-op.
 ///
 /// A non-finite distance, derivative, or stored coordinate returns
@@ -264,8 +266,6 @@ pub fn attractive_update_pair(
 
     let (a, b, learning_rate) = (a.into(), b.into(), learning_rate.into());
     validate_parameters(a, b, learning_rate)?;
-    validate_endpoint(head, "head")?;
-    validate_endpoint(tail, "tail")?;
 
     // Accumulate in component order with one rounding per squared component.
     let mut distance_squared = 0.0_f32;
@@ -275,6 +275,10 @@ pub fn attractive_update_pair(
     }
 
     if !distance_squared.is_finite() {
+        // A non-finite coordinate propagates through the distance. Check the
+        // endpoints here to distinguish invalid input from distance overflow.
+        validate_endpoint(head, "head")?;
+        validate_endpoint(tail, "tail")?;
         return Err(LayoutError::NonFiniteArithmetic {
             quantity: "squared distance",
             value: distance_squared,
@@ -310,17 +314,11 @@ pub fn attractive_update_pair(
             value: gradient_scale as f32,
         });
     }
-    let step = learning_rate * gradient_scale;
-    if !step.is_finite() {
-        return Err(LayoutError::NonFiniteArithmetic {
-            quantity: "gradient step",
-            value: step as f32,
-        });
-    }
 
     let updated_endpoints = |head: f32, tail: f32| {
         let difference = f64::from(tail - head);
-        let displacement = step * difference;
+        let gradient = (gradient_scale * difference).clamp(-4.0, 4.0);
+        let displacement = learning_rate * gradient;
         (
             (f64::from(head) + displacement) as f32,
             (f64::from(tail) - displacement) as f32,

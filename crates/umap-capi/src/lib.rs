@@ -25,8 +25,10 @@ use umap_core::neighbors::{DistanceMetric, KnnError};
 use umap_core::optimize::OptimizeError;
 use umap_core::sampling::{EdgeSamplingCursor, SamplingError};
 
+mod inverse;
 mod transform;
 mod update;
+pub use inverse::*;
 pub use transform::*;
 pub use update::*;
 
@@ -234,8 +236,8 @@ fn validate_required_pointer<T>(pointer: *const T) -> Result<(), u32> {
     Ok(())
 }
 
-fn validate_dense_input(
-    data: *const f32,
+fn validate_dense_input<T>(
+    data: *const T,
     data_len: usize,
     n_rows: usize,
     n_features: usize,
@@ -246,7 +248,7 @@ fn validate_dense_input(
     if data_len != 0 && data.is_null() {
         return Err(STATUS_NULL_ARGUMENT);
     }
-    if !slice_size_is_representable::<f32>(data_len) {
+    if !slice_size_is_representable::<T>(data_len) {
         return Err(STATUS_INVALID_LENGTH);
     }
     let expected_len = n_rows.checked_mul(n_features).ok_or(STATUS_INVALID_SHAPE)?;
@@ -256,9 +258,17 @@ fn validate_dense_input(
     Ok(())
 }
 
+fn validate_output_shape<T>(n_rows: usize, n_cols: usize) -> Result<(), u32> {
+    let len = n_rows.checked_mul(n_cols).ok_or(STATUS_INVALID_SHAPE)?;
+    if !slice_size_is_representable::<T>(len) {
+        return Err(STATUS_INVALID_LENGTH);
+    }
+    Ok(())
+}
+
 // The caller must validate nullness, alignment, length and address-space size
 // and guarantee readable storage for `len` contiguous values.
-unsafe fn input_slice<'a>(data: *const f32, len: usize) -> &'a [f32] {
+unsafe fn input_slice<'a, T>(data: *const T, len: usize) -> &'a [T] {
     if len == 0 {
         &[]
     } else {
@@ -477,6 +487,10 @@ where
         Ok(status) => status,
         Err(_) => STATUS_PANIC,
     }
+}
+
+fn catch_result(function: impl FnOnce() -> Result<(), u32>) -> u32 {
+    catch_status(|| function().map_or_else(|status| status, |()| STATUS_OK))
 }
 
 /// Return the package version as a static NUL-terminated string.

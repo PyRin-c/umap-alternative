@@ -3,8 +3,8 @@ use std::slice;
 use super::{
     MetricTag, STATUS_INTERNAL_ERROR, STATUS_INVALID_CONFIG, STATUS_INVALID_K,
     STATUS_INVALID_LENGTH, STATUS_INVALID_METRIC, STATUS_INVALID_POINTER, STATUS_INVALID_SHAPE,
-    STATUS_NONFINITE_INPUT, STATUS_OK, catch_status, input_slice, map_knn_error,
-    optional_slice_pointer, pointer_is_aligned, slice_size_is_representable, validate_dense_input,
+    STATUS_NONFINITE_INPUT, catch_result, input_slice, map_knn_error, optional_slice_pointer,
+    pointer_is_aligned, slice_size_is_representable, validate_dense_input, validate_output_shape,
     validate_required_pointer,
 };
 use umap_core::fuzzy_graph::GraphOptions;
@@ -143,10 +143,6 @@ struct OwnedTransform {
     coordinates: Vec<f32>,
 }
 
-fn catch_result(function: impl FnOnce() -> Result<(), u32>) -> u32 {
-    catch_status(|| function().map_or_else(|status| status, |()| STATUS_OK))
-}
-
 unsafe fn read_transform_input(
     input: *const UmapCapiDenseTransformInput,
 ) -> Result<UmapCapiDenseTransformInput, u32> {
@@ -171,14 +167,6 @@ unsafe fn read_transform_input(
     Ok(input)
 }
 
-fn validate_output_shape<T>(n_rows: usize, n_cols: usize) -> Result<(), u32> {
-    let len = n_rows.checked_mul(n_cols).ok_or(STATUS_INVALID_SHAPE)?;
-    if !slice_size_is_representable::<T>(len) {
-        return Err(STATUS_INVALID_LENGTH);
-    }
-    Ok(())
-}
-
 fn transform_graph_options(
     n_training_rows: usize,
     n_query_rows: usize,
@@ -192,15 +180,18 @@ fn transform_graph_options(
     GraphOptions::new(local_connectivity, 1.0).map_err(|_| STATUS_INVALID_CONFIG)
 }
 
+pub(super) fn parse_fit_epochs(mode: u32, fit_epochs: usize) -> Result<Option<usize>, u32> {
+    match mode {
+        FIT_EPOCHS_DEFAULT if fit_epochs == 0 => Ok(None),
+        FIT_EPOCHS_EXPLICIT => Ok(Some(fit_epochs)),
+        _ => Err(STATUS_INVALID_CONFIG),
+    }
+}
+
 fn transform_layout_config(
     config: UmapCapiDenseTransformConfig,
     metric: DistanceMetric,
 ) -> Result<DenseEmbeddingTransformConfig, u32> {
-    let fit_epochs = match config.fit_epochs_mode {
-        FIT_EPOCHS_DEFAULT if config.fit_epochs == 0 => None,
-        FIT_EPOCHS_EXPLICIT => Some(config.fit_epochs),
-        _ => return Err(STATUS_INVALID_CONFIG),
-    };
     Ok(DenseEmbeddingTransformConfig {
         n_neighbors: config.n_neighbors,
         metric,
@@ -208,7 +199,7 @@ fn transform_layout_config(
         a: config.a,
         b: config.b,
         learning_rate: config.learning_rate,
-        fit_epochs,
+        fit_epochs: parse_fit_epochs(config.fit_epochs_mode, config.fit_epochs)?,
         repulsion_strength: config.repulsion_strength,
         negative_sample_rate: config.negative_sample_rate,
         transform_seed: u32::try_from(config.transform_seed).map_err(|_| STATUS_INVALID_CONFIG)?,

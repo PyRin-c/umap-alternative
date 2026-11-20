@@ -136,6 +136,46 @@ count. Windows and Ubuntu WSL regenerate the same record. The port
 matches 448 of 450 coordinate bits. Two coordinates in the correlation
 attraction-only checkpoint at fit epoch 30 differ by one float32 ULP.
 
+## C11 inverse reconstruction
+
+`umap_capi_inverse_transform_dense` borrows the original features, fitted
+embedding, queries, and geometry for one call. Provide a row-major Delaunay
+simplex array with `n_components + 1` vertex indices per simplex and keep the
+vertex order from the triangulator. Provide one simplex index per query in
+the same coordinate space. Use `UMAP_CAPI_INVERSE_EXTERIOR` (`SIZE_MAX`) for
+an outside location. The inverse starts those queries at the first nearest
+fitted vertex under the float32 squared-distance rule and reports their count
+in the owning result's view. The caller constructs the geometry and locates
+the queries. The result owns the row-major reconstructed features. An empty
+query batch returns `UMAP_CAPI_STATUS_INVALID_SHAPE`. [Public C header](../crates/umap-capi/include/umap_capi.h)
+
+For an exhaustive fit, pass `NULL` for scales and supply the effective fit
+neighbor count, fitted local connectivity, metric, and any fit cutoff. For
+other fitted neighborhoods, pass one `(rho, sigma)` pair per training row
+or the original ranked distances with their full supplied width. Keep the
+fit-time cutoff decisions as positive infinity in the ranked array. The
+smoothing target is the effective neighbor count, which can be smaller than
+the supplied width.
+
+The C11 test matched all 99 coordinate bits across 11 runs on Windows x64
+with MSVC and Ubuntu 24.04 WSL x64 with GCC. It uses the
+original Euclidean initialization and optimized interior and exterior
+checkpoints, the Manhattan, Chebyshev, cosine, and correlation checkpoints
+at 30 fit epochs with repulsion one, `supplied_width`, `supplied_cutoff`,
+and `finite_cutoff` through both native derivation and the fitted-scale input.
+The metric test geometry was obtained from the recorded `embedding` and
+`queries` float32 arrays with public SciPy 1.18.1 `Delaunay` using `QJ` and
+`find_simplex`. The C test preserves the returned simplex order and maps
+SciPy's `-1` locations to `SIZE_MAX`. The ranked arrays reproduce the fixture
+generator's scaled distances and inclusive cutoff mask. The direct scale
+pairs were derived by the Rust scale fitter from the same `finite_cutoff`
+case. [C11 checkpoints and inputs](../crates/umap-capi/tests/c_inverse_smoke.c)
+
+The C path uses the same Rust candidate order, exterior distance reduction,
+and metric gradients as the Rust replay. The tied-distance, high-dimensional
+exterior, and one-ULP correlation differences described above apply to this
+entry point with the same supplied geometry.
+
 ## Reproduction
 
 Run from the repository root with the locked reference environment. Keep

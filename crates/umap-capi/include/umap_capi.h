@@ -481,6 +481,120 @@ umap_capi_status_t umap_capi_coo_graph_view(
 
 umap_capi_status_t umap_capi_coo_graph_release(umap_capi_coo_graph_t *graph);
 
+/* Query location outside the fitted embedding's convex hull. */
+#define UMAP_CAPI_INVERSE_EXTERIOR SIZE_MAX
+
+/*
+ * Supply three finite row-major matrices. The training matrix has
+ * n_training_rows by n_features elements. The fitted embedding and queries
+ * have n_training_rows and n_query_rows rows respectively, both with width
+ * config->n_components. Feature width and query count must be positive.
+ * The embedding width must be at least two, and the training row count
+ * must be at least n_components + 2.
+ *
+ * Supply the Delaunay tessellation of the fitted embedding and each query's
+ * location in it. simplices has one row per simplex, each with n_components + 1
+ * distinct zero-based training vertex indices. At least one simplex is
+ * required. Preserve the simplex's vertex order because its first vertex
+ * seeds the search. query_simplices has one zero-based simplex index or
+ * UMAP_CAPI_INVERSE_EXTERIOR per query. Exterior queries seed the search at
+ * the first nearest fitted vertex by squared float32 distance. The caller
+ * determines each location and uses the same coordinate space for all geometry.
+ *
+ * Every length is an element count, and all arrays are read-only for the call.
+ */
+typedef struct umap_capi_dense_inverse_input {
+    size_t n_training_rows;
+    size_t n_query_rows;
+    size_t n_features;
+    size_t training_len;
+    size_t embedding_len;
+    size_t queries_len;
+    size_t simplices_len;
+    size_t query_simplices_len;
+    const float *training;
+    const float *embedding;
+    const float *queries;
+    const size_t *simplices;
+    const size_t *query_simplices;
+} umap_capi_dense_inverse_input_t;
+
+/* Original-space fitted local offset and exponential scale for one row. */
+typedef struct umap_capi_inverse_local_scale {
+    float rho;
+    float sigma;
+} umap_capi_inverse_local_scale_t;
+
+/*
+ * A non-NULL descriptor supplies exactly one scale source. Set the unused
+ * pointer and its associated lengths and width to zero.
+ *
+ * fitted supplies one pair per training row, with finite rho >= 0 and
+ * finite sigma > 0. ranked_distances supplies the original fit-time ranked
+ * feature distances in row-major order, with self first and positive infinity
+ * for positions removed by a cutoff. Keep the full supplied width and order.
+ * ranked_len equals n_training_rows * ranked_width. ranked_width can exceed
+ * config->n_neighbors, which is the effective smoothing target.
+ */
+typedef struct umap_capi_inverse_scales {
+    size_t fitted_len;
+    size_t ranked_len;
+    size_t ranked_width;
+    const umap_capi_inverse_local_scale_t *fitted;
+    const float *ranked_distances;
+} umap_capi_inverse_scales_t;
+
+typedef struct umap_capi_dense_inverse umap_capi_dense_inverse_t;
+
+/* Read-only feature reconstruction and exterior count from an inverse handle. */
+typedef struct umap_capi_dense_inverse_view {
+    size_t n_rows;
+    size_t n_features;
+    size_t coordinates_len;
+    size_t exterior_queries;
+    const float *coordinates;
+} umap_capi_dense_inverse_view_t;
+
+/*
+ * Reconstruct dense features using the fitted curve, metric, initial learning
+ * rate, local connectivity, and effective neighbor count in config. All five
+ * UMAP_CAPI_METRIC_* tags select original-space distances and gradients.
+ * Epoch modes and transform_seed follow the dense transform settings. Inverse
+ * optimization starts at learning_rate / 4 and uses scales only with at least
+ * two inverse epochs and a nonzero initial rate.
+ *
+ * Pass NULL scales to derive scales from exhaustive fitted feature neighbors.
+ * Derivation uses local_connectivity and omits distances >=
+ * disconnection_distance. Use positive infinity for an unbounded cutoff.
+ * Caller-supplied metadata already incorporates any cutoff used by the fit.
+ * Ranked distances are calibrated with the fitted local_connectivity.
+ *
+ * All descriptors and buffers must be aligned and readable. out_inverse must
+ * be an aligned, writable handle slot disjoint from the input storage. Success
+ * writes an owning handle and every error leaves the slot untouched. Zero
+ * queries, multiplication overflow, and invalid simplex indices or duplicate
+ * simplex vertices return INVALID_SHAPE. Length mismatches and unaddressable
+ * buffers return INVALID_LENGTH. An active query with all weights underflowed
+ * to zero returns INVALID_CONFIG.
+ */
+umap_capi_status_t umap_capi_inverse_transform_dense(
+    const umap_capi_dense_inverse_input_t *input,
+    const umap_capi_dense_transform_config_t *config,
+    const umap_capi_inverse_scales_t *scales,
+    umap_capi_dense_inverse_t **out_inverse);
+
+/*
+ * Fill a writable aligned view outside the live handle's storage. On error
+ * the view is untouched. The view borrows n_rows * n_features row-major floats
+ * until release. All input storage may be reused when the transform returns.
+ */
+umap_capi_status_t umap_capi_dense_inverse_view(
+    const umap_capi_dense_inverse_t *inverse,
+    umap_capi_dense_inverse_view_t *out_view);
+
+/* Release exactly once after all readers finish. NULL is a no-op. */
+umap_capi_status_t umap_capi_dense_inverse_release(umap_capi_dense_inverse_t *inverse);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

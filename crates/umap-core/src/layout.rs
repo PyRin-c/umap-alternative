@@ -235,7 +235,7 @@ pub(crate) enum DistanceReduction {
 }
 
 impl DistanceReduction {
-    fn squared(self, left: &[f32], right: &[f32]) -> f32 {
+    pub(crate) fn squared(self, left: &[f32], right: &[f32]) -> f32 {
         let (initial, left, right) = match self {
             Self::Sequential => (0.0, left, right),
             Self::SeededCompatibility => compatibility_distance_prefix(left, right),

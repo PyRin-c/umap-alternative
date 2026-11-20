@@ -340,6 +340,10 @@ impl DistanceMetric {
 }
 
 fn euclidean_distance(left: &[f32], right: &[f32]) -> f32 {
+    euclidean_distance_wide(left, right) as f32
+}
+
+pub(crate) fn euclidean_distance_wide(left: &[f32], right: &[f32]) -> f64 {
     debug_assert_eq!(left.len(), right.len());
     let squared_sum = left
         .iter()
@@ -348,7 +352,7 @@ fn euclidean_distance(left: &[f32], right: &[f32]) -> f32 {
             let difference = left_value - right_value;
             sum + f64::from(difference * difference)
         });
-    squared_sum.sqrt() as f32
+    squared_sum.sqrt()
 }
 
 fn manhattan_distance(left: &[f32], right: &[f32]) -> f32 {

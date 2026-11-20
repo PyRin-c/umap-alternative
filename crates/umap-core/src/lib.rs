@@ -5,6 +5,7 @@ pub mod embedding;
 pub mod fit;
 pub mod fuzzy_graph;
 pub mod initialization;
+pub mod inverse;
 pub mod layout;
 pub mod neighbors;
 pub mod optimize;

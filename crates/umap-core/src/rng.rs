@@ -291,16 +291,11 @@ impl SerialNegativeSampler {
     }
 
     fn next_word(&mut self, head: usize) -> Option<i32> {
-        let lanes = self.heads.get_mut(head)?;
-        lanes[0] = advance_lane(lanes[0], 0xffff_fffe, 13, 12, 19);
-        lanes[1] = advance_lane(lanes[1], 0xffff_fff8, 2, 4, 25);
-        lanes[2] = advance_lane(lanes[2], 0xffff_fff0, 3, 17, 11);
-        // Interpret the low 32 bits of the XOR as a signed word.
-        Some((lanes[0] ^ lanes[1] ^ lanes[2]) as i32)
+        self.heads.get_mut(head).map(next_negative_word)
     }
 }
 
-fn draw_negative_seed(mut next_raw_word: impl FnMut() -> u32) -> [i64; 3] {
+pub(crate) fn draw_negative_seed(mut next_raw_word: impl FnMut() -> u32) -> [i64; 3] {
     std::array::from_fn(|_| {
         loop {
             let raw = next_raw_word();
@@ -310,6 +305,18 @@ fn draw_negative_seed(mut next_raw_word: impl FnMut() -> u32) -> [i64; 3] {
             }
         }
     })
+}
+
+pub(crate) fn sample_vertex(lanes: &mut [i64; 3], n_vertices: usize) -> usize {
+    i64::from(next_negative_word(lanes)).rem_euclid(n_vertices as i64) as usize
+}
+
+fn next_negative_word(lanes: &mut [i64; 3]) -> i32 {
+    lanes[0] = advance_lane(lanes[0], 0xffff_fffe, 13, 12, 19);
+    lanes[1] = advance_lane(lanes[1], 0xffff_fff8, 2, 4, 25);
+    lanes[2] = advance_lane(lanes[2], 0xffff_fff0, 3, 17, 11);
+    // Interpret the low 32 bits of the XOR as a signed word.
+    (lanes[0] ^ lanes[1] ^ lanes[2]) as i32
 }
 
 fn advance_lane(lane: i64, mask: u32, q: u32, s: u32, r: u32) -> i64 {

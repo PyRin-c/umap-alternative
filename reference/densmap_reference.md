@@ -112,9 +112,10 @@ bit-exact embedding replay uses public UMAP to turn known neighbors into
 weights. The independent fuzzy graph solver reproduces the edge support of
 all 16 refit graphs and differs in weight by at most `6.36e-6`. Its radius
 candidate matches 8/128 patterns with maximum absolute error about `2.74e-6`.
-The precise weight solver and tie-breaking of the internal diagnostic graph,
-the density gradient and its variance normalization during optimization,
-and exact parity on other platforms or graph regimes remain unverified.
+The precise weight solver and tie-breaking of the diagnostic graph, and
+exact diagnostic parity across graph regimes, remain unverified. The
+[serial densMAP optimization reference](densmap_layout_reference.md)
+describes the later layout probes and the native optimizer.
 
 ## Fixture layout
 

@@ -7,6 +7,7 @@
 
 use std::fmt;
 
+use crate::densmap::DensityOptimizer;
 use crate::fuzzy_graph::CsrGraph;
 use crate::layout::{
     DistanceReduction, LayoutError, attractive_update_with_distance,
@@ -154,8 +155,41 @@ pub(crate) fn optimize_csr_with_mode(
     repulsion_strength: impl Into<f64>,
     negative_sample_rate: f64,
     n_epochs: usize,
+    negative_sampler: impl FnMut(usize) -> usize,
+    mode: OptimizeMode,
+) -> Result<(), OptimizeError> {
+    optimize_csr_with_density(
+        embedding,
+        n_components,
+        graph,
+        a,
+        b,
+        learning_rate,
+        repulsion_strength,
+        negative_sample_rate,
+        n_epochs,
+        negative_sampler,
+        mode,
+        None,
+        None::<fn(usize, &[f32])>,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn optimize_csr_with_density(
+    embedding: &mut [f32],
+    n_components: usize,
+    graph: &CsrGraph,
+    a: impl Into<f64>,
+    b: impl Into<f64>,
+    learning_rate: impl Into<f64>,
+    repulsion_strength: impl Into<f64>,
+    negative_sample_rate: f64,
+    n_epochs: usize,
     mut negative_sampler: impl FnMut(usize) -> usize,
     mode: OptimizeMode,
+    mut density: Option<DensityOptimizer>,
+    mut checkpoint: Option<impl FnMut(usize, &[f32])>,
 ) -> Result<(), OptimizeError> {
     let (a, b, learning_rate, repulsion_strength) = (
         a.into(),
@@ -177,6 +211,11 @@ pub(crate) fn optimize_csr_with_mode(
         .max_by(f32::total_cmp);
 
     let Some(maximum_positive_weight) = maximum_positive_weight else {
+        if let Some(checkpoint) = checkpoint.as_mut() {
+            for epoch in 0..=n_epochs {
+                checkpoint(epoch, embedding);
+            }
+        }
         return Ok(());
     };
 
@@ -216,16 +255,18 @@ pub(crate) fn optimize_csr_with_mode(
     let mut alpha = learning_rate;
     for epoch in 0..n_epochs {
         let epoch_as_f64 = epoch as f64;
+        let density_epoch = density.as_mut().and_then(|density| {
+            density.start_epoch(epoch, n_epochs, embedding, n_components, graph, a, b)
+        });
         for row in 0..graph.n_rows {
             let start = graph.indptr[row];
             let end = graph.indptr[row + 1];
-            for (cursor, &index) in cursors[start..end]
-                .iter_mut()
-                .zip(graph.indices[start..end].iter())
-            {
-                let Some(cursor) = cursor.as_mut() else {
+            for (offset, cursor) in cursors[start..end].iter_mut().enumerate() {
+                let Some(cursor) = cursor else {
                     continue;
                 };
+                let entry = start + offset;
+                let index = graph.indices[entry];
 
                 let positive_due = cursor.positive_due(epoch_as_f64)?;
                 let negative_count = if positive_due {
@@ -244,6 +285,20 @@ pub(crate) fn optimize_csr_with_mode(
                         b,
                         alpha,
                         distance_reduction,
+                        |affinity, negative_log_affinity_derivative| {
+                            density_epoch
+                                .map(|density| {
+                                    density.edge_scale(
+                                        row,
+                                        index,
+                                        graph.data[entry],
+                                        b,
+                                        affinity,
+                                        negative_log_affinity_derivative,
+                                    )
+                                })
+                                .transpose()
+                        },
                     )?;
                 }
 
@@ -273,12 +328,18 @@ pub(crate) fn optimize_csr_with_mode(
                 }
             }
         }
+        if let Some(checkpoint) = checkpoint.as_mut() {
+            checkpoint(epoch, embedding);
+        }
 
         // Keep alpha fixed for every edge in this epoch, then decay it for
         // the next epoch.  n_epochs == 0 never enters this loop.
         alpha = learning_rate * (1.0 - epoch_as_f64 / n_epochs as f64);
     }
 
+    if let Some(checkpoint) = checkpoint.as_mut() {
+        checkpoint(n_epochs, embedding);
+    }
     Ok(())
 }
 

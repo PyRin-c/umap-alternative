@@ -8,7 +8,7 @@ use std::fmt;
 use crate::fuzzy_graph::{CsrGraph, GraphError, fuzzy_simplicial_set};
 use crate::neighbors::{KnnError, Neighbor, collect_neighbors};
 
-const LOG_OFFSET: f32 = 1e-8;
+pub(crate) const LOG_OFFSET: f32 = 1e-8;
 
 /// Selects the distance term in the weighted radius calculation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -99,6 +99,14 @@ pub fn radii_from_edge_distances(
     distances: &[f32],
     space: RadiusSpace,
 ) -> Result<Vec<f32>, DensityError> {
+    radii_and_weights_from_edge_distances(graph, distances, space).map(|(radii, _)| radii)
+}
+
+pub(crate) fn radii_and_weights_from_edge_distances(
+    graph: &CsrGraph,
+    distances: &[f32],
+    space: RadiusSpace,
+) -> Result<(Vec<f32>, Vec<f32>), DensityError> {
     if distances.len() != graph.data.len() {
         return Err(DensityError::InvalidDistanceCount {
             expected: graph.data.len(),
@@ -206,7 +214,7 @@ fn reduce_radii(
     graph: &CsrGraph,
     space: RadiusSpace,
     distance: impl Fn(usize, usize, usize) -> f32,
-) -> Result<Vec<f32>, DensityError> {
+) -> Result<(Vec<f32>, Vec<f32>), DensityError> {
     if graph.n_rows != graph.n_cols
         || graph.n_rows.checked_add(1) != Some(graph.indptr.len())
         || graph.indptr.first() != Some(&0)
@@ -257,10 +265,10 @@ fn reduce_radii(
         }
     }
 
-    for (numerator, weight) in numerators.iter_mut().zip(weights) {
+    for (numerator, &weight) in numerators.iter_mut().zip(&weights) {
         *numerator = (*numerator / weight + LOG_OFFSET).ln();
     }
-    Ok(numerators)
+    Ok((numerators, weights))
 }
 
 fn euclidean_radii(
@@ -278,6 +286,7 @@ fn euclidean_radii(
             RadiusSpace::Embedding => fused_euclidean_distance(left, right),
         }
     })
+    .map(|(radii, _)| radii)
 }
 
 fn validate_coordinates(

@@ -5,6 +5,7 @@ use crate::fit::{DenseGraphFitError, build_fitted_graph};
 use crate::fuzzy_graph::GraphOptions;
 use crate::initialization::{InitializationError, normalize_columns};
 use crate::neighbors::{DistanceMetric, Neighbor, exhaustive_knn_with_metric};
+use crate::numeric::pairwise_sum;
 use crate::optimize::OptimizeError;
 use crate::rng::Mt19937;
 use crate::update_layout::{begin_update_layout_rng, optimize_update_layout};
@@ -313,31 +314,4 @@ fn perturb_coincident_layout(layout: &mut [f32], width: usize, rng: &mut Mt19937
         let noise = (scale * rng.next_standard_normal(&mut spare)) as f32;
         *coordinate += noise;
     }
-}
-
-// Contiguous reductions combine complete groups of eight before adding any tail.
-fn pairwise_sum(values: &[f64]) -> f64 {
-    if values.len() < 8 {
-        return values.iter().copied().sum();
-    }
-    if values.len() > 128 {
-        let (left, right) = values.split_at((values.len() / 2) & !7);
-        return pairwise_sum(left) + pairwise_sum(right);
-    }
-    let (first, rest) = values
-        .split_first_chunk::<8>()
-        .expect("at least eight values");
-    let mut lanes = *first;
-    let (blocks, tail) = rest.as_chunks::<8>();
-    for block in blocks {
-        for (lane, &value) in lanes.iter_mut().zip(block) {
-            *lane += value;
-        }
-    }
-    let [a, b, c, d, e, f, g, h] = lanes;
-    tail.iter()
-        .copied()
-        .fold(((a + b) + (c + d)) + ((e + f) + (g + h)), |sum, value| {
-            sum + value
-        })
 }

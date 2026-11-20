@@ -1,6 +1,7 @@
 //! Core crate for the independent Rust implementation of UMAP.
 
 pub mod density;
+pub mod densmap;
 pub mod embedding;
 pub mod fit;
 pub mod fuzzy_graph;
@@ -9,6 +10,7 @@ pub mod inverse;
 pub mod layout;
 pub mod modern_layout;
 pub mod neighbors;
+mod numeric;
 pub mod optimize;
 pub mod rng;
 pub mod sampling;

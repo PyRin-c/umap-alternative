@@ -321,6 +321,7 @@ pub fn attractive_update_pair(
         b,
         learning_rate,
         DistanceReduction::Sequential,
+        |_, _| Ok(None),
     )
 }
 
@@ -331,6 +332,7 @@ fn attractive_update_pair_with_distance(
     b: impl Into<f64>,
     learning_rate: impl Into<f64>,
     distance_reduction: DistanceReduction,
+    density_scale: impl FnOnce(f64, f64) -> Result<Option<f64>, LayoutError>,
 ) -> Result<(), LayoutError> {
     if head.is_empty() || head.len() != tail.len() {
         return Err(if head.len() != tail.len() {
@@ -350,13 +352,20 @@ fn attractive_update_pair_with_distance(
     validate_parameters(a, b, learning_rate)?;
 
     let distance = distance_reduction.squared(head, tail);
-    let Some(gradient_scale) = attractive_scale(head, tail, distance, a, b, learning_rate)? else {
+    let Some((gradient_scale, affinity)) =
+        attractive_scale(head, tail, distance, a, b, learning_rate)?
+    else {
         return Ok(());
     };
+    // The attractive coefficient is twice the derivative of -ln(affinity).
+    let density_scale = density_scale(affinity, gradient_scale * 0.5)?;
 
     let updated_endpoints = |head: f32, tail: f32| {
         let difference = f64::from(tail - head);
-        let gradient = (gradient_scale * difference).clamp(-4.0, 4.0);
+        let mut gradient = (gradient_scale * difference).clamp(-4.0, 4.0);
+        if let Some(scale) = density_scale {
+            gradient += (-scale * difference).clamp(-4.0, 4.0);
+        }
         let displacement = learning_rate * gradient;
         (
             (f64::from(head) + displacement) as f32,
@@ -399,7 +408,8 @@ pub(crate) fn attractive_update_fixed_tail(
     learning_rate: f64,
 ) -> Result<(), LayoutError> {
     let distance = DistanceReduction::SeededCompatibility.squared(head, tail);
-    let Some(gradient_scale) = attractive_scale(head, tail, distance, a, b, learning_rate)? else {
+    let Some((gradient_scale, _)) = attractive_scale(head, tail, distance, a, b, learning_rate)?
+    else {
         return Ok(());
     };
     for (component, (head, &tail)) in head.iter_mut().zip(tail).enumerate() {
@@ -425,7 +435,7 @@ fn attractive_scale(
     a: f64,
     b: f64,
     learning_rate: f64,
-) -> Result<Option<f64>, LayoutError> {
+) -> Result<Option<(f64, f64)>, LayoutError> {
     if !distance_squared.is_finite() {
         // A non-finite coordinate propagates through the distance. Check the
         // endpoints here to distinguish invalid input from distance overflow.
@@ -467,7 +477,7 @@ fn attractive_scale(
         });
     }
 
-    Ok(Some(gradient_scale))
+    Ok(Some((gradient_scale, denominator.recip())))
 }
 
 /// Apply one one-sided negative-example update to a current endpoint.
@@ -682,6 +692,7 @@ pub fn attractive_update(
         b,
         learning_rate,
         DistanceReduction::Sequential,
+        |_, _| Ok(None),
     )
 }
 
@@ -695,6 +706,7 @@ pub(crate) fn attractive_update_with_distance(
     b: impl Into<f64>,
     learning_rate: impl Into<f64>,
     distance_reduction: DistanceReduction,
+    density_scale: impl FnOnce(f64, f64) -> Result<Option<f64>, LayoutError>,
 ) -> Result<(), LayoutError> {
     if n_components == 0 || !embedding.len().is_multiple_of(n_components) {
         return Err(LayoutError::InvalidShape {
@@ -739,7 +751,15 @@ pub(crate) fn attractive_update_with_distance(
         let head = &mut after_head[..n_components];
         (head, tail)
     };
-    attractive_update_pair_with_distance(head, tail, a, b, learning_rate, distance_reduction)
+    attractive_update_pair_with_distance(
+        head,
+        tail,
+        a,
+        b,
+        learning_rate,
+        distance_reduction,
+        density_scale,
+    )
 }
 
 /// Apply one ascending CSR sweep of symmetric attractive updates.

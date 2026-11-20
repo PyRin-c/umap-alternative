@@ -1,8 +1,8 @@
 //! Seeded dense approximate ranks for the training and held-out graph handoffs.
 //!
-//! The projection trees, tie breaks, and query walk are native choices. The
-//! supplied-seed entry point also allows refinement to be measured independently
-//! of tree construction. Exhaustive search remains available through `neighbors`.
+//! The supplied-seed and tree-free query entry points allow refinement and
+//! held-out queries to be measured independently of tree construction.
+//! Exhaustive search remains available through `neighbors`.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -10,6 +10,9 @@ use std::fmt;
 
 use crate::neighbors::{DistanceMetric, KnnError, Neighbor};
 use crate::rng::{Mt19937, draw_negative_seed, sample_absolute_vertex};
+
+mod query;
+pub use query::DenseApproximateQueryIndex;
 
 const SMALL_DATA_LIMIT: usize = 4096;
 const MAX_CANDIDATES: usize = 60;
@@ -44,8 +47,12 @@ pub enum ApproximateSearchError {
     Dimensions,
     /// Rank width is invalid, storage would overflow, or the seeds have the wrong size.
     RankShape,
+    /// Search epsilon must be finite and nonnegative.
+    InvalidEpsilon,
     /// A supplied seed is neither a valid training index nor the missing marker.
     InvalidSeed { position: usize, index: i32 },
+    /// A supplied squared distance for a non-self graph edge is invalid.
+    InvalidEdgeDistance { position: usize },
     /// The metric returned a non-finite distance for a ranked candidate.
     NonFiniteDistance { row: usize, candidate: usize },
 }
@@ -56,10 +63,19 @@ impl fmt::Display for ApproximateSearchError {
             Self::Matrix(error) => error.fmt(formatter),
             Self::Dimensions => write!(formatter, "invalid approximate index dimensions"),
             Self::RankShape => write!(formatter, "invalid approximate rank buffer shape"),
+            Self::InvalidEpsilon => {
+                write!(formatter, "search epsilon must be finite and nonnegative")
+            }
             Self::InvalidSeed { position, index } => {
                 write!(
                     formatter,
                     "invalid seed index {index} at position {position}"
+                )
+            }
+            Self::InvalidEdgeDistance { position } => {
+                write!(
+                    formatter,
+                    "invalid squared edge distance at position {position}"
                 )
             }
             Self::NonFiniteDistance { row, candidate } => {
@@ -365,22 +381,26 @@ fn checked_distance(
 // to f32. Its square accumulation has 32-coordinate blocks, four-coordinate
 // blocks, then a scalar tail. Keep the horizontal reduction order explicit.
 fn approximate_euclidean(left: &[f32], right: &[f32]) -> f32 {
+    approximate_squared_euclidean(left, right).sqrt()
+}
+
+fn approximate_squared_euclidean(left: &[f32], right: &[f32]) -> f32 {
     #[cfg(target_arch = "x86_64")]
     if std::is_x86_feature_detected!("avx") && std::is_x86_feature_detected!("fma") {
         // SAFETY: the runtime check covers both enabled target features.
-        return unsafe { approximate_euclidean_fma(left, right) };
+        return unsafe { approximate_squared_euclidean_fma(left, right) };
     }
-    approximate_euclidean_portable(left, right)
+    approximate_squared_euclidean_portable(left, right)
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx,fma")]
-fn approximate_euclidean_fma(left: &[f32], right: &[f32]) -> f32 {
-    approximate_euclidean_portable(left, right)
+fn approximate_squared_euclidean_fma(left: &[f32], right: &[f32]) -> f32 {
+    approximate_squared_euclidean_portable(left, right)
 }
 
 #[inline(always)]
-fn approximate_euclidean_portable(left: &[f32], right: &[f32]) -> f32 {
+fn approximate_squared_euclidean_portable(left: &[f32], right: &[f32]) -> f32 {
     debug_assert_eq!(left.len(), right.len());
     let (blocks_left, left) = left.as_chunks::<32>();
     let (blocks_right, right) = right.as_chunks::<32>();
@@ -411,7 +431,12 @@ fn approximate_euclidean_portable(left: &[f32], right: &[f32]) -> f32 {
         let delta = left - right;
         sum = delta.mul_add(delta, sum);
     }
-    sum.sqrt()
+    sum
+}
+
+#[cfg(test)]
+fn approximate_euclidean_portable(left: &[f32], right: &[f32]) -> f32 {
+    approximate_squared_euclidean_portable(left, right).sqrt()
 }
 
 impl RankedNeighbors {

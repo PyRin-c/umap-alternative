@@ -288,7 +288,7 @@ pub fn precomputed_knn(
     }))
 }
 
-fn collect_neighbors(
+pub(crate) fn collect_neighbors(
     n_rows: usize,
     k: usize,
     mut fill_candidates: impl FnMut(usize, &mut Vec<Neighbor>),

@@ -1,5 +1,5 @@
 /*
- * Stable C-facing declarations for dense UMAP graphs and seeded embeddings.
+ * Stable C-facing declarations for dense UMAP graph and embedding fits and transforms.
  *
  * The ABI uses uint32_t status and metric values and size_t dimensions.  The
  * numeric values below are part of the ABI; callers should not depend on the
@@ -222,6 +222,149 @@ umap_capi_status_t umap_capi_dense_embedding_view(
  */
 umap_capi_status_t umap_capi_dense_embedding_release(
     umap_capi_dense_embedding_t *embedding);
+
+/*
+ * Both transforms borrow finite row-major feature matrices with the same
+ * positive n_features. Each length must equal its row count times n_features
+ * in floats. An array with zero length may be NULL. Zero queries are allowed.
+ * The descriptor and all input buffers must remain readable and unchanged
+ * throughout the call and may be reused or freed afterward.
+ */
+typedef struct umap_capi_dense_transform_input {
+    size_t n_training_rows;
+    size_t n_query_rows;
+    size_t n_features;
+    size_t training_len;
+    size_t queries_len;
+    const float *training;
+    const float *queries;
+} umap_capi_dense_transform_input_t;
+
+typedef uint32_t umap_capi_fit_epochs_mode_t;
+enum {
+    UMAP_CAPI_FIT_EPOCHS_DEFAULT = 0u,
+    UMAP_CAPI_FIT_EPOCHS_EXPLICIT = 1u
+};
+
+/*
+ * Use the effective fit neighbor count (1..=n_training_rows) and positive
+ * n_components. All doubles must be finite. The curve parameters a and b
+ * and the negative_sample_rate must be positive. The rate must yield a
+ * representable schedule. The learning_rate, repulsion_strength, and
+ * local_connectivity must be nonnegative. The transform starts at one quarter
+ * of learning_rate and uses max(0, local_connectivity - 1) for query membership.
+ * metric controls search over features. Layout distances are Euclidean.
+ *
+ * With FIT_EPOCHS_DEFAULT, set fit_epochs to zero. The optimizer uses 100
+ * epochs for up to 10,000 query rows or 30 for larger batches. With
+ * FIT_EPOCHS_EXPLICIT it uses fit_epochs / 3, rounding down. Explicit zero
+ * returns initialization without updates.
+ *
+ * transform_seed is independent of the fit seed. Each call starts a new
+ * random stream. Values above UINT32_MAX return INVALID_CONFIG.
+ * disconnection_distance is a positive float cutoff. Positive infinity keeps
+ * all selected neighbors. A neighbor at or above the cutoff is excluded.
+ */
+typedef struct umap_capi_dense_transform_config {
+    size_t n_neighbors;
+    size_t n_components;
+    size_t fit_epochs;
+    double a;
+    double b;
+    double learning_rate;
+    double repulsion_strength;
+    double negative_sample_rate;
+    double local_connectivity;
+    uint64_t transform_seed;
+    umap_capi_metric_t metric;
+    umap_capi_fit_epochs_mode_t fit_epochs_mode;
+    float disconnection_distance;
+} umap_capi_dense_transform_config_t;
+
+/* Owning result types for transformed coordinates and directed COO graphs. */
+typedef struct umap_capi_dense_transform umap_capi_dense_transform_t;
+typedef struct umap_capi_coo_graph umap_capi_coo_graph_t;
+
+/* Read-only row-major coordinates borrowed from a transform handle. */
+typedef struct umap_capi_dense_transform_view {
+    size_t n_rows;
+    size_t n_components;
+    size_t coordinates_len;
+    const float *coordinates;
+} umap_capi_dense_transform_view_t;
+
+/*
+ * Read-only arrays borrowed from a graph handle. Each array has nnz entries
+ * (including any zero weights), and all three pointers are NULL if nnz is 0.
+ * Rows index queries and columns index training rows. Entries are grouped by
+ * query index, then ordered by distance with ties broken by training index.
+ */
+typedef struct umap_capi_coo_view {
+    size_t n_rows;
+    size_t n_cols;
+    size_t nnz;
+    const size_t *row;
+    const size_t *col;
+    const float *data;
+} umap_capi_coo_view_t;
+
+/*
+ * Transform held-out queries using fixed fitted coordinates. fitted_len must
+ * equal n_training_rows * n_components and fitted_coordinates must point to
+ * those readable row-major floats, unchanged throughout the call. Fitted
+ * NaNs may propagate at initialization and such rows are skipped during
+ * updates. A query with no positive memberships yields NaN coordinates.
+ * A zero-query result has NULL coordinates. The caller may supply coordinates
+ * borrowed from a live fitted handle. The result owns its coordinate buffer,
+ * so the caller may reuse or release inputs once this function returns.
+ *
+ * All non-NULL pointers must be aligned for their types. input and config
+ * must point to initialized descriptors. out_transform must point to a
+ * writable handle slot outside all input storage. Success writes a new
+ * owning handle to the slot. Every error leaves the slot untouched.
+ * Zero features, zero components, and multiplication overflow return
+ * INVALID_SHAPE. A mismatched length or an array exceeding the addressable
+ * range returns INVALID_LENGTH. Nullness, alignment, and numeric shapes are
+ * checked before the transform reads any of the arrays.
+ */
+umap_capi_status_t umap_capi_transform_dense_embedding(
+    const umap_capi_dense_transform_input_t *input,
+    const float *fitted_coordinates,
+    size_t fitted_len,
+    const umap_capi_dense_transform_config_t *config,
+    umap_capi_dense_transform_t **out_transform);
+
+/*
+ * Construct the directed query-to-training graph, retaining all selected
+ * neighbors. n_neighbors is in 1..=n_training_rows. local_connectivity must
+ * be finite and nonnegative and has the same meaning as above.
+ * out_graph follows the pointer, shape, and ownership contract above.
+ */
+umap_capi_status_t umap_capi_transform_dense_graph(
+    const umap_capi_dense_transform_input_t *input,
+    size_t n_neighbors,
+    umap_capi_metric_t metric,
+    double local_connectivity,
+    umap_capi_coo_graph_t **out_graph);
+
+/*
+ * Read from a live handle into an aligned writable view outside the handle's
+ * storage. Errors leave the view untouched. The view's arrays are valid only
+ * while its handle is alive. Release each owning handle exactly once after
+ * all readers finish. Both release functions accept NULL as a no-op.
+ */
+umap_capi_status_t umap_capi_dense_transform_view(
+    const umap_capi_dense_transform_t *transform,
+    umap_capi_dense_transform_view_t *out_view);
+
+umap_capi_status_t umap_capi_dense_transform_release(
+    umap_capi_dense_transform_t *transform);
+
+umap_capi_status_t umap_capi_coo_graph_view(
+    const umap_capi_coo_graph_t *graph,
+    umap_capi_coo_view_t *out_view);
+
+umap_capi_status_t umap_capi_coo_graph_release(umap_capi_coo_graph_t *graph);
 
 #ifdef __cplusplus
 } /* extern "C" */

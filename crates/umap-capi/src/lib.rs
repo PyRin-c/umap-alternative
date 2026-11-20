@@ -1,4 +1,4 @@
-//! C ABI for native dense UMAP graphs and seeded embeddings.
+//! C ABI for native dense UMAP graph and embedding fits and transforms.
 //!
 //! Opaque handles own their result arrays. Callers must keep a handle alive
 //! while reading its borrowed views and release it exactly once. The public
@@ -19,9 +19,12 @@ use umap_core::fit::{DenseGraphFitError, fit_dense_graph_with_options};
 use umap_core::fuzzy_graph::{CsrGraph, GraphOptions};
 use umap_core::initialization::InitializationError;
 use umap_core::layout::LayoutError;
-use umap_core::neighbors::DistanceMetric;
+use umap_core::neighbors::{DistanceMetric, KnnError};
 use umap_core::optimize::OptimizeError;
 use umap_core::sampling::{EdgeSamplingCursor, SamplingError};
+
+mod transform;
+pub use transform::*;
 
 /// Successful C ABI operation.
 pub const STATUS_OK: u32 = 0;
@@ -45,7 +48,7 @@ pub const STATUS_INVALID_HANDLE: u32 = 8;
 pub const STATUS_PANIC: u32 = 9;
 /// An unexpected core error was returned.
 pub const STATUS_INTERNAL_ERROR: u32 = 10;
-/// An embedding initialization or optimizer setting was invalid.
+/// A graph, initialization, or optimizer setting was invalid.
 pub const STATUS_INVALID_CONFIG: u32 = 11;
 
 /// Generate initial coordinates from the fit seed.
@@ -305,12 +308,16 @@ fn fit_dense_graph_impl(
 
 fn map_core_error(error: DenseGraphFitError) -> u32 {
     match error {
-        DenseGraphFitError::Knn(error) => match error {
-            umap_core::neighbors::KnnError::InvalidShape { .. } => STATUS_INVALID_LENGTH,
-            umap_core::neighbors::KnnError::InvalidK { .. } => STATUS_INVALID_K,
-            umap_core::neighbors::KnnError::NonFiniteValue { .. } => STATUS_NONFINITE_INPUT,
-        },
+        DenseGraphFitError::Knn(error) => map_knn_error(error),
         DenseGraphFitError::Graph(_) => STATUS_INTERNAL_ERROR,
+    }
+}
+
+fn map_knn_error(error: KnnError) -> u32 {
+    match error {
+        KnnError::InvalidShape { .. } => STATUS_INVALID_LENGTH,
+        KnnError::InvalidK { .. } => STATUS_INVALID_K,
+        KnnError::NonFiniteValue { .. } => STATUS_NONFINITE_INPUT,
     }
 }
 

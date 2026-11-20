@@ -2,8 +2,8 @@
 //!
 //! The implementation here follows the fuzzy-simplicial-set construction from
 //! the UMAP paper, with local connectivity fixed to one. It deliberately stops
-//! at a deterministic CSR graph: it does not perform graph pruning, layout, or
-//! optimization.
+//! at a deterministic CSR graph. The categorical path also adjusts and
+//! renormalizes memberships before returning the graph.
 
 use std::fmt;
 
@@ -142,10 +142,11 @@ impl std::error::Error for GraphError {}
 ///
 /// `sum(exp(-max(0, d_ij - rho_i) / sigma_i)) = log2(k)`.
 ///
-/// The scale search and membership arithmetic use `f32`, with an absolute sum
-/// tolerance of `1e-5`. If the zero-scale limit exceeds the target, the scale
-/// is reduced to `0.001 * max_offset`; rows with no positive offset use a unit
-/// scale, though all their memberships are one.
+/// The scale search evaluates the sum in `f64` with an absolute tolerance of
+/// `1e-5`. The offsets, trial scales, and emitted memberships use `f32`.
+/// If the zero-scale limit exceeds the target, the scale is reduced to
+/// `0.001 * max_offset`. Rows with no positive offset use a unit scale, and
+/// all their memberships are one.
 ///
 /// Directed memberships are combined with the fuzzy union
 /// `a + b - a * b`. The diagonal is omitted from the emitted graph, while all
@@ -256,7 +257,7 @@ pub fn fuzzy_simplicial_set(neighbors: &[Vec<Neighbor>]) -> Result<CsrGraph, Gra
         for &column in columns.iter() {
             let forward = find_membership(&directed[row_index], column);
             let reverse = find_membership(&directed[column], row_index);
-            let weight = (forward + reverse - forward * reverse).clamp(0.0, 1.0);
+            let weight = fuzzy_union(forward, reverse).clamp(0.0, 1.0);
             indices.push(column);
             data.push(weight);
         }
@@ -270,6 +271,69 @@ pub fn fuzzy_simplicial_set(neighbors: &[Vec<Neighbor>]) -> Result<CsrGraph, Gra
         indices,
         data,
     })
+}
+
+// `graph` is the symmetric output of `fuzzy_simplicial_set`, and `labels`
+// and `target_weight` have been validated by the categorical fit entry point.
+pub(crate) fn categorical_intersection(
+    mut graph: CsrGraph,
+    labels: &[i64],
+    target_weight: f64,
+) -> CsrGraph {
+    const UNLABELED: i64 = -1;
+    let unlabeled_factor = (-1.0_f64).exp();
+    let cross_factor = if target_weight == 1.0 {
+        0.0
+    } else {
+        (-2.5 / (1.0 - target_weight)).exp()
+    };
+
+    let mut row_maxima = vec![0.0_f32; graph.n_rows];
+    for (row, row_max) in row_maxima.iter_mut().enumerate() {
+        let row_label = labels[row];
+        for entry in graph.indptr[row]..graph.indptr[row + 1] {
+            let column_label = labels[graph.indices[entry]];
+            let weight = &mut graph.data[entry];
+            // Round the product once, after computing the attenuation in f64.
+            if row_label == UNLABELED || column_label == UNLABELED {
+                *weight = (f64::from(*weight) * unlabeled_factor) as f32;
+            } else if row_label != column_label {
+                *weight = (f64::from(*weight) * cross_factor) as f32;
+            }
+            *row_max = row_max.max(*weight);
+        }
+    }
+
+    let mut result = CsrGraph {
+        n_rows: graph.n_rows,
+        n_cols: graph.n_cols,
+        indptr: Vec::with_capacity(graph.indptr.len()),
+        indices: Vec::with_capacity(graph.indices.len()),
+        data: Vec::with_capacity(graph.data.len()),
+    };
+    result.indptr.push(0);
+    for row in 0..graph.n_rows {
+        for entry in graph.indptr[row]..graph.indptr[row + 1] {
+            let weight = graph.data[entry];
+            if weight == 0.0 {
+                continue;
+            }
+
+            // Symmetric attenuation preserves the same weight in both rows,
+            // so a stored positive edge guarantees both maxima are positive.
+            let column = graph.indices[entry];
+            let forward = weight / row_maxima[row];
+            let reverse = weight / row_maxima[column];
+            result.indices.push(column);
+            result.data.push(fuzzy_union(forward, reverse));
+        }
+        result.indptr.push(result.indices.len());
+    }
+    result
+}
+
+fn fuzzy_union(forward: f32, reverse: f32) -> f32 {
+    forward + reverse - forward * reverse
 }
 
 fn local_offset(row_index: usize, row: &[Neighbor]) -> f32 {
@@ -315,8 +379,10 @@ fn distance_scale(row_index: usize, row: &[Neighbor], rho: f32) -> f32 {
     let mut lower = 0.0_f32;
     let mut upper = f32::INFINITY;
     let mut middle = 1.0_f32;
+    let target = f64::from(target);
 
     for _ in 0..64 {
+        // A rounded f32 sum can cross the convergence threshold early.
         let sum = membership_sum(&offsets, middle);
         if (sum - target).abs() <= 1e-5 {
             break;
@@ -336,14 +402,12 @@ fn distance_scale(row_index: usize, row: &[Neighbor], rho: f32) -> f32 {
     middle.max(f32::MIN_POSITIVE)
 }
 
-fn membership_sum(offsets: &[f32], sigma: f32) -> f32 {
-    offsets.iter().fold(0.0_f32, |sum, offset| {
-        if *offset == 0.0 {
-            sum + 1.0
-        } else {
-            sum + (-(*offset / sigma)).exp()
-        }
-    })
+fn membership_sum(offsets: &[f32], sigma: f32) -> f64 {
+    let sigma = f64::from(sigma);
+    offsets
+        .iter()
+        .map(|&offset| (-f64::from(offset) / sigma).exp())
+        .sum()
 }
 
 fn membership(distance: f32, rho: f32, sigma: f32) -> f32 {

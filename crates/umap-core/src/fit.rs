@@ -1,7 +1,8 @@
 //! Dense compatibility-path graph fitting.
 //!
 //! This module is intentionally limited to the graph stage: exhaustive or
-//! precomputed neighbor search followed by fuzzy simplicial-set construction.
+//! precomputed neighbor search, fuzzy simplicial-set construction, and
+//! optional categorical supervision.
 //! It does not expose an estimator, layout, optimization, or any other
 //! sklearn behavior.
 //!
@@ -11,7 +12,7 @@
 
 use std::fmt;
 
-use crate::fuzzy_graph::{CsrGraph, GraphError, fuzzy_simplicial_set};
+use crate::fuzzy_graph::{CsrGraph, GraphError, categorical_intersection, fuzzy_simplicial_set};
 use crate::neighbors::{
     DistanceMetric, KnnError, PrecomputedKnnError, exhaustive_knn_with_metric, precomputed_knn,
 };
@@ -91,6 +92,91 @@ pub fn fit_dense_graph(
 ) -> Result<CsrGraph, DenseGraphFitError> {
     let neighbors = exhaustive_knn_with_metric(data, n_rows, n_features, k, metric)?;
     Ok(fuzzy_simplicial_set(&neighbors)?)
+}
+
+/// Errors returned while fitting a dense categorical fuzzy graph.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DenseCategoricalGraphFitError {
+    /// The target slice must contain one label per input row.
+    LabelCount { n_rows: usize, labels: usize },
+    /// The target weight must be finite and in `0..=1`.
+    InvalidTargetWeight { target_weight: f64 },
+    /// Dense neighbor search or fuzzy graph construction failed.
+    DenseGraph(DenseGraphFitError),
+}
+
+impl fmt::Display for DenseCategoricalGraphFitError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LabelCount { n_rows, labels } => {
+                write!(
+                    formatter,
+                    "expected {n_rows} categorical labels, got {labels}"
+                )
+            }
+            Self::InvalidTargetWeight { target_weight } => {
+                write!(formatter, "target weight {target_weight} must be in 0..=1")
+            }
+            Self::DenseGraph(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for DenseCategoricalGraphFitError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::DenseGraph(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+/// Fit a dense fuzzy graph with categorical or partially labeled targets.
+///
+/// The dense input, neighbor count, and feature metric follow
+/// [`fit_dense_graph`]. Supply one `i64` label per input row. A label of `-1`
+/// indicates an unlabeled row. All other values identify classes by equality.
+/// `target_weight` must be finite and in `0..=1`.
+///
+/// Edges incident to any unlabeled row are scaled by `exp(-1)`. Edges between
+/// different known classes are scaled by `exp(-2.5 / (1 - target_weight))`,
+/// or removed at weight one. Edges between equal known classes keep their
+/// membership at this stage. The adjusted memberships are rounded to `f32`,
+/// divided by their row maxima, and symmetrized by fuzzy union. The result is
+/// canonical CSR. It omits the diagonal and zero entries, and represents
+/// isolated rows as empty CSR rows.
+///
+/// This adjustment also runs at target weight zero and when all rows are
+/// unlabeled. Use [`fit_dense_graph`] when no categorical targets are supplied.
+///
+/// # Errors
+///
+/// Returns [`DenseCategoricalGraphFitError::LabelCount`] for a label count
+/// mismatch or [`DenseCategoricalGraphFitError::InvalidTargetWeight`] for an
+/// invalid weight. Dense input errors are wrapped in
+/// [`DenseCategoricalGraphFitError::DenseGraph`].
+pub fn fit_dense_categorical_graph(
+    data: &[f32],
+    n_rows: usize,
+    n_features: usize,
+    k: usize,
+    metric: DistanceMetric,
+    labels: &[i64],
+    target_weight: f64,
+) -> Result<CsrGraph, DenseCategoricalGraphFitError> {
+    if labels.len() != n_rows {
+        return Err(DenseCategoricalGraphFitError::LabelCount {
+            n_rows,
+            labels: labels.len(),
+        });
+    }
+    if !(0.0..=1.0).contains(&target_weight) {
+        return Err(DenseCategoricalGraphFitError::InvalidTargetWeight { target_weight });
+    }
+
+    let graph = fit_dense_graph(data, n_rows, n_features, k, metric)
+        .map_err(DenseCategoricalGraphFitError::DenseGraph)?;
+    Ok(categorical_intersection(graph, labels, target_weight))
 }
 
 /// Fit a fuzzy graph from a precomputed row-major square distance matrix.

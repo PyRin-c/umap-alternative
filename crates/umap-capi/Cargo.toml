@@ -1,6 +1,6 @@
 [package]
 name = "umap-capi"
-description = "C ABI for the native UMAP graph primitive"
+description = "C ABI for native UMAP graphs and seeded embeddings"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

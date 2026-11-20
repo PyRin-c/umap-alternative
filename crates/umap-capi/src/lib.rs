@@ -1,9 +1,8 @@
-//! Minimal C ABI for the native dense UMAP graph primitive.
+//! C ABI for native dense UMAP graphs and seeded embeddings.
 //!
-//! The ABI intentionally exposes one owning opaque CSR handle and one borrowed
-//! view.  The handle owns all CSR arrays; callers must keep it alive while
-//! reading a view and release it exactly once.  The public declarations for C
-//! consumers live in `include/umap_capi.h`.
+//! Opaque handles own their result arrays. Callers must keep a handle alive
+//! while reading its borrowed views and release it exactly once. The public
+//! declarations for C consumers live in `include/umap_capi.h`.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
@@ -12,9 +11,17 @@ use std::mem::{align_of, size_of};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::slice;
 
+use umap_core::embedding::{
+    DenseEmbedding, DenseEmbeddingConfig, DenseEmbeddingFitError, DenseEmbeddingInit,
+    fit_dense_embedding_seeded,
+};
 use umap_core::fit::DenseGraphFitError;
 use umap_core::fuzzy_graph::CsrGraph;
+use umap_core::initialization::InitializationError;
+use umap_core::layout::LayoutError;
 use umap_core::neighbors::DistanceMetric;
+use umap_core::optimize::OptimizeError;
+use umap_core::sampling::{EdgeSamplingCursor, SamplingError};
 
 /// Successful C ABI operation.
 pub const STATUS_OK: u32 = 0;
@@ -24,20 +31,27 @@ pub const STATUS_NULL_ARGUMENT: u32 = 1;
 pub const STATUS_INVALID_POINTER: u32 = 2;
 /// A supplied element length did not fit the requested shape or address space.
 pub const STATUS_INVALID_LENGTH: u32 = 3;
-/// Matrix dimensions could not be represented as a valid dense input shape.
+/// Matrix dimensions could not be represented as a valid input or output shape.
 pub const STATUS_INVALID_SHAPE: u32 = 4;
 /// The requested neighbor count was outside `1..=n_rows`.
 pub const STATUS_INVALID_K: u32 = 5;
 /// The metric tag is not one of the documented values.
 pub const STATUS_INVALID_METRIC: u32 = 6;
-/// A matrix element was not finite.
+/// A feature or initialization value was not finite.
 pub const STATUS_NONFINITE_INPUT: u32 = 7;
 /// A handle argument was not a live handle returned by this ABI.
 pub const STATUS_INVALID_HANDLE: u32 = 8;
 /// A Rust panic was contained at the ABI boundary.
 pub const STATUS_PANIC: u32 = 9;
-/// An unexpected core graph error was returned.
+/// An unexpected core error was returned.
 pub const STATUS_INTERNAL_ERROR: u32 = 10;
+/// An embedding initialization or optimizer setting was invalid.
+pub const STATUS_INVALID_CONFIG: u32 = 11;
+
+/// Generate initial coordinates from the fit seed.
+pub const INIT_RANDOM: u32 = 0;
+/// Normalize caller-supplied initial coordinates.
+pub const INIT_EXPLICIT: u32 = 1;
 
 const VERSION_NUL: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
 
@@ -69,6 +83,60 @@ pub struct UmapCapiCsrView {
     pub indices: *const usize,
     /// Borrowed membership weights, or null when the length is zero.
     pub data: *const f32,
+}
+
+/// Opaque owning result of [`umap_capi_fit_dense_embedding_seeded`].
+#[repr(C)]
+pub struct UmapCapiDenseEmbedding {
+    _private: [u8; 0],
+}
+
+/// Fixed-layout configuration for a seeded dense embedding fit.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct UmapCapiDenseEmbeddingConfig {
+    /// Number of neighbors retained per row, in `1..=n_rows`.
+    pub n_neighbors: usize,
+    /// Positive output component count.
+    pub n_components: usize,
+    /// Number of optimizer epochs. Zero returns the normalized initialization.
+    pub n_epochs: usize,
+    /// Finite positive curve coefficient.
+    pub a: f64,
+    /// Finite positive curve exponent.
+    pub b: f64,
+    /// Finite non-negative initial learning rate.
+    pub learning_rate: f64,
+    /// Finite non-negative repulsion strength.
+    pub repulsion_strength: f64,
+    /// Finite positive negative-sample rate.
+    pub negative_sample_rate: f64,
+    /// Numeric distance metric tag from the C header.
+    pub metric: u32,
+    /// [`INIT_RANDOM`] or [`INIT_EXPLICIT`].
+    pub init: u32,
+    /// Seed for random initialization and sampling, or sampling alone for explicit initialization.
+    pub seed: u32,
+    /// Number of explicit coordinates, zero for random initialization.
+    pub init_len: usize,
+    /// Row-major explicit coordinates, null for random initialization.
+    pub init_coordinates: *const f32,
+}
+
+/// Caller-owned destination for a result's borrowed coordinates and CSR graph.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct UmapCapiDenseEmbeddingView {
+    /// Number of output rows.
+    pub n_rows: usize,
+    /// Number of coordinates per row.
+    pub n_components: usize,
+    /// Number of entries in `coordinates`.
+    pub coordinates_len: usize,
+    /// Borrowed row-major coordinates.
+    pub coordinates: *const f32,
+    /// Borrowed CSR view of the fitted graph.
+    pub graph: UmapCapiCsrView,
 }
 
 struct OwnedGraph {
@@ -118,6 +186,62 @@ fn optional_slice_pointer<T>(slice: &[T]) -> *const T {
     }
 }
 
+fn csr_view(graph: &CsrGraph) -> UmapCapiCsrView {
+    UmapCapiCsrView {
+        n_rows: graph.n_rows,
+        n_cols: graph.n_cols,
+        indptr_len: graph.indptr.len(),
+        indices_len: graph.indices.len(),
+        data_len: graph.data.len(),
+        indptr: optional_slice_pointer(&graph.indptr),
+        indices: optional_slice_pointer(&graph.indices),
+        data: optional_slice_pointer(&graph.data),
+    }
+}
+
+fn validate_required_pointer<T>(pointer: *const T) -> Result<(), u32> {
+    if pointer.is_null() {
+        return Err(STATUS_NULL_ARGUMENT);
+    }
+    if !pointer_is_aligned(pointer) {
+        return Err(STATUS_INVALID_POINTER);
+    }
+    Ok(())
+}
+
+fn validate_dense_input(
+    data: *const f32,
+    data_len: usize,
+    n_rows: usize,
+    n_features: usize,
+) -> Result<(), u32> {
+    if !data.is_null() && !pointer_is_aligned(data) {
+        return Err(STATUS_INVALID_POINTER);
+    }
+    if data_len != 0 && data.is_null() {
+        return Err(STATUS_NULL_ARGUMENT);
+    }
+    if !slice_size_is_representable::<f32>(data_len) {
+        return Err(STATUS_INVALID_LENGTH);
+    }
+    let expected_len = n_rows.checked_mul(n_features).ok_or(STATUS_INVALID_SHAPE)?;
+    if expected_len != data_len {
+        return Err(STATUS_INVALID_LENGTH);
+    }
+    Ok(())
+}
+
+// The caller must validate nullness, alignment, length and address-space size
+// and guarantee readable storage for `len` contiguous values.
+unsafe fn input_slice<'a>(data: *const f32, len: usize) -> &'a [f32] {
+    if len == 0 {
+        &[]
+    } else {
+        // SAFETY: The caller guarantees the preconditions above.
+        unsafe { slice::from_raw_parts(data, len) }
+    }
+}
+
 fn as_owned_graph<'a>(handle: *const UmapCapiCsrGraph) -> Result<&'a OwnedGraph, u32> {
     if handle.is_null() {
         return Err(STATUS_NULL_ARGUMENT);
@@ -141,49 +265,20 @@ fn fit_dense_graph_impl(
     metric: u32,
     out_graph: *mut *mut UmapCapiCsrGraph,
 ) -> u32 {
-    if out_graph.is_null() {
-        return STATUS_NULL_ARGUMENT;
+    if let Err(status) = validate_required_pointer(out_graph) {
+        return status;
     }
-    if !pointer_is_aligned(out_graph) {
-        return STATUS_INVALID_POINTER;
-    }
-    if !data.is_null() && !pointer_is_aligned(data) {
-        return STATUS_INVALID_POINTER;
-    }
-    if data_len != 0 {
-        if data.is_null() {
-            return STATUS_NULL_ARGUMENT;
-        }
-        if !slice_size_is_representable::<f32>(data_len) {
-            return STATUS_INVALID_LENGTH;
-        }
-    }
-
-    let Some(expected_len) = n_rows.checked_mul(n_features) else {
-        return STATUS_INVALID_SHAPE;
-    };
-    if expected_len != data_len {
-        return STATUS_INVALID_LENGTH;
-    }
-    if !slice_size_is_representable::<f32>(expected_len) {
-        return STATUS_INVALID_LENGTH;
+    if let Err(status) = validate_dense_input(data, data_len, n_rows, n_features) {
+        return status;
     }
 
     let Some(metric) = MetricTag::parse(metric) else {
         return STATUS_INVALID_METRIC;
     };
 
-    // A null pointer is accepted only for the empty matrix.  Avoid calling
-    // `from_raw_parts` for that case because even a zero-length slice requires
-    // a non-null, correctly aligned pointer.
-    let data = if data_len == 0 {
-        &[]
-    } else {
-        // SAFETY: Nullness, alignment, element count, and address-space size
-        // were validated above.  The caller additionally promises that this
-        // region is readable for `data_len` contiguous f32 values.
-        unsafe { slice::from_raw_parts(data, data_len) }
-    };
+    // SAFETY: The pointer and dimensions were checked above. The caller
+    // promises readable storage for `data_len` contiguous values.
+    let data = unsafe { input_slice(data, data_len) };
 
     let graph =
         match umap_core::fit::fit_dense_graph(data, n_rows, n_features, k, metric.into_core()) {
@@ -209,6 +304,111 @@ fn map_core_error(error: DenseGraphFitError) -> u32 {
         },
         DenseGraphFitError::Graph(_) => STATUS_INTERNAL_ERROR,
     }
+}
+
+fn map_embedding_error(error: DenseEmbeddingFitError) -> u32 {
+    match error {
+        DenseEmbeddingFitError::Graph(error) => map_core_error(error),
+        DenseEmbeddingFitError::Initialization(InitializationError::InvalidShape { .. }) => {
+            STATUS_INVALID_LENGTH
+        }
+        DenseEmbeddingFitError::Initialization(InitializationError::ShapeOverflow { .. }) => {
+            STATUS_INVALID_SHAPE
+        }
+        DenseEmbeddingFitError::Initialization(InitializationError::NonFiniteValue { .. })
+        | DenseEmbeddingFitError::Optimize(OptimizeError::Layout(LayoutError::NonFiniteValue {
+            ..
+        })) => STATUS_NONFINITE_INPUT,
+        DenseEmbeddingFitError::Initialization(InitializationError::ZeroColumnSpan { .. })
+        | DenseEmbeddingFitError::Optimize(OptimizeError::Layout(
+            LayoutError::InvalidParameter { .. },
+        ))
+        | DenseEmbeddingFitError::Optimize(OptimizeError::Sampling(
+            SamplingError::InvalidNegativeSampleRate { .. }
+            | SamplingError::InvalidNegativeInterval { .. }
+            | SamplingError::NegativeScheduleOverflow { .. },
+        )) => STATUS_INVALID_CONFIG,
+        DenseEmbeddingFitError::Optimize(_) => STATUS_INTERNAL_ERROR,
+    }
+}
+
+unsafe fn fit_dense_embedding_impl(
+    data: *const f32,
+    data_len: usize,
+    n_rows: usize,
+    n_features: usize,
+    config: *const UmapCapiDenseEmbeddingConfig,
+    out_embedding: *mut *mut UmapCapiDenseEmbedding,
+) -> Result<(), u32> {
+    validate_required_pointer(out_embedding)?;
+    validate_required_pointer(config)?;
+    validate_dense_input(data, data_len, n_rows, n_features)?;
+
+    // SAFETY: The pointer was checked above. The caller promises storage for
+    // one initialized configuration. The tags are integers and checked below.
+    let config = unsafe { config.read() };
+    let metric = MetricTag::parse(config.metric).ok_or(STATUS_INVALID_METRIC)?;
+    if !(1..=n_rows).contains(&config.n_neighbors) {
+        return Err(STATUS_INVALID_K);
+    }
+    let coordinates_len = n_rows
+        .checked_mul(config.n_components)
+        .filter(|&len| len != 0)
+        .ok_or(STATUS_INVALID_SHAPE)?;
+    if !slice_size_is_representable::<f32>(coordinates_len) {
+        return Err(STATUS_INVALID_LENGTH);
+    }
+    if ![config.a, config.b]
+        .into_iter()
+        .all(|value| value.is_finite() && value > 0.0)
+        || ![config.learning_rate, config.repulsion_strength]
+            .into_iter()
+            .all(|value| value.is_finite() && value >= 0.0)
+        || EdgeSamplingCursor::from_positive_interval(1.0, config.negative_sample_rate).is_err()
+    {
+        return Err(STATUS_INVALID_CONFIG);
+    }
+
+    let init = match config.init {
+        INIT_RANDOM if config.init_coordinates.is_null() && config.init_len == 0 => {
+            DenseEmbeddingInit::random(config.seed)
+        }
+        INIT_EXPLICIT => {
+            validate_required_pointer(config.init_coordinates)?;
+            if config.init_len != coordinates_len {
+                return Err(STATUS_INVALID_LENGTH);
+            }
+            // SAFETY: The pointer is aligned and non-null. The validated shape
+            // determines the checked length, and the caller promises that
+            // many readable coordinates.
+            let coordinates = unsafe { input_slice(config.init_coordinates, config.init_len) };
+            DenseEmbeddingInit::explicit(coordinates)
+        }
+        _ => return Err(STATUS_INVALID_CONFIG),
+    };
+    let core_config = DenseEmbeddingConfig::<f64, f64> {
+        n_neighbors: config.n_neighbors,
+        metric: metric.into_core(),
+        n_components: config.n_components,
+        a: config.a,
+        b: config.b,
+        learning_rate: config.learning_rate,
+        n_epochs: config.n_epochs,
+        repulsion_strength: config.repulsion_strength,
+        negative_sample_rate: config.negative_sample_rate,
+        init,
+    };
+    // SAFETY: The pointer and dimensions were checked above. The caller
+    // promises readable storage for `data_len` contiguous values.
+    let data = unsafe { input_slice(data, data_len) };
+    let embedding = fit_dense_embedding_seeded(data, n_rows, n_features, &core_config, config.seed)
+        .map_err(map_embedding_error)?;
+    let handle = Box::into_raw(Box::new(embedding)).cast::<UmapCapiDenseEmbedding>();
+
+    // SAFETY: The output pointer was checked above, and the caller promises
+    // writable storage for one handle. The fit has succeeded.
+    unsafe { out_embedding.write(handle) };
+    Ok(())
 }
 
 fn catch_status<F>(function: F) -> u32
@@ -276,23 +476,9 @@ pub unsafe extern "C" fn umap_capi_csr_graph_view(
             Err(status) => return status,
         };
 
-        let indptr = &graph.graph.indptr;
-        let indices = &graph.graph.indices;
-        let data = &graph.graph.data;
-        let view = UmapCapiCsrView {
-            n_rows: graph.graph.n_rows,
-            n_cols: graph.graph.n_cols,
-            indptr_len: indptr.len(),
-            indices_len: indices.len(),
-            data_len: data.len(),
-            indptr: optional_slice_pointer(indptr),
-            indices: optional_slice_pointer(indices),
-            data: optional_slice_pointer(data),
-        };
-
         // SAFETY: The pointer is non-null and aligned, and the caller
         // promises writable storage for one `UmapCapiCsrView`.
-        unsafe { out_view.write(view) };
+        unsafe { out_view.write(csr_view(&graph.graph)) };
         STATUS_OK
     })
 }
@@ -319,6 +505,107 @@ pub unsafe extern "C" fn umap_capi_csr_graph_release(graph: *mut UmapCapiCsrGrap
         // crate.  `Box::from_raw` takes back exactly the allocation produced by
         // `Box::into_raw` in `umap_capi_fit_dense_graph`.
         unsafe { drop(Box::from_raw(graph.cast::<OwnedGraph>())) };
+        STATUS_OK
+    })
+}
+
+/// Fit a seeded dense embedding and its fuzzy CSR graph into one owning handle.
+///
+/// On error, the output slot is left untouched. The fit retains no pointers
+/// to the configuration or input buffers.
+///
+/// # Safety
+///
+/// `data` must point to `data_len` readable aligned values, or be null if
+/// `data_len` is zero. `config` must point to one readable, initialized,
+/// aligned configuration. With explicit initialization, its coordinates must
+/// point to `init_len` readable aligned values. Input storage must remain
+/// readable and unmodified for the call. `out_embedding` must point to one
+/// writable aligned handle slot disjoint from input storage. Release a
+/// successful output exactly once with [`umap_capi_dense_embedding_release`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn umap_capi_fit_dense_embedding_seeded(
+    data: *const f32,
+    data_len: usize,
+    n_rows: usize,
+    n_features: usize,
+    config: *const UmapCapiDenseEmbeddingConfig,
+    out_embedding: *mut *mut UmapCapiDenseEmbedding,
+) -> u32 {
+    catch_status(|| {
+        // SAFETY: The caller guarantees valid storage as documented above.
+        unsafe {
+            fit_dense_embedding_impl(data, data_len, n_rows, n_features, config, out_embedding)
+        }
+        .map_or_else(|status| status, |()| STATUS_OK)
+    })
+}
+
+/// Fill a caller-owned view of the coordinates and graph in one embedding handle.
+///
+/// # Safety
+///
+/// `embedding` must be a live handle returned by
+/// [`umap_capi_fit_dense_embedding_seeded`]. `out_view` must point to writable
+/// aligned storage for one [`UmapCapiDenseEmbeddingView`] outside the handle's
+/// storage. The borrowed arrays must only be read while the handle is live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn umap_capi_dense_embedding_view(
+    embedding: *const UmapCapiDenseEmbedding,
+    out_view: *mut UmapCapiDenseEmbeddingView,
+) -> u32 {
+    catch_status(|| {
+        if let Err(status) = validate_required_pointer(out_view) {
+            return status;
+        }
+        let embedding = embedding.cast::<DenseEmbedding>();
+        if let Err(status) = validate_required_pointer(embedding) {
+            return status;
+        }
+
+        // SAFETY: The pointer was checked above, and a non-null handle must
+        // refer to a live DenseEmbedding allocated by this crate.
+        let embedding = unsafe { &*embedding };
+        let (n_rows, n_components) = embedding.shape;
+        let view = UmapCapiDenseEmbeddingView {
+            n_rows,
+            n_components,
+            coordinates_len: embedding.coordinates.len(),
+            coordinates: optional_slice_pointer(&embedding.coordinates),
+            graph: csr_view(&embedding.graph),
+        };
+
+        // SAFETY: The pointer was checked above, and the caller promises
+        // writable storage for one embedding view.
+        unsafe { out_view.write(view) };
+        STATUS_OK
+    })
+}
+
+/// Release the embedding, its graph, and all associated arrays.
+///
+/// # Safety
+///
+/// `embedding` may be null, which is a no-op. Otherwise it must be a live
+/// handle returned by [`umap_capi_fit_dense_embedding_seeded`]. Access to the
+/// handle and its borrowed arrays must end before release. The handle may
+/// only be released once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn umap_capi_dense_embedding_release(
+    embedding: *mut UmapCapiDenseEmbedding,
+) -> u32 {
+    catch_status(|| {
+        if embedding.is_null() {
+            return STATUS_OK;
+        }
+        let embedding = embedding.cast::<DenseEmbedding>();
+        if !pointer_is_aligned(embedding) {
+            return STATUS_INVALID_POINTER;
+        }
+
+        // SAFETY: The caller returns ownership of the exact allocation from
+        // `Box::into_raw` in the seeded embedding fit.
+        unsafe { drop(Box::from_raw(embedding)) };
         STATUS_OK
     })
 }

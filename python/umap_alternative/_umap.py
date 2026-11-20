@@ -289,12 +289,12 @@ def _rank_tied_dense_distances(distances, k):
     return np.argsort(np.asarray(distances, dtype=np.float32))[:k].tolist()
 
 
-def _rank_stable_dense_distances(distances, k):
-    return np.argsort(np.asarray(distances, dtype=np.float32), kind="stable")[:k].tolist()
-
-
 def _rank_tied_manhattan_distances(distances, k):
     return np.argsort(np.asarray(distances, dtype=np.float64))[:k].tolist()
+
+
+def _rank_tied_sparse_training_distances(distances, k):
+    return np.argsort(distances, kind="stable")[:k].tolist()
 
 
 def _sparse_tie_ranker(metric):
@@ -923,7 +923,7 @@ class UMAP(BaseEstimator, TransformerMixin):
                 n_neighbors,
                 metric,
                 cutoff,
-                _rank_stable_dense_distances if metric in _RATIO_METRICS else _sparse_tie_ranker(metric),
+                _rank_tied_sparse_training_distances,
                 graph_options=graph_options,
             )
             if cutoff < np.inf:
@@ -1285,7 +1285,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         return np.asarray(coordinates, dtype=np.float32).reshape(queries.shape[0], n_components)
 
     def update(self, X, ensure_all_finite=True):
-        """Append dense or sparse Euclidean features and update the fitted embedding."""
+        """Append feature rows and update the fitted embedding."""
         if not hasattr(self, "_graph_transform_fit"):
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '_raw_data'")
         if self._graph_transform_fit is None or self._graph_transform_fit[1] == "precomputed":
@@ -1296,10 +1296,10 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise ValueError("Updating supervised models is not currently supported")
         training, metric = self._graph_transform_fit
         sparse = issparse(training)
-        if (sparse and metric != "euclidean") or self._supplied_transform_error is not None:
+        if (sparse and metric not in _SPARSE_LAYOUT_METRICS) or self._supplied_transform_error is not None:
             raise NotImplementedError("update requires dense features with computed neighbors")
         if sparse:
-            return self._update_sparse_euclidean(X, training, ensure_all_finite)
+            return self._update_sparse_features(X, training, metric, ensure_all_finite)
         batch = check_array(
             X, dtype=np.float32, order="C", ensure_all_finite=ensure_all_finite
         )
@@ -1361,7 +1361,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             transform_cutoff=self._transform_cutoff,
         )
 
-    def _update_sparse_euclidean(self, X, training, ensure_all_finite):
+    def _update_sparse_features(self, X, training, metric, ensure_all_finite):
         if issparse(X):
             batch = _check_sparse_input(X, input_name="sparse features", ensure_all_finite=ensure_all_finite)
         else:
@@ -1370,19 +1370,33 @@ class UMAP(BaseEstimator, TransformerMixin):
         retained = snapshot if snapshot is not None and snapshot.shape == training.shape else training
         stacked = vstack((retained, batch))
         combined = _sparse_features(stacked, preserve_duplicates=True)
+        ranking_input = combined
+        exact_input = stacked
+        if metric in ("manhattan", "chebyshev") and not combined.has_canonical_format:
+            ranking_input = _sparse_features(combined, preserve_duplicates=False)
+            if metric == "manhattan":
+                # Copies of either representation take the held-out path.
+                exact_input = None
         seed = self._embedding_transform_seed()
         k = self.n_neighbors_
         n_existing = training.shape[0]
-        components, appended_ranks = _native._fit_sparse_euclidean_update_graph(
-            _csr_buffers(combined), n_existing, k, graph_options=self._graph_options(),
+        components, appended_ranks = _native._fit_sparse_update_graph(
+            _csr_buffers(ranking_input), n_existing, k, metric, graph_options=self._graph_options(),
         )
         # The combined graph and training rows are visible before layout starts.
         self.graph_ = _csr_graph(components)
-        self._graph_transform_fit = (combined, "euclidean")
+        self._graph_transform_fit = (combined, metric)
         fitted = self.embedding_
         epochs = self.n_epochs
         if epochs is not None and not isinstance(epochs, (numbers.Integral, list, tuple, np.ndarray)):
             raise TypeError(_EPOCHS_ERROR)
+        if (metric != "euclidean" and isinstance(epochs, numbers.Integral)
+                and epochs < 0 and fitted.shape[0] == n_existing):
+            # The public update zeros weak memberships before the schedule fails.
+            weights = self.graph_.data
+            if weights.size:
+                cutoff = np.float32(weights.max() / _default_epochs(combined.shape[0]))
+                weights[weights < cutoff] = 0
         n_epochs = 0 if epochs is None else _validate_epochs(epochs)
         repulsion, negative_rate = self._sampling_options()
         components, shape, coordinates = _native._update_ranked_embedding(
@@ -1393,9 +1407,9 @@ class UMAP(BaseEstimator, TransformerMixin):
         )
         embedding = np.asarray(coordinates, dtype=np.float32).reshape(shape)
         self._store_fit(
-            combined.shape[1], (combined, "euclidean"), _csr_graph(components), k, embedding,
+            combined.shape[1], (combined, metric), _csr_graph(components), k, embedding,
             embedding_options=self._embedding_transform_options,
-            transform_cutoff=self._transform_cutoff, exact_fit_input=stacked,
+            transform_cutoff=self._transform_cutoff, exact_fit_input=exact_input,
         )
 
     def inverse_transform(self, X):

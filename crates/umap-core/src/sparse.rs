@@ -740,8 +740,32 @@ pub fn fit_sparse_euclidean_update_graph(
     k: usize,
     options: GraphOptions,
 ) -> Result<(CsrGraph, Vec<usize>), SparseGraphFitError> {
-    let (graph, neighbors, _) =
-        fit_index_ranked_sparse_graph(input, k, DistanceMetric::Euclidean, f32::INFINITY, options)?;
+    fit_sparse_update_graph(input, n_existing, k, DistanceMetric::Euclidean, options)
+}
+
+/// Rebuild an uncut feature graph and return the appended rows' neighbor columns.
+/// Manhattan orders its float64 sums before rounding the selected distances.
+/// Training ties in the search precision follow ascending row index.
+pub fn fit_sparse_update_graph(
+    input: CsrFeatures<'_>,
+    n_existing: usize,
+    k: usize,
+    metric: DistanceMetric,
+    options: GraphOptions,
+) -> Result<(CsrGraph, Vec<usize>), SparseGraphFitError> {
+    validate_feature_metric(metric).map_err(SparseGraphFitError::Knn)?;
+    let (graph, neighbors, _) = if metric == DistanceMetric::Manhattan {
+        fit_sparse_graph_with_ranker(
+            input,
+            k,
+            metric,
+            f64::INFINITY,
+            options,
+            rank_manhattan_ties,
+        )?
+    } else {
+        fit_index_ranked_sparse_graph(input, k, metric, f32::INFINITY, options)?
+    };
     let appended_ranks = neighbors
         .into_iter()
         .skip(n_existing)
@@ -751,7 +775,7 @@ pub fn fit_sparse_euclidean_update_graph(
     Ok((graph, appended_ranks))
 }
 
-type IndexRankedGraph = (CsrGraph, Vec<Vec<Neighbor>>, usize);
+type RankedSparseGraph = (CsrGraph, Vec<Vec<Neighbor>>, usize);
 
 fn fit_index_ranked_sparse_graph(
     input: CsrFeatures<'_>,
@@ -759,9 +783,11 @@ fn fit_index_ranked_sparse_graph(
     metric: DistanceMetric,
     cutoff: f32,
     options: GraphOptions,
-) -> Result<IndexRankedGraph, SparseGraphFitError> {
-    let (neighbors, removed) = csr_knn_counting_cutoff(input, k, metric.into(), cutoff, true)
-        .map_err(SparseGraphFitError::Knn)?;
+) -> Result<RankedSparseGraph, SparseGraphFitError> {
+    let allow_duplicates = metric == DistanceMetric::Euclidean;
+    let (neighbors, removed) =
+        csr_knn_counting_cutoff(input, k, metric.into(), cutoff, allow_duplicates)
+            .map_err(SparseGraphFitError::Knn)?;
     let graph = build_graph_with_cutoff(&neighbors, k, cutoff, options)
         .map_err(SparseGraphFitError::Graph)?;
     Ok((graph, neighbors, removed))
@@ -776,15 +802,28 @@ pub fn fit_sparse_feature_graph_with_cutoff(
     metric: DistanceMetric,
     cutoff: f64,
     options: GraphOptions,
-    mut rank_ties: impl FnMut(SparseTieDistances<'_>, usize) -> Vec<usize>,
+    rank_ties: impl FnMut(SparseTieDistances<'_>, usize) -> Vec<usize>,
 ) -> Result<(CsrGraph, usize), SparseGraphFitError> {
-    use SparseGraphFitError as Error;
-    validate_feature_metric(metric).map_err(Error::Knn)?;
+    validate_feature_metric(metric).map_err(SparseGraphFitError::Knn)?;
     if metric == DistanceMetric::Cosine {
         let (graph, _, removed) =
             fit_index_ranked_sparse_graph(input, k, metric, cutoff as f32, options)?;
         return Ok((graph, removed));
     }
+    let (graph, _, removed) =
+        fit_sparse_graph_with_ranker(input, k, metric, cutoff, options, rank_ties)?;
+    Ok((graph, removed))
+}
+
+fn fit_sparse_graph_with_ranker(
+    input: CsrFeatures<'_>,
+    k: usize,
+    metric: DistanceMetric,
+    cutoff: f64,
+    options: GraphOptions,
+    mut rank_ties: impl FnMut(SparseTieDistances<'_>, usize) -> Vec<usize>,
+) -> Result<RankedSparseGraph, SparseGraphFitError> {
+    use SparseGraphFitError as Error;
     validate_csr_features(input, Some(k), false).map_err(Error::Knn)?;
     let mut ranking = SparseFeatureRanking::new(input, metric);
     let mut neighbors = Vec::with_capacity(input.shape.0);
@@ -815,7 +854,25 @@ pub fn fit_sparse_feature_graph_with_cutoff(
     }
     let graph =
         build_graph_with_cutoff(&neighbors, k, f32::INFINITY, options).map_err(Error::Graph)?;
-    Ok((graph, removed))
+    Ok((graph, neighbors, removed))
+}
+
+fn rank_manhattan_ties(distances: SparseTieDistances<'_>, k: usize) -> Vec<usize> {
+    let SparseTieDistances::Float64(distances) = distances else {
+        unreachable!("Manhattan update ranks use float64 distances")
+    };
+    let mut columns: Vec<_> = (0..distances.len()).collect();
+    let compare = |&left: &usize, &right: &usize| {
+        distances[left]
+            .total_cmp(&distances[right])
+            .then(left.cmp(&right))
+    };
+    if k < columns.len() {
+        columns.select_nth_unstable_by(k, compare);
+        columns.truncate(k);
+    }
+    columns.sort_unstable_by(compare);
+    columns
 }
 
 #[derive(Clone, Copy)]

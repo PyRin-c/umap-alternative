@@ -141,8 +141,8 @@ and four updated weight differences on the metric control. Native dense
 cutoff fits use the same distance and ranking kernels as the corresponding
 uncut fits, and retain only a row of candidates and the selected ranks.
 
-Sparse Euclidean feature updates are covered below. Additional sparse metrics,
-externally supplied neighbors, and failures during the optimizer remain open.
+Sparse feature updates are covered below. Externally supplied neighbors and
+other failures during the optimizer remain open.
 
 ## Sparse Euclidean updates
 
@@ -207,6 +207,73 @@ and `noninteger_epochs`, the exact old-input shortcut agrees after the failed
 updates. For the newly expanded held-out inputs, the port detects the stale
 layout size and raises `ValueError`. The public wheel returns a 10-by-2
 result in `cutoff_tie` and raises `IndexError` in the four invalid-epoch probes.
+
+## Sparse Manhattan, Chebyshev, and cosine updates
+
+These metrics share the CSR graph rebuild and serial layout update. Update
+retains the effective fitted neighbor count, rebuilds without the fitted
+distance cutoff, and updates old and appended coordinates together. A
+subsequent held-out transform still uses the fitted cutoff. The fixture's
+axis inputs compare COO row order, column order, and membership bits after
+that rebuild.
+
+- Manhattan rounds differences in float32 and ranks the float64 sum before
+  casting selected distances to float32. In `manhattan_precision`, the two
+  nearest fitted rows have the same rounded distance. The closer wide sum
+  selects column 1 ahead of column 0.
+- Chebyshev ranks the float32 maximum absolute difference. In
+  `chebyshev_precision`, two wide maxima of `1 + 2**-24` and `1 + 2**-25`
+  both round to 1. The appended row selects column 0.
+- Cosine includes each stored value when normalizing repeated CSR entries.
+  It preserves those entries for compatible combined-input shortcuts. The
+  uncut update can restore cosine edges that were removed at distance 2
+  during fit.
+- Training and update break equal-distance ties by training row index.
+  Held-out queries continue to use the existing query ordering. Chebyshev
+  coalesces duplicates for distances and retains the stored representation
+  for the fitted-input check. Manhattan coalesces duplicates on a copy. A
+  combined input with repeated columns and its coalesced copy take the
+  held-out path in `manhattan_split`.
+
+The fixture covers first and consecutive appends, omitted sample entries,
+signed stored zeros, repeated rows and columns, CSR, CSC, COO, and dense
+batches, epochs zero, one, and positive, and fit-time neighbor truncation.
+Validation errors for empty batches, feature width, or transform seed leave
+the graph and embedding intact. Graph-only updates publish the new graph
+before raising `AttributeError`. An invalid epoch count can expose an
+expanded graph while retaining the old exact-input shortcut and embedding.
+The Chebyshev error case also zeros two weak weights before failing.
+
+The common fixture checks 39 fits and 81 update calls, including 60
+successful updates. The comparisons cover 1,754 fitted CSR weights, 4,520
+CSR weights across update checkpoints, 722 fitted coordinates, 1,732
+coordinates across update checkpoints, 1,884 returned transform coordinates,
+21 ordered COO entries, and 71 exact-object returns. Caller-owned buffers
+and prior graph and embedding objects are preserved. The current pinned
+Windows and Ubuntu WSL stacks regenerate the common fixture byte for byte.
+[Generator](generate_sparse_metric_update_fixture.py) · [Fixture](fixtures/umap-learn-0.6.0-sparse-metric-update-x86_64.json)
+
+```sh
+uv run --project reference --locked python reference/generate_sparse_metric_update_fixture.py \
+  --output reference/fixtures/umap-learn-0.6.0-sparse-metric-update-x86_64.json --check
+```
+
+The `residuals` records capture Manhattan updates after an earlier call
+coalesces repeated CSR entries. In `manhattan_split_fit`, the public fit
+changes the caller's input to 33 logical entries with 66 backing slots.
+The following appends produce graphs with 52 and 64 entries. The port
+preserves caller storage and uses the live entries, matching the public
+`manhattan_canonical_fit` replay with 50 and 62 entries. In
+`manhattan_split_repeat`, the first duplicate append matches exactly. The
+next append has 54 entries in both paths and different CSR column support.
+The port matches the public `manhattan_canonical_append` replay.
+
+Running the generator with `--seed 564` and an output path in scratch
+reproduces a public host variation in `manhattan_epochs`. The weights at
+edges `(4, 5)` and `(5, 4)` have float32 words `1060772140` on Windows and
+`1060772139` on Ubuntu WSL at fit and after the first append. The coordinate
+bits agree. The native runs matched each host's words for this probe. The
+common fixture uses seed 565.
 
 ## Finite-cutoff fit timing
 

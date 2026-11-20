@@ -34,8 +34,8 @@ use umap_core::rng::Mt19937;
 use umap_core::sampling::{ModernSampledLayout, ModernSamplingConfig};
 use umap_core::sparse::{
     CsrFeatures, SparseTieDistances, fit_sparse_euclidean_graph_with_cutoff,
-    fit_sparse_euclidean_update_graph, fit_sparse_feature_graph_with_cutoff,
-    fit_sparse_graph_with_options, rank_sparse_feature_queries, unique_csr_rows,
+    fit_sparse_feature_graph_with_cutoff, fit_sparse_graph_with_options, fit_sparse_update_graph,
+    rank_sparse_feature_queries, unique_csr_rows,
 };
 use umap_core::transform::{
     CooGraph, DenseEmbeddingTransformConfig, transform_dense_embedding_with_options,
@@ -464,18 +464,20 @@ fn _update_dense_embedding(
     Ok((csr_components(graph), shape, coordinates))
 }
 
-/// Rebuild the sparse Euclidean graph and return only the ranks used to initialize new rows.
+/// Rebuild the sparse feature graph and return the ranks used to initialize new rows.
 #[pyfunction]
-#[pyo3(signature = (data, n_existing, k, *, graph_options=None))]
-fn _fit_sparse_euclidean_update_graph(
+#[pyo3(signature = (data, n_existing, k, metric, *, graph_options=None))]
+fn _fit_sparse_update_graph(
     py: Python<'_>,
     data: CsrComponents,
     n_existing: usize,
     k: usize,
+    metric: &str,
     graph_options: Option<(f64, f64)>,
 ) -> PyResult<(CsrComponents, Vec<usize>)> {
+    let metric = parse_metric(metric)?;
     let options = parse_graph_options(graph_options)?.unwrap_or_default();
-    py.detach(|| fit_sparse_euclidean_update_graph(csr_features(&data), n_existing, k, options))
+    py.detach(|| fit_sparse_update_graph(csr_features(&data), n_existing, k, metric, options))
         .map(|(graph, ranks)| (csr_components(graph), ranks))
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
@@ -1354,10 +1356,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_embedding, module)?)?;
     module.add_function(wrap_pyfunction!(_update_dense_embedding, module)?)?;
-    module.add_function(wrap_pyfunction!(
-        _fit_sparse_euclidean_update_graph,
-        module
-    )?)?;
+    module.add_function(wrap_pyfunction!(_fit_sparse_update_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_update_ranked_embedding, module)?)?;
     module.add_function(wrap_pyfunction!(_density_radius_log_inputs, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_graph_embedding_with_rng, module)?)?;

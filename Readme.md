@@ -45,7 +45,7 @@ Wheel は `target/wheels/` に生成されます。Python パッケージ名は 
 
 密な教師なし互換レイアウトでは、`update(X)` が学習時の距離と有効近傍数を使って行を追加します。Euclidean、Manhattan、Chebyshev、cosine、correlation を使えます。更新時のグラフは距離を切断せずに再構築され、学習済みの点も再配置の対象になります。C の `umap_capi_update_dense_embedding_with_metric` には学習時の距離タグを渡します。[更新の比較記録](reference/update_reference.md)
 
-疎な Euclidean 特徴量の教師なし互換レイアウトでも、`update(X)` で行を追加できます。学習時の有効近傍数を保ち、CSR のグラフを再構築して追加前後の座標を更新します。[疎な特徴量の更新の比較記録](reference/update_reference.md#sparse-euclidean-updates)
+疎な Euclidean、Manhattan、Chebyshev、cosine 特徴量の教師なし互換レイアウトでも、`update(X)` で行を追加できます。学習時の有効近傍数を保ち、CSR のグラフを再構築して追加前後の座標を更新します。[疎な特徴量の更新の比較記録](reference/update_reference.md#sparse-euclidean-updates)
 
 `output_dens=True` を指定した密な Euclidean 埋め込みでは、`fit_transform` が埋め込み、元空間の対数半径、埋め込み空間の対数半径を返します。近傍を内部で計算し、有限の切断距離を使わない場合に利用できます。[半径の参照記録](reference/densmap_reference.md)
 

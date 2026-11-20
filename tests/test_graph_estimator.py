@@ -44,6 +44,8 @@ def graph_model(**kwargs):
         n_jobs=1,
         n_epochs=30,
         compatibility_layout=True,
+        set_op_mix_ratio=1.0,
+        local_connectivity=1.0,
         transform_mode="graph",
     )
     parameters.update(kwargs)
@@ -160,3 +162,10 @@ def test_embedding_and_supervised_paths_fail_explicitly():
         graph_model().fit(BASELINE, np.array([0, 1, 0, 1]))
     with pytest.raises(NotImplementedError, match="transform is not implemented"):
         graph_model().transform(BASELINE)
+
+
+def test_non_default_graph_mix_parameters_fail_explicitly():
+    with pytest.raises(NotImplementedError, match="set_op_mix_ratio"):
+        graph_model(set_op_mix_ratio=0.5).fit(BASELINE)
+    with pytest.raises(NotImplementedError, match="local_connectivity"):
+        graph_model(local_connectivity=2.0).fit(BASELINE)

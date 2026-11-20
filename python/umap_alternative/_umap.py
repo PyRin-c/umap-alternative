@@ -68,6 +68,8 @@ class UMAP(BaseEstimator, TransformerMixin):
         n_jobs=-1,
         n_epochs=None,
         compatibility_layout=False,
+        set_op_mix_ratio=1.0,
+        local_connectivity=1.0,
         transform_mode="embedding",
     ):
         self.n_components = n_components
@@ -78,6 +80,8 @@ class UMAP(BaseEstimator, TransformerMixin):
         self.n_jobs = n_jobs
         self.n_epochs = n_epochs
         self.compatibility_layout = compatibility_layout
+        self.set_op_mix_ratio = set_op_mix_ratio
+        self.local_connectivity = local_connectivity
         self.transform_mode = transform_mode
 
     def fit(self, X, y=None):
@@ -90,6 +94,14 @@ class UMAP(BaseEstimator, TransformerMixin):
 
         self._validate_mode()
         self._validate_metric()
+        if self.set_op_mix_ratio != 1.0:
+            raise NotImplementedError(
+                "set_op_mix_ratio values other than 1.0 are not implemented"
+            )
+        if self.local_connectivity != 1.0:
+            raise NotImplementedError(
+                "local_connectivity values other than 1.0 are not implemented"
+            )
         if y is not None:
             raise NotImplementedError(
                 "supervised fitting is not implemented; omit y for graph mode"

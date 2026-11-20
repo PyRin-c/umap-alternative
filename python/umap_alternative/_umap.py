@@ -7,12 +7,13 @@ import warnings
 
 import numpy as np
 from scipy.sparse import coo_matrix, csc_matrix, csr_matrix, issparse
+from scipy.sparse.csgraph import connected_components
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_array
 
 from . import _native
 from ._curve import _finite_float, _resolve_curve_params
-from ._spectral import _spectral_initialization
+from ._spectral import _disconnected_spectral_initialization, _spectral_initialization
 
 
 _METRIC_ALIASES = {
@@ -62,7 +63,9 @@ def _validate_epochs(n_epochs):
     return int(n_epochs)
 
 
-def _fit_spectral_embedding(graph, rng, *, n_epochs, n_components, **layout_options):
+def _fit_spectral_embedding(
+    graph, features, metric, rng, *, n_epochs, n_components, **layout_options
+):
     # Public graph_ retains the CSR entries whose memberships were zeroed.
     # Fits of at most ten epochs use the default budget for this cutoff.
     sampling_epochs = n_epochs if n_epochs > 10 else _default_epochs(graph.shape[0])
@@ -74,7 +77,13 @@ def _fit_spectral_embedding(graph, rng, *, n_epochs, n_components, **layout_opti
         spectral_graph = graph.copy()
         spectral_graph.eliminate_zeros()
 
-    initial = _spectral_initialization(spectral_graph, n_components, rng)
+    count, labels = connected_components(spectral_graph, directed=False)
+    if count == 1:
+        initial = _spectral_initialization(spectral_graph, n_components, rng)
+    else:
+        initial = _disconnected_spectral_initialization(
+            spectral_graph, features, metric, n_components, rng, labels
+        )
     algorithm, words, cursor, has_gaussian, cached_gaussian = rng.get_state()
     shape, coordinates, (words, cursor) = _native._fit_graph_embedding_with_rng(
         (graph.shape, graph.indptr.tolist(), graph.indices.tolist(), graph.data.tolist()),
@@ -87,7 +96,10 @@ def _fit_spectral_embedding(graph, rng, *, n_epochs, n_components, **layout_opti
     rng.set_state(
         (algorithm, np.asarray(words, dtype=np.uint32), cursor, has_gaussian, cached_gaussian)
     )
-    return np.asarray(coordinates, dtype=np.float32).reshape(shape)
+    embedding = np.asarray(coordinates, dtype=np.float32).reshape(shape)
+    # Isolated rows participate in normalization and sampling before masking.
+    embedding[np.diff(spectral_graph.indptr) == 0] = np.nan
+    return embedding
 
 
 def _check_sparse_indices(indices, n_entries, axis_size):
@@ -168,8 +180,9 @@ class UMAP(BaseEstimator, TransformerMixin):
 
     For an embedding, use dense features, an integer ``random_state`` in
     ``[0, 2**32 - 1]``, and ``compatibility_layout=True``. The default
-    ``init="spectral"`` requires a connected sampled graph and fewer
-    components than samples. ``init`` can also be ``"random"`` or a finite
+    ``init="spectral"`` uses the sampled graph to place its connected components.
+    For a connected graph the embedding dimension must be smaller than the
+    number of samples. ``init`` can also be ``"random"`` or a finite
     NumPy array of shape ``(n_samples, n_components)`` with distinct rows
     and nonconstant columns. Fitting exposes ``embedding_`` and ``graph_``.
     Dense held-out features transform to ``float32`` coordinates with the
@@ -355,8 +368,8 @@ class UMAP(BaseEstimator, TransformerMixin):
                 )
         if spectral:
             rng = np.random.RandomState(embedding_options.pop("seed"))
-            embedding = _fit_spectral_embedding(graph, rng, **embedding_options)
-        if embedding is not None:
+            embedding = _fit_spectral_embedding(graph, X_checked, metric, rng, **embedding_options)
+        elif embedding is not None:
             embedding[np.diff(graph.indptr) == 0] = np.nan
         return self._store_fit(
             n_features, transform_fit, graph, n_neighbors, embedding,

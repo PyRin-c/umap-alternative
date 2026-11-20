@@ -58,7 +58,7 @@ coefficients on Windows reproduced its embedding exactly.
 | Two rows | Truncation and disconnected-vertex warnings, then `ValueError` for the empty graph. |
 | Connected graph with `n_components == n_rows - 1` | Dense full-spectrum solve. |
 | `n_components >= n_rows` | `ValueError`. The public wheel emits a warning and uses a random fallback in this case. |
-| Multiple components before or after pruning | `NotImplementedError`. A 20-row probe connected at ten epochs loses its bridge at eleven epochs. The public wheel returns a layout for the resulting components. |
+| Multiple components before or after pruning | The estimator places components of the sampled graph and continues the seeded layout. The 20-row probe loses a bridge at eleven epochs. [Disconnected graph checkpoints](disconnected_spectral_reference.md) |
 
 A failed fit preserves the previous fitted graph, embedding, and training
 data. The spectral helper retains SciPy's eigenvector signs and propagates

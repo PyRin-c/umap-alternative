@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components
 
 from umap_alternative import UMAP, _umap
 
@@ -21,6 +22,14 @@ REFERENCE = json.loads(
         else "umap-learn-0.6.0-spectral-fit-windows-x86_64.json"
     )).read_text(encoding="utf-8")
 )
+DISCONNECTED = json.loads(
+    (FIXTURES / (
+        "umap-learn-0.6.0-disconnected-spectral-ubuntu-x86_64.json"
+        if platform.system() == "Linux"
+        else "umap-learn-0.6.0-disconnected-spectral-windows-x86_64.json"
+    )).read_text(encoding="utf-8")
+)
+CENTROID_LAYOUT_RESIDUALS = {"chebyshev-d2-e0-s24", "mixed-d2-e0-s7", "wide-d2-e0-s0"}
 WEIGHTED = np.asarray(HANDOFF["input"], dtype=np.float32)
 BASE = HANDOFF["settings"]
 
@@ -172,22 +181,69 @@ def test_spectral_fit_rejects_dimensions_outside_connected_solver(method, compon
     assert not hasattr(model, "graph_")
 
 
-@pytest.mark.parametrize("method", ["fit", "fit_transform"])
-def test_spectral_fit_rejects_graph_disconnected_before_or_after_pruning(method):
-    groups = np.array([[0, 0], [1, 0], [20, 0], [21, 0], [40, 0], [41, 0]], dtype=np.float32)
-    model = UMAP(**(BASE | {"n_neighbors": 2}), n_epochs=0, random_state=0)
-    with pytest.raises(NotImplementedError, match="requires a connected graph"):
-        getattr(model, method)(groups)
-    assert not hasattr(model, "graph_")
+@pytest.mark.parametrize("name", DISCONNECTED["cases"])
+def test_disconnected_spectral_graph_layout_and_rng(name, monkeypatch):
+    case = DISCONNECTED["cases"][name]
+    features = np.asarray(DISCONNECTED["inputs"][case["input"]], dtype=np.float32)
+    graph = DISCONNECTED["graphs"][case["graph"]]
+    expected_warnings = case["warnings"]
+    if case["input"] in DISCONNECTED["explicit_labels"]:
+        # These probes supply neighbor lists to the reference estimator.
+        # Replay the public graph at the dense graph builder boundary.
+        sizes = (len(features),) * 2
+        values = np.asarray(graph["bits"], dtype=np.uint32).view(np.float32).tolist()
 
-    bridge = np.random.RandomState(72).normal(size=(20, 2)).astype(np.float32)
-    model.set_params(n_neighbors=4, n_epochs=10).fit(bridge)
-    graph, embedding = model.graph_, model.embedding_
-    model.set_params(n_epochs=11)
-    with pytest.raises(NotImplementedError, match="requires a connected graph"):
-        getattr(model, method)(bridge)
-    assert model.graph_ is graph
-    assert model.transform(bridge.copy()) is embedding
+        def explicit_graph(*args):
+            return sizes, graph["indptr"], graph["indices"], values
+
+        monkeypatch.setattr(_umap._native, "_fit_dense_graph", explicit_graph)
+        expected_warnings = [
+            message for message in expected_warnings
+            if not message.startswith(("precomputed_knn[2]", "A few of your vertices"))
+        ]
+
+    streams = []
+    fit_layout = _umap._fit_spectral_embedding
+
+    def fit_layout_with_rng(graph, features, metric, rng, **options):
+        streams.append(rng)
+        return fit_layout(graph, features, metric, rng, **options)
+
+    monkeypatch.setattr(_umap, "_fit_spectral_embedding", fit_layout_with_rng)
+    model = UMAP(**DISCONNECTED["settings"])
+    for method in ("fit", "fit_transform"):
+        model.set_params(**case["params"], random_state=case["seed"])
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            fitted = getattr(model, method)(features)
+        assert [str(w.message).splitlines()[0] for w in caught] == expected_warnings
+        assert fitted is (model if method == "fit" else model.embedding_)
+        assert model.transform(features.copy()) is model.embedding_
+        assert_graph_bits(model.graph_, len(features), graph)
+
+        positive = model.graph_.copy()
+        positive.eliminate_zeros()
+        _, labels = connected_components(positive, directed=False)
+        np.testing.assert_array_equal(np.bincount(labels), case["component_sizes"])
+        embedding = model.embedding_
+        assert embedding.shape == (len(features), case["params"]["n_components"])
+        assert embedding.dtype == np.float32
+        isolated = np.diff(positive.indptr) == 0
+        assert np.isnan(embedding[isolated]).all()
+        assert np.isfinite(embedding[~isolated]).all()
+        if name not in CENTROID_LAYOUT_RESIDUALS:
+            np.testing.assert_array_equal(embedding.view(np.uint32).ravel(), case["bits"])
+
+        rng = streams[-1]
+        algorithm, _, cursor, has_gaussian, cached_gaussian = rng.get_state()
+        expected = case["post_fit_rng"]
+        assert algorithm == "MT19937"
+        assert (cursor, has_gaussian, cached_gaussian) == (
+            expected["cursor"], expected["has_gaussian"], expected["cached_gaussian"],
+        )
+        np.testing.assert_array_equal(
+            rng.randint(0, 2**32, size=4, dtype=np.uint32), expected["next_words"]
+        )
 
 
 def test_spectral_fit_native_failure_preserves_previous_fit():

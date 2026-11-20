@@ -17,6 +17,9 @@ FIXTURE = (
     Path(__file__).with_name("fixtures")
     / "umap-learn-0.6.0-precomputed-neighbors-windows-x86_64.json"
 )
+RUST_HELD_OUT_FIXTURE = FIXTURE.with_name(
+    "umap-learn-0.6.0-supplied-neighbors-held-out-windows-x86_64.json"
+)
 PARAMETERS = {
     "n_neighbors": 4,
     "n_components": 2,
@@ -52,7 +55,7 @@ def pinned_environment():
     }
 
 
-def capture():
+def capture(rust_held_out=False):
     import numpy as np
     from umap import UMAP
 
@@ -132,6 +135,76 @@ def capture():
             result["transform_held_out"] = observe(lambda: model.transform(held_out))
         return result
 
+    if rust_held_out:
+
+        def supplied(width, rows=()):
+            pair = (ordered[:, :width].copy(), ordered_distances[:, :width].copy())
+            for row, indices, distances in rows:
+                pair[0][row] = indices
+                pair[1][row] = distances
+            return pair
+
+        wide = supplied(6)
+        wider_than_training = tuple(
+            np.column_stack((array, array[:, 1])) for array in supplied(8)
+        )
+        adjacent = (
+            np.nextafter(np.float32(1), np.float32(0)),
+            np.float32(1),
+            np.nextafter(np.float32(1), np.float32(2)),
+        )
+        duplicates = supplied(
+            6,
+            [
+                (0, [0, 1, 1, 1, 2, 2], [0, 0.5, 0.5, 0.5, 0.5, 0.5]),
+                (1, [1, 0, 0, 0, 2, 2], [0, 0.5, 0.5, 0.5, 0.5, 0.5]),
+                (2, [2, 0, 0, 3, 4, 5], [0, 0.5, 0.5, 0.5, 0.5, 0.5]),
+            ],
+        )
+        cases = {
+            "same_width_k3": fit_case(wide, n_neighbors=3),
+            "same_width_k5": fit_case(wide, n_neighbors=5),
+            "width_above_row_count": fit_case(wider_than_training, n_neighbors=9),
+            "threshold_adjacent_values": fit_case(
+                supplied(6, [(0, [0, 1, 2, 3, 4, 5], [0, *adjacent, 0.9375, 1.25])]),
+                disconnection_distance=1.0,
+            ),
+            "fractional_connectivity_first_column": fit_case(
+                supplied(6, [(0, [4, 0, 2, 3, 1, 5], [3, 0, 1, 2, 4, 5])]),
+                local_connectivity=0.4,
+            ),
+            "unsorted_connectivity_saturates": fit_case(
+                supplied(4, [(0, [1, 2, 0, 3], [3, 1, 0, 2])]),
+                local_connectivity=4.0,
+            ),
+            "self_distance_nonzero": fit_case(
+                supplied(4, [(0, [1, 0, 2, 3], [0.5, 0.125, 0.75, 1.0])])
+            ),
+            "leading_missing": fit_case(
+                supplied(6, [(0, [-1, 1, 0, 2, 3, 4], [np.inf, 1, 0, 2, 3, 4])])
+            ),
+            "missing_row_mean_floor": fit_case(
+                supplied(6, [(0, [0, 1, 2, 3, 4, -1], [0, 1, 1, 1, 1.001, np.inf])])
+            ),
+            "missing_batch_mean_floor": fit_case(
+                supplied(6, [(0, [0, 1, 2, 3, 4, -1], [0, 0, 0, 0, 0.001, np.inf])]),
+                local_connectivity=0.0,
+            ),
+            "duplicates_union": fit_case(duplicates),
+            "duplicates_intersection": fit_case(duplicates, set_op_mix_ratio=0.0),
+            "duplicates_mixed": fit_case(duplicates, set_op_mix_ratio=0.35),
+            "duplicates_with_distinct_memberships": fit_case(
+                supplied(
+                    8,
+                    [(0, [0, 4, 2, 4, 3, 4, 5, 4], [0, 2**-10, 0.75, 4, 0.75, 1.5, 3.5, 2.25])],
+                ),
+                n_neighbors=5,
+            ),
+        }
+        for name, case in cases.items():
+            assert case["transform_held_out"]["error"]["type"] == "NotImplementedError", name
+        return {"training": training.tolist(), "held_out": held_out.tolist(), "cases": cases}
+
     cases = {
         "computed": fit_case(),
         "exact_width": fit_case((indices, distances)),
@@ -173,20 +246,26 @@ def capture():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=FIXTURE)
+    parser.add_argument("--output", type=Path)
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--rust-held-out", action="store_true")
     args = parser.parse_args()
+    output = args.output or (RUST_HELD_OUT_FIXTURE if args.rust_held_out else FIXTURE)
     environment = pinned_environment()
     os.environ.update(THREADS)
     with tempfile.TemporaryDirectory(prefix="umap-precomputed-neighbors-") as cache:
         os.environ["NUMBA_CACHE_DIR"] = cache
-        fixture = {"environment": environment, "base_parameters": PARAMETERS, **capture()}
+        fixture = {
+            "environment": environment,
+            "base_parameters": PARAMETERS,
+            **capture(rust_held_out=args.rust_held_out),
+        }
     content = json.dumps(fixture, separators=(",", ":"), allow_nan=False) + "\n"
     if args.check:
-        if args.output.read_text(encoding="utf-8") != content:
-            raise SystemExit(f"public fixture differs from {args.output}")
+        if output.read_text(encoding="utf-8") != content:
+            raise SystemExit(f"public fixture differs from {output}")
     else:
-        args.output.write_bytes(content.encode("utf-8"))
+        output.write_bytes(content.encode("utf-8"))
 
 
 if __name__ == "__main__":

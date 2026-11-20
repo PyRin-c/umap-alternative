@@ -8,6 +8,8 @@ use std::fmt;
 
 use crate::neighbors::Neighbor;
 
+pub(crate) mod supplied_neighbors;
+
 const SMOOTH_TOLERANCE: f64 = 1e-5;
 const MIN_SCALE_MULTIPLIER: f64 = 0.001;
 
@@ -351,6 +353,25 @@ fn build_fuzzy_graph(
         directed.push(memberships);
     }
 
+    let mix = options.set_op_mix_ratio as f32;
+    let intersection_mix = (1.0 - options.set_op_mix_ratio) as f32;
+    Ok(symmetrize(
+        &directed,
+        preserve_default_behavior,
+        |forward, reverse| {
+            let union = fuzzy_union(forward, reverse);
+            let intersection = forward * reverse;
+            (mix * union + intersection_mix * intersection).clamp(0.0, 1.0)
+        },
+    ))
+}
+
+fn symmetrize(
+    directed: &[Vec<(usize, f32)>],
+    keep_zero_weights: bool,
+    combine: impl Fn(f32, f32) -> f32,
+) -> CsrGraph {
+    let n_rows = directed.len();
     let mut support = vec![Vec::new(); n_rows];
     for (row_index, memberships) in directed.iter().enumerate() {
         for &(index, _) in memberships {
@@ -362,8 +383,6 @@ fn build_fuzzy_graph(
     let mut indptr = Vec::with_capacity(n_rows + 1);
     let mut indices = Vec::new();
     let mut data = Vec::new();
-    let mix = options.set_op_mix_ratio as f32;
-    let intersection_mix = (1.0 - options.set_op_mix_ratio) as f32;
     indptr.push(0);
     for (row_index, columns) in support.iter_mut().enumerate() {
         columns.sort_unstable();
@@ -371,10 +390,8 @@ fn build_fuzzy_graph(
         for &column in columns.iter() {
             let forward = find_membership(&directed[row_index], column);
             let reverse = find_membership(&directed[column], row_index);
-            let union = fuzzy_union(forward, reverse);
-            let intersection = forward * reverse;
-            let weight = (mix * union + intersection_mix * intersection).clamp(0.0, 1.0);
-            if weight == 0.0 && !preserve_default_behavior {
+            let weight = combine(forward, reverse);
+            if weight == 0.0 && !keep_zero_weights {
                 continue;
             }
             indices.push(column);
@@ -383,13 +400,13 @@ fn build_fuzzy_graph(
         indptr.push(indices.len());
     }
 
-    Ok(CsrGraph {
+    CsrGraph {
         n_rows,
         n_cols: n_rows,
         indptr,
         indices,
         data,
-    })
+    }
 }
 
 // `graph` is the symmetric output of `fuzzy_simplicial_set`, and `labels`
@@ -508,13 +525,12 @@ fn sorted_neighbor_distances(neighbors: &[Vec<Neighbor>]) -> Vec<f32> {
     distances
 }
 
-fn local_offset(distances: &[f32], local_connectivity: f64) -> f32 {
-    let positive = &distances[distances.partition_point(|&distance| distance == 0.0)..];
+fn local_offset(positive: &[f32], local_connectivity: f64) -> f32 {
     if positive.is_empty() {
         return 0.0;
     }
-    if local_connectivity >= positive.len() as f64 {
-        return positive[positive.len() - 1];
+    if local_connectivity > positive.len() as f64 {
+        return positive.iter().copied().fold(0.0, f32::max);
     }
     let whole = local_connectivity as usize;
     let fraction = local_connectivity - whole as f64;
@@ -535,7 +551,8 @@ pub(crate) fn row_parameters(
     local_connectivity: f64,
     batch_floor: f32,
 ) -> (f32, f32) {
-    let rho = local_offset(distances, local_connectivity);
+    let positive = &distances[distances.partition_point(|&distance| distance == 0.0)..];
+    let rho = local_offset(positive, local_connectivity);
     let target = (distances.len() as f64).log2();
     // Omit one zero for self. The other zero-distance candidates still
     // contribute unit memberships, irrespective of the order of the ties.

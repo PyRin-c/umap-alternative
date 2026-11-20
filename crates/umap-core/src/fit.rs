@@ -1,8 +1,8 @@
 //! Dense compatibility-path graph fitting.
 //!
 //! This module is intentionally limited to the graph stage: exhaustive or
-//! precomputed neighbor search, fuzzy simplicial-set construction, and
-//! optional categorical supervision.
+//! distance-matrix neighbor search, supplied neighbor arrays, fuzzy
+//! simplicial-set construction, and optional categorical supervision.
 //! It does not expose an estimator, layout, optimization, or any other
 //! sklearn behavior.
 //!
@@ -19,6 +19,10 @@ use crate::fuzzy_graph::{
 use crate::neighbors::{
     DistanceMetric, KnnError, Neighbor, PrecomputedKnnError, exhaustive_knn_with_metric,
     precomputed_knn,
+};
+
+pub use crate::fuzzy_graph::supplied_neighbors::{
+    SuppliedNeighborsGraphError, fit_supplied_neighbors_graph,
 };
 
 /// Errors returned while fitting a dense fuzzy graph.

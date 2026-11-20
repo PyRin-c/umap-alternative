@@ -25,14 +25,90 @@ All thirteen successful cases that used the supplied neighbors raised
 `NotImplementedError` on held-out transform. In the four cutoff cases
 the fit changed both arrays supplied by the caller, replacing cut indices
 with `-1` and their distances with `+inf`. Windows and Ubuntu WSL
-reproduced the same outputs and warnings for all 17 cases. This fixture
-covers the small dense graph path. Large data, approximate search,
-supplied search indexes, and the interaction with embedding fit and
-nondefault local connectivity need separate checks.
+reproduced the same outputs and warnings for all 17 cases. The scope is
+small dense graph fits with default local connectivity. Large data,
+approximate search, supplied search indexes, and embedding fit need
+separate checks.
 
-Regenerate the fixture with the locked reference environment.
+## Rust graph stage
+
+`umap_core::fit::fit_supplied_neighbors_graph` accepts immutable row-major
+int32 indices and float32 distances, the row count, the actual column
+count, the requested `n_neighbors`, `GraphOptions`, and a float32
+disconnection distance. It builds CSR directly from the supplied rows.
+`fit_precomputed_graph` ranks rows of a square distance matrix.
+
+- The smooth-scale target is `log2(n_neighbors)`. All supplied columns
+  contribute, even when the input width exceeds the requested count or
+  the row count. In the public case with eight rows and nine requested
+  neighbors, the accepted nine-column arrays use a target of `log2(9)`.
+- Local connectivity counts positive finite distances in supplied order.
+  The offset saturates at the maximum finite distance if the
+  connectivity exceeds the number of positive finite distances.
+  The scale search skips column zero. A non-self index in that column
+  still emits a membership, while a self index anywhere contributes its
+  distance to the scale calculation according to its column.
+- A `(-1, +inf)` pair contributes neither an edge nor a distance sample.
+  The minimum scale uses the mean of finite distances in the row when
+  the local offset is positive and across all rows when it is zero.
+  Missing neighbors leave the solve target unchanged.
+- The cutoff removes every distance greater than or equal to the
+  supplied float32 threshold before graph construction. Use `+inf`
+  with already-masked arrays or when no finite cutoff applies. Results
+  obtained from caller-preserved input arrays and from the public fit's
+  post-cutoff arrays agree exactly in the recorded cases.
+- Repeated directed coordinates are summed in input column order before
+  the fuzzy set operation. A duplicate sum can exceed one and reciprocal
+  duplicates can yield negative or zero union weights. CSR omits the
+  diagonal and exact zeros. The native layout validates weights against
+  the unit interval.
+
+Callers own estimator validation and fallback, the choice and conversion
+of the cutoff, caller-visible array mutation, and search-index adapters.
+The Rust API rejects malformed shapes, out-of-range indices, and
+index-distance pairs other than a valid finite distance or the paired
+missing marker. The public fit cases with an undersized width or wrong
+row count fall back before this stage.
+
+The Rust tests compare CSR shape, offsets, columns, and every float32
+weight bit for all 13 accepted cases above and 14 additional public-wheel
+fits. The latter include separate requested counts on the same width,
+width above the row count, adjacent float32 distances in one row, missing
+distances in the row and batch scale floors, fractional connectivity,
+and repeated coordinates with union, intersection, and mixed weights.
+The 14 held-out cases reproduced across Windows and Ubuntu WSL.
+
+## Wide duplicate rows
+
+A Windows stress sweep of 24 public fits matched CSR support throughout.
+Two width-71 inputs with repeated indices produced one asymmetric pair
+each in the public graph. Rust returned the same weight in both
+directions, matching the public reverse weight. The forward weights
+differed by two and one float32 ULPs, respectively.
+
+| Sweep iteration | Requested count | Local connectivity | Mix | Forward coordinate | Public forward bits | Rust bits in both directions |
+| --- | --- | --- | --- | --- | --- | --- |
+| 7 | 3 | 0.65 | 1 | `(2, 9)` | `0xc04009d6` | `0xc04009d4` |
+| 11 | 5 | 5 | 0 | `(1, 3)` | `0x3edf82a2` | `0x3edf82a3` |
+
+To reproduce the two inputs, use the generator's base fit settings and
+`np.arange(12, dtype=np.float32).reshape(-1, 1)` for training. Generate
+the arrays with the pinned NumPy version and fit iterations 7 and 11
+using the table's overrides.
+
+```python
+rng = np.random.default_rng(914)
+for i in range(12):
+    shape = (12, (5, 11, 41, 71)[i % 4])
+    indices = rng.integers(0, 12, shape, dtype=np.int32)
+    distances = rng.uniform(0, 7, shape).astype(np.float32)
+    # Capture indices and distances at iterations 7 and 11.
+```
+
+Verify both fixtures with the locked reference environment.
 
 ```powershell
 uv sync --project reference --locked --python 3.13.12
 & reference/.venv/Scripts/python.exe -I reference/generate_precomputed_neighbors_fixture.py --check
+& reference/.venv/Scripts/python.exe -I reference/generate_precomputed_neighbors_fixture.py --rust-held-out --check
 ```

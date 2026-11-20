@@ -69,6 +69,11 @@ def _scale_and_perturb(coordinates, rng):
 
 def _disconnected_spectral_initialization(graph, features, metric, n_components, rng, labels):
     """Place the components and perturb the assembled float32 layout once."""
+    coordinates = _disconnected_spectral_coordinates(graph, features, metric, n_components, rng, labels)
+    return _scale_and_perturb(coordinates, rng)
+
+
+def _disconnected_spectral_coordinates(graph, features, metric, n_components, rng, labels):
     order = np.argsort(labels, kind="stable")
     groups = np.split(order, np.cumsum(np.bincount(labels))[:-1])
     count = len(groups)
@@ -96,4 +101,4 @@ def _disconnected_spectral_initialization(graph, features, metric, n_components,
             local = _spectral_eigenvectors(graph[rows][:, rows], n_components, rng)
             local *= radius / np.max(np.abs(local))
         coordinates[rows] = center + local
-    return _scale_and_perturb(coordinates, rng)
+    return coordinates

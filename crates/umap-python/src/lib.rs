@@ -2,6 +2,7 @@ use pyo3::exceptions::{PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
+use umap_core::aligned::{AlignedLayoutConfig, optimize_aligned_layout};
 use umap_core::density::{
     DensityError, RadiusSpace, embedding_radius_log_inputs_euclidean, euclidean_radius_log_inputs,
 };
@@ -32,6 +33,7 @@ type CooComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
 type EmbeddingComponents = (CsrComponents, (usize, usize), Vec<f32>);
 type RngState = (Vec<u32>, usize);
 type GraphEmbeddingComponents = ((usize, usize), Vec<f32>, RngState);
+type AlignedEmbeddingComponents = (Vec<Vec<f32>>, Option<RngState>);
 
 /// Compute the log inputs for original and embedding radius diagnostics.
 #[pyfunction]
@@ -69,6 +71,48 @@ fn csr_components(graph: CsrGraph) -> CsrComponents {
         graph.indices,
         graph.data,
     )
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn _optimize_aligned_layout(
+    py: Python<'_>,
+    graphs: Vec<CsrComponents>,
+    mut layouts: Vec<Vec<f32>>,
+    relations: Vec<Vec<(usize, usize)>>,
+    n_components: usize,
+    n_epochs: usize,
+    first_moving: usize,
+    window: usize,
+    regularisation: f64,
+    seed: [i64; 3],
+) -> PyResult<AlignedEmbeddingComponents> {
+    let graphs: Vec<_> = graphs
+        .into_iter()
+        .map(|((n_rows, n_cols), indptr, indices, data)| CsrGraph {
+            n_rows,
+            n_cols,
+            indptr,
+            indices,
+            data,
+        })
+        .collect();
+    let config = AlignedLayoutConfig {
+        n_components,
+        n_epochs,
+        first_moving,
+        window,
+        regularisation,
+        seed,
+    };
+    let rng = py
+        .detach(|| optimize_aligned_layout(&graphs, &mut layouts, &relations, &config))
+        .map_err(PyValueError::new_err)?;
+    let rng_state = rng.map(|rng| {
+        let (words, cursor) = rng.state();
+        (words.to_vec(), cursor)
+    });
+    Ok((layouts.split_off(first_moving), rng_state))
 }
 
 /// Parse the metric names supported by the feature graph compatibility paths.
@@ -561,6 +605,7 @@ fn _inverse_transform_dense_embedding(
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", umap_core::VERSION)?;
+    module.add_function(wrap_pyfunction!(_optimize_aligned_layout, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_graph_with_cutoff, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_sparse_graph, module)?)?;

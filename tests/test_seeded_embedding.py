@@ -221,8 +221,7 @@ def test_refit_state_is_committed_after_validation_and_tracks_mode():
     assert model.graph_ is original_graph
     assert model.transform(WEIGHTED.astype(np.float64)) is original_embedding
 
-    with pytest.raises(NotImplementedError, match="out-of-sample embedding transform"):
-        model.transform(WEIGHTED[1:])
+    assert model.transform(WEIGHTED[1:]).shape == original_embedding[1:].shape
     with pytest.raises(NotImplementedError, match="inverse_transform"):
         model.inverse_transform(original_embedding)
 

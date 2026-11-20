@@ -14,7 +14,10 @@ use umap_core::fuzzy_graph::{CsrGraph, GraphOptions};
 use umap_core::neighbors::DistanceMetric;
 use umap_core::rng::Mt19937;
 use umap_core::sparse::{SparseDistanceMetric, fit_sparse_graph_with_options};
-use umap_core::transform::{CooGraph, transform_dense_graph_with_options};
+use umap_core::transform::{
+    CooGraph, DenseEmbeddingTransformConfig, transform_dense_embedding_with_options,
+    transform_dense_graph_with_options,
+};
 
 type CsrComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
 type CooComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
@@ -289,6 +292,65 @@ fn _transform_dense_graph(
     Ok(((n_rows, n_cols), row, col, data))
 }
 
+/// Transform held-out features while keeping the fitted coordinates fixed.
+#[pyfunction]
+#[pyo3(signature = (
+    training, n_training_rows, queries, n_query_rows, n_features, fitted_embedding,
+    *, k, metric, n_components, a, b, learning_rate, fit_epochs, repulsion_strength,
+    negative_sample_rate, transform_seed, disconnection_distance=None, local_connectivity=1.0
+))]
+#[allow(clippy::too_many_arguments)]
+fn _transform_dense_embedding(
+    py: Python<'_>,
+    training: Vec<f32>,
+    n_training_rows: usize,
+    queries: Vec<f32>,
+    n_query_rows: usize,
+    n_features: usize,
+    fitted_embedding: Vec<f32>,
+    k: usize,
+    metric: &str,
+    n_components: usize,
+    a: f64,
+    b: f64,
+    learning_rate: f64,
+    fit_epochs: Option<usize>,
+    repulsion_strength: f64,
+    negative_sample_rate: f64,
+    transform_seed: u32,
+    disconnection_distance: Option<f32>,
+    local_connectivity: f64,
+) -> PyResult<Vec<f32>> {
+    let options = GraphOptions::new(local_connectivity, 1.0)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let config = DenseEmbeddingTransformConfig {
+        n_neighbors: k,
+        metric: parse_metric(metric)?,
+        n_components,
+        a,
+        b,
+        learning_rate,
+        fit_epochs,
+        repulsion_strength,
+        negative_sample_rate,
+        transform_seed,
+        disconnection_distance,
+    };
+    py.detach(|| {
+        transform_dense_embedding_with_options(
+            &training,
+            n_training_rows,
+            &queries,
+            n_query_rows,
+            n_features,
+            &fitted_embedding,
+            &config,
+            options,
+        )
+    })
+    .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", umap_core::VERSION)?;
@@ -298,5 +360,6 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_fit_graph_embedding_with_rng, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_categorical_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_precomputed_graph, module)?)?;
-    module.add_function(wrap_pyfunction!(_transform_dense_graph, module)?)
+    module.add_function(wrap_pyfunction!(_transform_dense_graph, module)?)?;
+    module.add_function(wrap_pyfunction!(_transform_dense_embedding, module)?)
 }

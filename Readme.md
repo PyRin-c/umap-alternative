@@ -33,7 +33,9 @@ Wheel は `target/wheels/` に生成されます。Python パッケージ名は 
 
 `UMAP(random_state=42, n_jobs=1, compatibility_layout=True).fit_transform(X)` は、密な特徴量から `float32` の `embedding_` を作り、学習時の CSR グラフを `graph_` に格納します。既定の `init="spectral"` は、枝刈り後のグラフが連結で、出力次元数がサンプル数未満の場合に使えます。`init="random"` や、各行が異なり各列に幅がある NumPy 配列も指定できます。`n_epochs` には非負の整数を指定でき、小規模データでは `None` が 500 エポックになります。学習データとビット列が一致する入力の `transform` は `embedding_` を返します。
 
-埋め込みでは教師あり入力、疎行列、事前計算済み距離、Adam と momentum、未知の入力の変換、逆変換は未実装です。固定シードの検証条件と適用範囲は [スペクトル初期化を使った学習の参照記録](reference/spectral_fit_reference.md) と [ランダム初期化と初期座標を指定した学習の参照記録](reference/seeded_fit_reference.md) を参照してください。
+密な新しい入力の `transform` は、学習時の座標を固定したまま `float32` の座標を返します。`transform_seed` は学習の `random_state` とは独立した整数シードで、既定値は `42` です。明示した `n_epochs` の 3 分の 1 を切り捨てた回数で最適化し、`None` の場合は入力が 10,000 行以下なら 100 エポック、それより多ければ 30 エポックを使います。検証結果と適用範囲は [埋め込み変換の参照記録](reference/transform_embedding_reference.md) を参照してください。
+
+埋め込みでは教師あり入力、疎行列、事前計算済み距離、Adam と momentum、逆変換は未実装です。固定シードの検証条件と適用範囲は [スペクトル初期化を使った学習の参照記録](reference/spectral_fit_reference.md) と [ランダム初期化と初期座標を指定した学習の参照記録](reference/seeded_fit_reference.md) を参照してください。
 
 `UMAP(transform_mode="graph").fit(X)` と `fit_transform(X)` は、Euclidean、Manhattan、Chebyshev、cosine の教師なし学習で SciPy の CSR、CSC、COO 形式の疎な特徴量を受け取ります。入力を変更せずに CSR に変換し、`float32` の CSR グラフを作ります。Cosine は圧縮形式の行に格納された重複要素を保持して距離を計算します。距離ゼロの同順位により自分自身が近傍から外れる場合は `ValueError` になります。疎行列での事前計算済み距離と変換は未実装です。形式ごとの検証結果は [疎グラフの参照記録](reference/sparse_graph_reference.md) を参照してください。
 

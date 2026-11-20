@@ -58,7 +58,7 @@ The public small-data probe returned COO for both fewer and more query features.
 The Rust core rejects nonfinite selected distances. The same public probe
 with a finite `float32` maximum coordinate returned COO with four stored zeros
 at column zero. Python rejects sparse input and precomputed transforms.
-Embedding and inverse transforms are outside this wheel's graph estimator.
+For the held-out embedding path, see the [serial transform reference](transform_embedding_reference.md).
 
 The Rust core uses exhaustive Euclidean, Manhattan, or Chebyshev distances.
 It orders tied neighbors by training index. Tie order and metric arithmetic

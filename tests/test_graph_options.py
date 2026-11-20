@@ -48,6 +48,11 @@ def test_graph_options_fit_matches_public_bits(case, method):
     if "coordinates_bits" in case:
         np.testing.assert_array_equal(model.embedding_.view(np.uint32), case["coordinates_bits"])
         assert returned is (model if method == "fit" else model.embedding_)
+        if "transformed_bits" in case:
+            queries = np.asarray(FIXTURE["queries"], dtype=np.float32)
+            np.testing.assert_array_equal(
+                model.transform(queries).view(np.uint32), case["transformed_bits"]
+            )
     else:
         assert returned is (model if method == "fit" else model.graph_)
 

@@ -54,6 +54,14 @@ def _default_epochs(n_rows):
     return 500 if n_rows <= 10_000 else 200
 
 
+def _validate_epochs(n_epochs):
+    if isinstance(n_epochs, (list, tuple)):
+        raise NotImplementedError("embedding supports a scalar n_epochs")
+    if isinstance(n_epochs, bool) or not isinstance(n_epochs, numbers.Integral) or n_epochs < 0:
+        raise ValueError("n_epochs must be a nonnegative integer")
+    return int(n_epochs)
+
+
 def _fit_spectral_embedding(graph, rng, *, n_epochs, n_components, **layout_options):
     # Public graph_ retains the CSR entries whose memberships were zeroed.
     # Fits of at most ten epochs use the default budget for this cutoff.
@@ -164,9 +172,12 @@ class UMAP(BaseEstimator, TransformerMixin):
     components than samples. ``init`` can also be ``"random"`` or a finite
     NumPy array of shape ``(n_samples, n_components)`` with distinct rows
     and nonconstant columns. Fitting exposes ``embedding_`` and ``graph_``.
-    A singleton has a zero embedding and no graph. Supervised embeddings,
-    modern optimizers, out-of-sample embedding transforms, and inverse
-    transforms raise explicit errors.
+    Dense held-out features transform to ``float32`` coordinates with the
+    training layout fixed. ``transform_seed`` (default 42) is an integer in
+    ``[0, 2**32 - 1]``, independent of ``random_state``. The normalized fitted
+    input returns ``embedding_`` itself. A singleton has a zero embedding and
+    no graph. Supervised embeddings, modern optimizers, and inverse transforms
+    raise explicit errors.
     """
 
     def __init__(
@@ -192,6 +203,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         a=None,
         b=None,
         optimizer=None,
+        transform_seed=42,
     ):
         self.n_components = n_components
         self.n_neighbors = n_neighbors
@@ -214,6 +226,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         self.a = a
         self.b = b
         self.optimizer = optimizer
+        self.transform_seed = transform_seed
 
     def fit(self, X, y=None):
         """Fit the fuzzy graph and, in embedding mode, the training layout."""
@@ -345,7 +358,10 @@ class UMAP(BaseEstimator, TransformerMixin):
             embedding = _fit_spectral_embedding(graph, rng, **embedding_options)
         if embedding is not None:
             embedding[np.diff(graph.indptr) == 0] = np.nan
-        return self._store_fit(n_features, transform_fit, graph, n_neighbors, embedding)
+        return self._store_fit(
+            n_features, transform_fit, graph, n_neighbors, embedding,
+            embedding_options=embedding_options if embedding_mode else None,
+        )
 
     def fit_transform(self, X, y=None, **fit_params):
         """Fit and return the fitted output."""
@@ -362,7 +378,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         return self.graph_
 
     def transform(self, X):
-        """Return the fitted output or a held-out query-to-training COO graph."""
+        """Return fitted output or transform held-out features into a layout or COO graph."""
 
         self._validate_mode()
         if not hasattr(self, "_graph_transform_fit"):
@@ -389,7 +405,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         if np.array_equal(queries.view(np.uint32), training.view(np.uint32)):
             return self.embedding_ if self.transform_mode == "embedding" else self.graph_
         if self.transform_mode == "embedding":
-            raise NotImplementedError("out-of-sample embedding transform is not implemented")
+            return self._transform_embedding(training, queries, metric)
 
         shape, row, col, data = _native._transform_dense_graph(
             training.ravel().tolist(),
@@ -408,6 +424,35 @@ class UMAP(BaseEstimator, TransformerMixin):
             ),
             shape=shape,
         )
+
+    def _transform_embedding(self, training, queries, metric):
+        fitted = self.embedding_
+        seed = self.transform_seed
+        if not isinstance(seed, numbers.Integral):
+            raise ValueError("embedding transform requires transform_seed to be an integer seed")
+        if not 0 <= seed <= 2**32 - 1:
+            raise ValueError("Seed must be between 0 and 2**32 - 1")
+        fit_epochs = None if self.n_epochs is None else _validate_epochs(self.n_epochs)
+        repulsion, negative_rate = self._sampling_options()
+        n_components = fitted.shape[1]
+        coordinates = _native._transform_dense_embedding(
+            training.ravel().tolist(),
+            training.shape[0],
+            queries.ravel().tolist(),
+            queries.shape[0],
+            training.shape[1],
+            fitted.ravel().tolist(),
+            k=self.n_neighbors_,
+            metric=metric,
+            n_components=n_components,
+            fit_epochs=fit_epochs,
+            repulsion_strength=repulsion,
+            negative_sample_rate=negative_rate,
+            transform_seed=int(seed),
+            local_connectivity=self.local_connectivity,
+            **self._embedding_transform_options,
+        )
+        return np.asarray(coordinates, dtype=np.float32).reshape(queries.shape[0], n_components)
 
     def inverse_transform(self, X):
         """Reject inverse transforms."""
@@ -433,7 +478,9 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise ValueError("set_op_mix_ratio must be between 0 and 1, inclusive")
         return None if (connectivity, mix) == (1.0, 1.0) else (connectivity, mix)
 
-    def _store_fit(self, n_features, transform_fit, graph, n_neighbors, embedding):
+    def _store_fit(
+        self, n_features, transform_fit, graph, n_neighbors, embedding, *, embedding_options=None
+    ):
         if graph is not None:
             self.graph_ = graph
             self.n_neighbors_ = n_neighbors
@@ -446,6 +493,11 @@ class UMAP(BaseEstimator, TransformerMixin):
             del self.embedding_
         self.n_features_in_ = n_features
         self._graph_transform_fit = transform_fit
+        self._embedding_transform_options = None
+        if embedding_options is not None:
+            self._embedding_transform_options = {
+                name: embedding_options[name] for name in ("a", "b", "learning_rate")
+            }
         return self
 
     def _validate_embedding_optimizer(self):
@@ -485,17 +537,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise ValueError("n_components must be a whole number")
         n_components = int(n_components)
 
-        n_epochs = self.n_epochs
-        if n_epochs is None:
-            n_epochs = _default_epochs(n_rows)
-        elif isinstance(n_epochs, (list, tuple)):
-            raise NotImplementedError("embedding supports a scalar n_epochs")
-        elif (
-            isinstance(n_epochs, bool)
-            or not isinstance(n_epochs, numbers.Integral)
-            or n_epochs < 0
-        ):
-            raise ValueError("n_epochs must be a nonnegative integer")
+        n_epochs = _default_epochs(n_rows) if self.n_epochs is None else _validate_epochs(self.n_epochs)
 
         seed = self.random_state
         if seed is None and n_rows == 1:
@@ -517,18 +559,13 @@ class UMAP(BaseEstimator, TransformerMixin):
 
         a, b = _resolve_curve_params(self.spread, self.min_dist, self.a, self.b)
         learning_rate = _finite_float(self.learning_rate, "learning_rate")
-        repulsion_strength = _finite_float(self.repulsion_strength, "repulsion_strength")
-        negative_sample_rate = _finite_float(self.negative_sample_rate, "negative_sample_rate")
         if learning_rate < 0:
             raise ValueError("learning_rate must be nonnegative")
-        if repulsion_strength < 0:
-            raise ValueError("repulsion_strength must be nonnegative")
-        if negative_sample_rate <= 0:
-            raise ValueError("negative_sample_rate must be positive")
+        repulsion_strength, negative_sample_rate = self._sampling_options()
 
         return dict(
             n_components=n_components,
-            n_epochs=int(n_epochs),
+            n_epochs=n_epochs,
             seed=int(seed),
             a=a,
             b=b,
@@ -536,6 +573,15 @@ class UMAP(BaseEstimator, TransformerMixin):
             repulsion_strength=repulsion_strength,
             negative_sample_rate=negative_sample_rate,
         )
+
+    def _sampling_options(self):
+        repulsion_strength = _finite_float(self.repulsion_strength, "repulsion_strength")
+        negative_sample_rate = _finite_float(self.negative_sample_rate, "negative_sample_rate")
+        if repulsion_strength < 0:
+            raise ValueError("repulsion_strength must be nonnegative")
+        if negative_sample_rate <= 0:
+            raise ValueError("negative_sample_rate must be positive")
+        return repulsion_strength, negative_sample_rate
 
     def _embedding_init(self, n_rows, n_components):
         if isinstance(self.init, str):

@@ -117,13 +117,46 @@ cargo test -p umap-core --locked --test transform_embedding_fixture
   with maximum transform error 0.017395973. The next probe should compare
   the public COO memberships with candidate Manhattan accumulation widths
   and compare the smoothing scale and normalization using those distances.
-- Estimator integration needs the original fit epoch setting, effective fit
-  neighbor count, layout curve and learning parameters, disconnection
-  threshold, and transform seed. It should handle the full fitted-input
-  identity shortcut before calling Rust. Existing bindings continue to
-  expose their current graph and fitting entry points.
-- Coverage is for the locked Windows x86-64 stack and the existing exact,
-  dense feature search with fit local connectivity one and Euclidean layout
-  distances. A reference run on the target stack is needed to establish
-  bitwise portability. Approximate-neighbor and sparse transforms need
-  their own feature graph parity and end-to-end probes.
+- The core fixture records exact, dense feature search with fit local
+  connectivity one and Euclidean layout distances. Approximate-neighbor and
+  sparse transforms need their own feature graph parity and end-to-end probes.
+
+## Python estimator
+
+Public `set_params` probes on one fitted model distinguished the settings used
+by a held-out embedding call. The estimator passes the current `n_epochs`,
+`transform_seed`, `repulsion_strength`, and `negative_sample_rate` to Rust.
+The fitted effective neighbor count, feature metric, output width, resolved
+curve, and initial learning rate are reused. Changes to `n_neighbors`,
+`metric`, `n_components`, `random_state`, `a`, `b`, `spread`, `min_dist`, or
+`learning_rate` take effect at the next successful fit. `transform_seed` accepts
+integers from 0 to `2**32 - 1`, defaults to 42, and is validated on held-out
+embedding calls. Each call begins with fresh transform RNG state.
+
+The estimator copies dense training input at fit and returns the fitted
+`embedding_` object if the normalized query bits match all fitted input rows.
+Held-out queries use `embedding_` as fixed coordinates. Transform errors and
+failed refits preserve the fitted graph, embedding, feature input, and fit-time
+parameters. Graph-mode calls retain the fitted CSR shortcut and held-out COO
+output.
+
+The serial transform uses exact dense feature search and Euclidean layout
+distances. The estimator uses the current `local_connectivity` to construct
+the directed query graph. The graph-options fixture also checks positive
+epochs with training connectivity 2.0. The Python estimator uses the
+default disconnection distance. The public wheel captures
+`disconnection_distance` at fit, and the native binding accepts a finite
+cutoff with supplied fixed tails in the threshold and disconnected-row probes.
+
+On Windows x86-64 and Ubuntu 24.04 x86-64, fresh public 0.6.0 captures matched
+the same 41,040 held-out coordinate bits. The installed wheels matched all
+41,040 through the native binding. Through `UMAP.fit` and `transform`, each
+wheel matched 1,300 fitted bits and 41,014 held-out bits, including the original
+45-epoch case. The end-to-end comparison covers random and distinct explicit
+initialization with the default cutoff. It includes 10,000- and 10,001-query
+batches, and repeated transforms matched all 41,008 repeated-query bits. The
+live-parameter probes matched all 60 bits for the seed endpoints, epoch and
+sampling changes, and fitted geometry settings. An additional spectral case
+matched 16 fitted and 10 optimized coordinate bits on both platforms. The two
+wheels reproduced the equal-distance COO and Manhattan differences above with
+the same per-coordinate agreement and maximum absolute errors.

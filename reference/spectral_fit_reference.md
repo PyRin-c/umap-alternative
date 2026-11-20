@@ -66,22 +66,16 @@ solver errors. Large-input spectral compatibility and alternate
 initializers are outside the verified domain.
 [Initialization reference](spectral_reference.md)
 
-The following residuals reproduced on Windows and Ubuntu with public-wheel
-probes.
+The Rust layout replay now matches the 59-row schedule boundary and the
+six- and eight-component attraction boundaries when given the observed CSR.
+The broader estimator regression still covers the recorded datasets above.
+[Handoff report](spectral_handoff_reference.md)
 
-- At 100 epochs the 59-row case matches the graph and differs in all 118
-  coordinates, with maximum absolute error `0.30931425`. The sampled
-  epoch of edges `(10, 36)` and `(36, 10)` differs because of interval
-  rounding. The 30-epoch checkpoint matches exactly.
-- At 100 epochs the weighted six-component and nine-row eight-component
-  cases match the graph and differ by up to 10 and 14 ULP respectively.
-  The handoff report reproduces an attraction-only residual in the
-  eight-component probe. [Handoff report](spectral_handoff_reference.md)
-- On the weighted eight-row Manhattan probe, two reciprocal graph
-  memberships differ by one ULP. Three coordinate bits differ at zero
-  epochs and all 16 differ at 11 epochs, with maximum absolute error
-  `0.512455` at 11 epochs. Replaying the public CSR through the project
-  spectral path reproduced the reference bits at 0, 11, 30, and 100 epochs.
+On the weighted eight-row Manhattan probe, two reciprocal graph
+memberships differ by one ULP. Three coordinate bits differ at zero
+epochs and all 16 differ at 11 epochs, with maximum absolute error
+`0.512455` at 11 epochs. Replaying the public CSR through the project
+spectral path reproduced the reference bits at 0, 11, 30, and 100 epochs.
 
 ## Regeneration
 

@@ -252,7 +252,9 @@ pub fn fit_dense_embedding_seeded(
 /// Fit a serial seeded embedding with optional fuzzy graph settings.
 ///
 /// With explicit settings, retain weak memberships as stored zeros using
-/// the public compatibility fit's epoch-dependent threshold.
+/// the public compatibility fit's epoch-dependent threshold. Cosine and
+/// correlation also use that threshold with default settings and mark
+/// disconnected rows with NaN coordinates after optimization.
 pub fn fit_dense_embedding_seeded_with_graph_options(
     data: &[f32],
     n_rows: usize,
@@ -263,11 +265,27 @@ pub fn fit_dense_embedding_seeded_with_graph_options(
 ) -> Result<DenseEmbedding, DenseEmbeddingFitError> {
     let (mut graph, coordinates, caller_rng) =
         prepare_dense_embedding(data, n_rows, n_features, config, graph_options)?;
-    if graph_options.is_some() {
+    let angular = config.metric.is_angular();
+    if graph_options.is_some() || angular {
         zero_weak_memberships(&mut graph, config.n_epochs, false);
     }
     let mut caller_rng = caller_rng.unwrap_or_else(|| Mt19937::new(explicit_seed));
-    finish_seeded_embedding(graph, coordinates, &config.layout_config(), &mut caller_rng)
+    let mut embedding =
+        finish_seeded_embedding(graph, coordinates, &config.layout_config(), &mut caller_rng)?;
+    if angular {
+        let rows = embedding.graph.indptr.windows(2);
+        for (row, coordinates) in
+            rows.zip(embedding.coordinates.chunks_exact_mut(config.n_components))
+        {
+            if embedding.graph.data[row[0]..row[1]]
+                .iter()
+                .all(|&weight| weight == 0.0)
+            {
+                coordinates.fill(f32::NAN);
+            }
+        }
+    }
+    Ok(embedding)
 }
 
 pub(crate) fn zero_weak_memberships(graph: &mut CsrGraph, n_epochs: usize, densmap: bool) {

@@ -52,11 +52,32 @@ Finite input values can overflow float32 cosine products. The extreme-value
 probe returns 12 CSR and 6 COO NaN weights in the public model. The native
 graph APIs reject selected non-finite distances.
 
-## Python scope
+## Embedding and held-out ranking
 
-Python exposes dense cosine and correlation for exhaustive graph fitting and
-held-out graph queries. The embedding, approximate search, and update
-adapters are follow-up work. In a public probe with 96 training rows, 4 query
+On Windows and Ubuntu WSL, 20 fixed-seed compatibility fits reproduce the
+CSR graph and all 280 fitted and 140 transformed coordinate bits of the
+host's public wheel. The cases cover zero and positive epochs, random,
+explicit and spectral initialization, changing graph connectivity and mix,
+and the two extreme transform seeds. Antipodal rows at distance 2 and
+isolated rows exercise the inclusive cutoff and NaN coordinates. The
+reference files differ between hosts for two tied fits and one connectivity
+fit, so the regression uses the respective host's fixture. The standalone
+cosine query also exercises the batch-dependent maximum membership used
+for scheduling.
+
+Python resolves ties within the selected ranks and at the selection
+boundary using NumPy's ordering on the original float32 distance row.
+The Rust search computes one row at a time and calls this ranking step only
+when a tie can change the selected order. All angular graph-mode fixture
+coordinates and weights now match in Python. A repeated-row sweep on
+Windows with 7, 17, 33, 65 and 129 training rows agreed with NumPy argsort
+for all 4,968 recorded query columns. The default native order used by C
+still uses the training index for equal distances. The C11 smoke client
+replays the explicit-layout public fit and a held-out query without ties
+for both metrics.
+
+Angular inverse transform, update and density are outside the current
+embedding path. In a public probe with 96 training rows, 4 query
 rows, 7 features and `k=5`, forcing approximate search kept the training CSR
 support for both metrics but changed 324 of 486 cosine weight bits.
 Held-out support differed at 6 cosine and 4 correlation coordinates.
@@ -73,4 +94,6 @@ Use the Windows or Ubuntu fixture suffix for the host being tested.
 ```sh
 uv run --project reference --locked python -I reference/generate_dense_angular_fixture.py \
   --output reference/fixtures/umap-learn-0.6.0-dense-angular-windows-x86_64.json
+uv run --project reference --locked python -I reference/generate_dense_angular_embedding_fixture.py \
+  --output reference/fixtures/umap-learn-0.6.0-dense-angular-embedding-windows-x86_64.json --check
 ```

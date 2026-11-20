@@ -1,4 +1,4 @@
-use pyo3::exceptions::{PyNotImplementedError, PyValueError};
+use pyo3::exceptions::{PyNotImplementedError, PyRuntimeWarning, PyValueError};
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
@@ -32,8 +32,8 @@ use umap_core::rng::Mt19937;
 use umap_core::sparse::fit_sparse_graph_with_options;
 use umap_core::transform::{
     CooGraph, DenseEmbeddingTransformConfig, transform_dense_embedding_with_options,
-    transform_dense_graph_with_cutoff, transform_embedding_from_graph,
-    transform_ranked_neighbors_graph,
+    transform_dense_graph_with_cutoff, transform_dense_graph_with_tie_ranking,
+    transform_embedding_from_graph, transform_ranked_neighbors_graph,
 };
 use umap_core::update::{DenseUpdateConfig, update_dense_embedding};
 
@@ -648,7 +648,7 @@ fn _fit_supplied_neighbors_graph(
 #[pyfunction]
 #[pyo3(signature = (
     training, n_training_rows, queries, n_query_rows, n_features, k, metric, *,
-    local_connectivity=1.0, disconnection_distance=None, ranked_columns=None
+    local_connectivity=1.0, disconnection_distance=None, ranked_columns=None, rank_ties=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn _transform_dense_graph(
@@ -663,6 +663,7 @@ fn _transform_dense_graph(
     local_connectivity: f64,
     disconnection_distance: Option<f32>,
     ranked_columns: Option<Vec<i32>>,
+    rank_ties: Option<Py<PyAny>>,
 ) -> PyResult<CooComponents> {
     let options = GraphOptions::new(local_connectivity, 1.0)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
@@ -683,25 +684,83 @@ fn _transform_dense_graph(
             options,
         )?
     } else {
-        let metric = parse_metric(metric)?;
-        py.detach(|| {
-            transform_dense_graph_with_cutoff(
-                &training,
+        feature_query_graph(
+            py,
+            &training,
+            &queries,
+            (n_training_rows, n_query_rows, n_features),
+            k,
+            parse_metric(metric)?,
+            disconnection_distance,
+            options,
+            rank_ties.as_ref(),
+        )?
+    };
+    Ok(((n_rows, n_cols), row, col, data))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn feature_query_graph(
+    py: Python<'_>,
+    training: &[f32],
+    queries: &[f32],
+    shape: (usize, usize, usize),
+    k: usize,
+    metric: DistanceMetric,
+    cutoff: Option<f32>,
+    options: GraphOptions,
+    rank_ties: Option<&Py<PyAny>>,
+) -> PyResult<CooGraph> {
+    let (n_training_rows, n_query_rows, n_features) = shape;
+    let cutoff = cutoff
+        .or_else(|| metric.default_disconnection_distance())
+        .unwrap_or(f32::INFINITY);
+    py.detach(|| {
+        let mut callback_error = None;
+        let graph = if let Some(rank_ties) = rank_ties {
+            transform_dense_graph_with_tie_ranking(
+                training,
                 n_training_rows,
-                &queries,
+                queries,
                 n_query_rows,
                 n_features,
                 k,
                 metric,
-                disconnection_distance
-                    .or_else(|| metric.default_disconnection_distance())
-                    .unwrap_or(f32::INFINITY),
+                cutoff,
+                options,
+                |distances, width| {
+                    let ranked = Python::attach(|py| {
+                        rank_ties
+                            .call1(py, (distances.to_vec(), width))?
+                            .extract::<Vec<usize>>(py)
+                    });
+                    match ranked {
+                        Ok(columns) => columns,
+                        Err(error) => {
+                            callback_error = Some(error);
+                            Vec::new()
+                        }
+                    }
+                },
+            )
+        } else {
+            transform_dense_graph_with_cutoff(
+                training,
+                n_training_rows,
+                queries,
+                n_query_rows,
+                n_features,
+                k,
+                metric,
+                cutoff,
                 options,
             )
-        })
-        .map_err(|error| PyValueError::new_err(error.to_string()))?
-    };
-    Ok(((n_rows, n_cols), row, col, data))
+        };
+        if let Some(error) = callback_error {
+            return Err(error);
+        }
+        graph.map_err(|error| PyValueError::new_err(error.to_string()))
+    })
 }
 
 fn precomputed_query_graph(
@@ -729,7 +788,7 @@ fn precomputed_query_graph(
     training, n_training_rows, queries, n_query_rows, n_features, fitted_embedding,
     *, k, metric, n_components, a, b, learning_rate, fit_epochs, repulsion_strength,
     negative_sample_rate, transform_seed, disconnection_distance=None, local_connectivity=1.0,
-    ranked_columns=None
+    ranked_columns=None, rank_ties=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn _transform_dense_embedding(
@@ -753,6 +812,7 @@ fn _transform_dense_embedding(
     disconnection_distance: Option<f32>,
     local_connectivity: f64,
     ranked_columns: Option<Vec<i32>>,
+    rank_ties: Option<Py<PyAny>>,
 ) -> PyResult<Vec<f32>> {
     let options = GraphOptions::new(local_connectivity, 1.0)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
@@ -774,7 +834,7 @@ fn _transform_dense_embedding(
         transform_seed,
         disconnection_distance,
     };
-    if precomputed {
+    let ranked_graph = if precomputed {
         let graph = precomputed_query_graph(
             py,
             ranked_columns.as_deref(),
@@ -784,6 +844,32 @@ fn _transform_dense_embedding(
             disconnection_distance.unwrap_or(f32::INFINITY),
             options,
         )?;
+        Some(graph)
+    } else if let Some(rank_ties) = rank_ties.as_ref() {
+        let graph = feature_query_graph(
+            py,
+            &training,
+            &queries,
+            (n_training_rows, n_query_rows, n_features),
+            k,
+            config.metric,
+            disconnection_distance,
+            options,
+            Some(rank_ties),
+        )?;
+        if fit_epochs.is_some_and(|epochs| epochs < 3) {
+            let message = if graph.data.iter().any(|&weight| weight > 0.0) {
+                c"divide by zero encountered in scalar divide"
+            } else {
+                c"invalid value encountered in scalar divide"
+            };
+            PyErr::warn(py, py.get_type::<PyRuntimeWarning>().as_any(), message, 2)?;
+        }
+        Some(graph)
+    } else {
+        None
+    };
+    if let Some(graph) = ranked_graph {
         return py
             .detach(|| transform_embedding_from_graph(&graph, &fitted_embedding, &config))
             .map_err(|error| PyValueError::new_err(error.to_string()));

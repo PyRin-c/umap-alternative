@@ -1031,6 +1031,60 @@ static void check_precomputed_transform(void) {
     CHECK(umap_capi_coo_graph_release(graph) == UMAP_CAPI_STATUS_OK);
 }
 
+static void check_angular_embedding(void) {
+    /* Public explicit-layout checkpoints with a held-out query without distance ties. */
+    const float training[] = {
+        0.12f, 0.07f, 1.2f, 1.0f, 4.0f, 2.0f, 0.78f, 1.2f, 3.1f,
+        2.2f, -3.0f, 0.5f, -0.1f, 0.7f, 6.0f, 0.3f, -0.5f, -0.9f, 5.0f, 6.0f, 7.0f,
+    };
+    const float initial[] = {-2, 1, 0, -3, 2, 4, 5, -2, 3, 8, 6, 1, -4, 3};
+    const float queries[] = {1.0f, 0.11f, 0.75f};
+    const uint32_t fitted_bits[][14] = {
+        {1081804210u, 1088273287u, 1082485350u, 1083985519u, 1077001725u, 1086974842u,
+            1091952487u, 1080846518u, 1083662418u, 1086617242u, 1092910582u, 1082782241u,
+            1069105222u, 1087615618u},
+        {1084508312u, 1086521420u, 1078867380u, 1084403579u, 1078716226u, 1087604352u,
+            1089629265u, 1079381149u, 1082688324u, 1088890533u, 1087555106u, 1076084484u,
+            1071976167u, 1085871971u},
+    };
+    const uint32_t query_bits[][2] = {{1074058937u, 1090212974u}, {1087046709u, 1082926685u}};
+    const umap_capi_metric_t metrics[] = {UMAP_CAPI_METRIC_COSINE, UMAP_CAPI_METRIC_CORRELATION};
+    const umap_capi_dense_transform_input_t input = {
+        .n_training_rows = 7, .n_query_rows = 1, .n_features = 3,
+        .training_len = COUNT(training), .queries_len = COUNT(queries),
+        .training = training, .queries = queries,
+    };
+    for (size_t metric = 0; metric < COUNT(metrics); ++metric) {
+        const umap_capi_dense_embedding_config_t options = {
+            .n_neighbors = 4, .n_components = 2, .n_epochs = 9, .a = 1.2, .b = 0.9,
+            .learning_rate = 1.0, .repulsion_strength = 1.0, .negative_sample_rate = 5.0,
+            .metric = metrics[metric], .init = UMAP_CAPI_INIT_EXPLICIT, .seed = 42,
+            .init_len = COUNT(initial), .init_coordinates = initial,
+        };
+        umap_capi_dense_embedding_t *fit = NULL;
+        CHECK(umap_capi_fit_dense_embedding_seeded(training, COUNT(training), 7, 3, &options, &fit)
+            == UMAP_CAPI_STATUS_OK);
+        umap_capi_dense_embedding_view_t view = {0};
+        CHECK(umap_capi_dense_embedding_view(fit, &view) == UMAP_CAPI_STATUS_OK);
+        CHECK(view.n_rows == 7 && view.n_components == 2 && view.coordinates_len == COUNT(initial));
+        CHECK(view.graph.n_rows == 7 && view.graph.data_len == 28);
+        check_bits(view.coordinates, fitted_bits[metric], view.coordinates_len);
+
+        const umap_capi_dense_transform_config_t config = {
+            .n_neighbors = 4, .n_components = 2, .fit_epochs = 9, .a = 1.2, .b = 0.9,
+            .learning_rate = 1.0, .repulsion_strength = 1.0, .negative_sample_rate = 5.0,
+            .local_connectivity = 1.0, .transform_seed = UINT32_MAX, .metric = metrics[metric],
+            .fit_epochs_mode = UMAP_CAPI_FIT_EPOCHS_EXPLICIT, .disconnection_distance = 2.0f,
+        };
+        umap_capi_dense_transform_t *transform =
+            run_transform(&input, view.coordinates, view.coordinates_len, &config);
+        const umap_capi_dense_transform_view_t result = read_transform(transform, 1, 2);
+        check_bits(result.coordinates, query_bits[metric], result.coordinates_len);
+        CHECK(umap_capi_dense_transform_release(transform) == UMAP_CAPI_STATUS_OK);
+        CHECK(umap_capi_dense_embedding_release(fit) == UMAP_CAPI_STATUS_OK);
+    }
+}
+
 int main(void) {
     check_graph_only();
     check_graph_options();
@@ -1046,5 +1100,6 @@ int main(void) {
     check_dense_update();
     check_dense_densmap();
     check_precomputed_transform();
+    check_angular_embedding();
     return EXIT_SUCCESS;
 }

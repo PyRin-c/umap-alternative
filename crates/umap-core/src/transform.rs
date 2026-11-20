@@ -378,7 +378,13 @@ pub fn transform_dense_embedding_with_options(
 ) -> Result<Vec<f32>, DenseEmbeddingTransformError> {
     use DenseEmbeddingTransformError as Error;
 
-    let cutoff = embedding_cutoff(config)?;
+    let cutoff = embedding_cutoff(
+        config,
+        config
+            .metric
+            .default_disconnection_distance()
+            .unwrap_or(f32::INFINITY),
+    )?;
     let graph = transform_dense_graph_with_cutoff(
         training,
         n_training_rows,
@@ -408,7 +414,7 @@ pub fn transform_precomputed_embedding(
     let graph = transform_precomputed_graph(
         input,
         config.n_neighbors,
-        embedding_cutoff(config)?,
+        embedding_cutoff(config, f32::INFINITY)?,
         options,
     )
     .map_err(DenseEmbeddingTransformError::Graph)?;
@@ -417,8 +423,9 @@ pub fn transform_precomputed_embedding(
 
 fn embedding_cutoff(
     config: &DenseEmbeddingTransformConfig,
+    default: f32,
 ) -> Result<f32, DenseEmbeddingTransformError> {
-    let cutoff = config.disconnection_distance.unwrap_or(f32::INFINITY);
+    let cutoff = config.disconnection_distance.unwrap_or(default);
     if cutoff.is_nan() || cutoff <= 0.0 {
         return Err(DenseEmbeddingTransformError::InvalidDisconnectionDistance(
             cutoff,
@@ -761,6 +768,123 @@ pub fn transform_dense_graph_with_cutoff(
     cutoff: f32,
     options: GraphOptions,
 ) -> Result<CooGraph, DenseGraphTransformError> {
+    transform_dense_graph_with_selector(
+        training,
+        n_training_rows,
+        queries,
+        n_query_rows,
+        n_features,
+        k,
+        metric,
+        cutoff,
+        options,
+        |_, candidates| {
+            sort_closest_neighbors(candidates, k);
+            Ok(())
+        },
+    )
+}
+
+/// Build a dense query graph, resolving selected distance ties with a caller's ranking.
+///
+/// The callback sees the full distance row in training-column order and the
+/// requested count. It returns the first `k` distinct columns in nondecreasing
+/// distance order. Rows without a tie within the first `k` ranks or at the
+/// cutoff rank use native partial selection alone.
+#[allow(clippy::too_many_arguments)]
+pub fn transform_dense_graph_with_tie_ranking(
+    training: &[f32],
+    n_training_rows: usize,
+    queries: &[f32],
+    n_query_rows: usize,
+    n_features: usize,
+    k: usize,
+    metric: DistanceMetric,
+    cutoff: f32,
+    options: GraphOptions,
+    mut rank_ties: impl FnMut(&[f32], usize) -> Vec<usize>,
+) -> Result<CooGraph, DenseGraphTransformError> {
+    let mut distances = Vec::new();
+    let mut seen = Vec::new();
+    transform_dense_graph_with_selector(
+        training,
+        n_training_rows,
+        queries,
+        n_query_rows,
+        n_features,
+        k,
+        metric,
+        cutoff,
+        options,
+        |query, candidates| {
+            let selected = sort_closest_neighbors(candidates, k);
+            let boundary = selected[k - 1].distance;
+            let tied = selected
+                .windows(2)
+                .any(|pair| pair[0].distance == pair[1].distance)
+                || (k < candidates.len() && boundary == candidates[k].distance);
+            if !tied {
+                return Ok(());
+            }
+            let strictly_closer =
+                candidates[..k].partition_point(|neighbor| neighbor.distance < boundary);
+
+            distances.resize(n_training_rows, 0.0);
+            for candidate in candidates.iter() {
+                distances[candidate.index] = candidate.distance;
+            }
+            let columns = rank_ties(&distances, k);
+            if columns.len() != k {
+                return Err(DenseGraphTransformError::InvalidRank {
+                    query,
+                    column: n_training_rows,
+                });
+            }
+            seen.resize(n_training_rows, false);
+            seen.fill(false);
+            let mut previous = f32::NEG_INFINITY;
+            for (rank, (candidate, column)) in candidates.iter_mut().zip(columns).enumerate() {
+                if column >= n_training_rows
+                    || seen[column]
+                    || distances[column] < previous
+                    || distances[column] > boundary
+                    || (rank < strictly_closer && distances[column] == boundary)
+                {
+                    return Err(DenseGraphTransformError::InvalidRank { query, column });
+                }
+                let distance = distances[column];
+                if !distance.is_finite() {
+                    return Err(DenseGraphTransformError::NonFiniteDistance {
+                        query,
+                        training: column,
+                        distance,
+                    });
+                }
+                seen[column] = true;
+                previous = distance;
+                *candidate = Neighbor {
+                    index: column,
+                    distance,
+                };
+            }
+            Ok(())
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn transform_dense_graph_with_selector(
+    training: &[f32],
+    n_training_rows: usize,
+    queries: &[f32],
+    n_query_rows: usize,
+    n_features: usize,
+    k: usize,
+    metric: DistanceMetric,
+    cutoff: f32,
+    options: GraphOptions,
+    mut select: impl FnMut(usize, &mut [Neighbor]) -> Result<(), DenseGraphTransformError>,
+) -> Result<CooGraph, DenseGraphTransformError> {
     if n_features == 0 {
         return Err(DenseGraphTransformError::NoFeatures);
     }
@@ -782,7 +906,7 @@ pub fn transform_dense_graph_with_cutoff(
                     distance: metric.distance(query, candidate),
                 },
             ));
-            sort_closest_neighbors(candidates, k);
+            select(row, candidates)
         },
     )
 }
@@ -842,6 +966,7 @@ pub fn transform_precomputed_graph(
                 }));
                 sort_closest_neighbors(candidates, k);
             }
+            Ok(())
         },
     )
 }
@@ -893,7 +1018,7 @@ fn build_transform_graph(
     k: usize,
     cutoff: f32,
     options: GraphOptions,
-    mut fill_candidates: impl FnMut(usize, &mut Vec<Neighbor>),
+    mut fill_candidates: impl FnMut(usize, &mut Vec<Neighbor>) -> Result<(), DenseGraphTransformError>,
 ) -> Result<CooGraph, DenseGraphTransformError> {
     if !(1..=n_training_rows).contains(&k) {
         return Err(DenseGraphTransformError::Training(KnnError::InvalidK {
@@ -916,7 +1041,7 @@ fn build_transform_graph(
     let mut candidates = Vec::new();
     for query_index in 0..n_query_rows {
         candidates.clear();
-        fill_candidates(query_index, &mut candidates);
+        fill_candidates(query_index, &mut candidates)?;
         for neighbor in &candidates[..k] {
             if !neighbor.distance.is_finite() {
                 return Err(DenseGraphTransformError::NonFiniteDistance {

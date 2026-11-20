@@ -49,19 +49,6 @@ def assert_graph(graph, expected):
     np.testing.assert_array_equal(graph.data.view(np.uint32), expected["data_bits"])
 
 
-def query_with_index_ties(case, metric, expected):
-    columns = expected["col"].copy()
-    if case == "held_out_ties":
-        columns[2:4] = [4, 5]
-    elif case == "zero_constant_repeated":
-        if metric == "cosine":
-            columns[7] = 0
-        else:
-            columns[9:11] = [4, 6]
-        columns[12:14] = [4, 6]
-    return expected | {"col": columns}
-
-
 @pytest.mark.parametrize("metric", METRICS)
 @pytest.mark.parametrize("case", FIXTURE["cases"])
 def test_dense_angular_graph_mode(case, metric):
@@ -81,13 +68,14 @@ def test_dense_angular_graph_mode(case, metric):
     assert_graph(model.fit_transform(training), expected["fit"])
     assert model.transform(training.copy()) is model.graph_
     if queries is not None:
-        assert_graph(model.transform(queries), query_with_index_ties(case, metric, expected["transform"]))
+        assert_graph(model.transform(queries), expected["transform"])
 
 
 @pytest.mark.parametrize("metric", METRICS)
-def test_dense_angular_python_scope_is_graph_mode(metric):
-    with pytest.raises(NotImplementedError, match="requires transform_mode='graph'"):
-        UMAP(metric=metric).fit([[1, 2], [-1, -2], [3, 4]])
+def test_dense_angular_density_is_outside_the_embedding_path(metric):
+    with pytest.raises(NotImplementedError, match="density fitting with angular distances"):
+        UMAP(metric=metric, random_state=42, n_jobs=1, compatibility_layout=True,
+             output_dens=True).fit([[1, 2], [-1, -2], [3, 4]])
 
 
 def test_sparse_correlation_is_outside_the_dense_angular_path():

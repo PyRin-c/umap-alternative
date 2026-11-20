@@ -1,11 +1,63 @@
 //! Held-out dense transform checks against the public Windows graph fixture.
 
 use serde::Deserialize;
+use umap_core::fuzzy_graph::GraphOptions;
 use umap_core::neighbors::{DistanceMetric, KnnError};
-use umap_core::transform::{DenseGraphTransformError, transform_dense_graph};
+use umap_core::transform::{
+    DenseGraphTransformError, transform_dense_graph, transform_dense_graph_with_tie_ranking,
+};
 
 const FIXTURE: &str =
     include_str!("../../../reference/fixtures/umap-learn-0.6.0-transform-windows-x86_64.json");
+
+#[test]
+fn external_tie_ranking_is_used_only_when_selected_ranks_can_change() {
+    let training = [0.0, 1.0, -1.0, 2.0, -3.0];
+    let queries = [0.0, 0.25, 1.25];
+    let graph = transform_dense_graph_with_tie_ranking(
+        &training,
+        5,
+        &queries,
+        3,
+        1,
+        2,
+        DistanceMetric::Euclidean,
+        f32::INFINITY,
+        GraphOptions::default(),
+        |distances, k| {
+            assert_eq!(distances, [0.0, 1.0, 1.0, 2.0, 3.0]);
+            assert_eq!(k, 2);
+            vec![0, 2]
+        },
+    )
+    .unwrap();
+    assert_eq!(graph.col, [0, 2, 0, 1, 1, 3]);
+
+    for invalid in [
+        vec![],
+        vec![0, 6],
+        vec![0, 0],
+        vec![2, 0],
+        vec![1, 2],
+        vec![0, 3],
+    ] {
+        assert!(matches!(
+            transform_dense_graph_with_tie_ranking(
+                &training,
+                5,
+                &queries[..1],
+                1,
+                1,
+                2,
+                DistanceMetric::Euclidean,
+                f32::INFINITY,
+                GraphOptions::default(),
+                |_, _| invalid.clone(),
+            ),
+            Err(DenseGraphTransformError::InvalidRank { query: 0, .. })
+        ));
+    }
+}
 
 #[derive(Deserialize)]
 struct Fixture {

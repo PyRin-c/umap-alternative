@@ -225,6 +225,10 @@ def _fit_modern_initialization(components, rng, initial, n_components, rescale, 
     return coordinates
 
 
+def _rank_tied_dense_distances(distances, k):
+    return np.argsort(np.asarray(distances, dtype=np.float32))[:k].tolist()
+
+
 def _fit_neighbor_arrays(indices, distances, k, graph_options):
     if indices.dtype.kind == "f":
         if not np.all(np.isfinite(indices) & (indices == np.trunc(indices))):
@@ -405,7 +409,7 @@ class UMAP(BaseEstimator, TransformerMixin):
     Manhattan, and Chebyshev. Sparse features also accept cosine. Sparse
     storage is normalized on a copy, preserving repeated CSR entries for cosine.
     Zero-distance ties that exclude a row's self neighbor raise ``ValueError``.
-    Dense graph fits also accept cosine and correlation. For these two metrics
+    Dense graph and embedding fits also accept cosine and correlation. For these two metrics
     the ranked neighbors may omit self, and the default distance cutoff is 2.
     A singleton graph fit has no ``graph_``.
     Graph ``transform`` accepts dense features or precomputed distances.
@@ -557,8 +561,6 @@ class UMAP(BaseEstimator, TransformerMixin):
                 raise TypeError("sparse input is not supported in embedding mode")
             if y is not None:
                 raise TypeError("sparse input is not supported for supervised fitting")
-        if embedding_mode and angular:
-            raise NotImplementedError(f"metric={metric!r} requires transform_mode='graph'")
         if precomputed and y is not None:
             raise NotImplementedError(
                 "supervised fitting with metric='precomputed' is not implemented"
@@ -622,6 +624,8 @@ class UMAP(BaseEstimator, TransformerMixin):
                 "disconnection_distance with computed neighbors requires unsupervised dense features"
             )
         supplied = self._supplied_neighbors(n_rows, n_neighbors)
+        if embedding_mode and angular and (densmap is not None or self.output_dens):
+            raise NotImplementedError("density fitting with angular distances is not implemented")
         if embedding_mode and sparse and precomputed and (
             densmap is not None or getattr(self, "output_dens", False)
         ):
@@ -874,6 +878,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             local_connectivity=self.local_connectivity,
             disconnection_distance=getattr(self, "_transform_cutoff", None),
             ranked_columns=ranked_columns,
+            rank_ties=_rank_tied_dense_distances if metric in _ANGULAR_METRICS else None,
         )
         return coo_matrix(
             (
@@ -911,6 +916,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             local_connectivity=self.local_connectivity,
             disconnection_distance=cutoff,
             ranked_columns=ranked_columns,
+            rank_ties=_rank_tied_dense_distances if metric in _ANGULAR_METRICS else None,
             **self._embedding_transform_options,
         )
         return np.asarray(coordinates, dtype=np.float32).reshape(queries.shape[0], n_components)

@@ -168,6 +168,8 @@ enum MetricTag {
     Euclidean = 0,
     Manhattan = 1,
     Chebyshev = 2,
+    Cosine = 3,
+    Correlation = 4,
 }
 
 impl MetricTag {
@@ -176,6 +178,8 @@ impl MetricTag {
             0 => Some(Self::Euclidean),
             1 => Some(Self::Manhattan),
             2 => Some(Self::Chebyshev),
+            3 => Some(Self::Cosine),
+            4 => Some(Self::Correlation),
             _ => None,
         }
     }
@@ -185,6 +189,8 @@ impl MetricTag {
             Self::Euclidean => DistanceMetric::Euclidean,
             Self::Manhattan => DistanceMetric::Manhattan,
             Self::Chebyshev => DistanceMetric::Chebyshev,
+            Self::Cosine => DistanceMetric::Cosine,
+            Self::Correlation => DistanceMetric::Correlation,
         }
     }
 }

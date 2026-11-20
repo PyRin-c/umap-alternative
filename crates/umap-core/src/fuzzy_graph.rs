@@ -135,17 +135,17 @@ impl std::error::Error for GraphError {}
 ///
 /// For query row `i`, local connectivity one sets `rho_i` to the smallest
 /// strictly positive non-self distance (or zero if no such distance exists).
-/// A positive scale `sigma_i` is then found by bisection so the sum of directed
-/// memberships over the non-self candidates approaches `log2(k)`:
+/// A positive scale `sigma_i` is then found by the UMAP smooth-scale search
+/// (starting at one, expanding an unbounded upper bracket, then bisecting) so
+/// the sum of directed memberships over the non-self candidates approaches
+/// `log2(k)`:
 ///
 /// `sum(exp(-max(0, d_ij - rho_i) / sigma_i)) = log2(k)`.
 ///
-/// The bisection and membership arithmetic use `f32`, with an absolute sum
-/// tolerance of `1e-5`; this is a documented numerical policy, not a claim of
-/// bit-for-bit parity with any other implementation. If the zero-scale limit
-/// already meets the target, the scale is reduced to `0.001 * max_offset`;
-/// rows with no positive offset use a unit scale, though all their memberships
-/// are one.
+/// The scale search and membership arithmetic use `f32`, with an absolute sum
+/// tolerance of `1e-5`. If the zero-scale limit already meets the target, the
+/// scale is reduced to `0.001 * max_offset`; rows with no positive offset use
+/// a unit scale, though all their memberships are one.
 ///
 /// Directed memberships are combined with the fuzzy union
 /// `a + b - a * b`. The diagonal is omitted from the emitted graph, while all
@@ -313,31 +313,27 @@ fn distance_scale(row_index: usize, row: &[Neighbor], rho: f32) -> f32 {
     }
 
     let mut lower = 0.0_f32;
-    let mut upper = max_offset;
-    while membership_sum(&offsets, upper) < target {
-        upper *= 2.0;
-        if !upper.is_finite() {
-            return max_offset;
-        }
-    }
+    let mut upper = f32::INFINITY;
+    let mut middle = 1.0_f32;
 
     for _ in 0..64 {
-        let middle = (lower + upper) * 0.5;
-        if middle == lower || middle == upper {
-            break;
-        }
         let sum = membership_sum(&offsets, middle);
         if (sum - target).abs() <= 1e-5 {
-            return middle;
+            break;
         }
         if sum > target {
             upper = middle;
         } else {
             lower = middle;
         }
+        middle = if upper.is_infinite() {
+            middle * 2.0
+        } else {
+            (lower + upper) * 0.5
+        };
     }
 
-    ((lower + upper) * 0.5).max(f32::MIN_POSITIVE)
+    middle.max(f32::MIN_POSITIVE)
 }
 
 fn membership_sum(offsets: &[f32], sigma: f32) -> f32 {

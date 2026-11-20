@@ -67,13 +67,12 @@ impl std::error::Error for KnnError {}
 /// row, including the query itself, is considered as a candidate, so a valid
 /// `k` is in `1..=n_rows`.
 ///
-/// Distances are computed as Euclidean distances using `f32` subtraction,
-/// multiplication, accumulation (in feature order), and square root.  This
-/// makes rounding follow ordinary `f32` arithmetic but does not promise
-/// bit-for-bit equivalence with another implementation or hardware.  Ties are
-/// ordered deterministically by ascending candidate row index after
-/// [`f32::total_cmp`] distance ordering.  Matrix values must be finite; reject
-/// non-finite values rather than returning an undefined distance.
+/// Distances are computed from the `f32` inputs with `f64` subtraction,
+/// multiplication, accumulation (in feature order), and square root, then
+/// rounded to `f32` for the returned neighbor record. Ties are ordered
+/// deterministically by ascending candidate row index after [`f32::total_cmp`]
+/// distance ordering. Matrix values must be finite; reject non-finite values
+/// rather than returning an undefined distance.
 pub fn exhaustive_knn(
     data: &[f32],
     n_rows: usize,
@@ -134,11 +133,11 @@ fn euclidean_distance(left: &[f32], right: &[f32]) -> f32 {
     let squared_sum = left
         .iter()
         .zip(right)
-        .fold(0.0_f32, |sum, (&left_value, &right_value)| {
-            let difference = left_value - right_value;
+        .fold(0.0_f64, |sum, (&left_value, &right_value)| {
+            let difference = f64::from(left_value) - f64::from(right_value);
             sum + difference * difference
         });
-    squared_sum.sqrt()
+    squared_sum.sqrt() as f32
 }
 
 #[cfg(test)]

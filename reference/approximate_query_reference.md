@@ -125,3 +125,15 @@ uv run --project reference --locked --no-build python -I reference/probe_approxi
 cargo test --workspace --locked -j 2
 cargo test --release --locked -j 2 -p umap-core --test approximate_query -- --ignored --nocapture
 ```
+
+## Host-specific graph captures
+
+Generate `APPROXIMATE_QUERY_OBSERVATIONS` on the host running the Rust
+replay. The Windows and Ubuntu WSL public captures agree on the supplied
+training ranks and distances and all four CSR structures. They differ on
+60 of 97,622 CSR weight bits, with a maximum difference of two ULPs.
+The 4,095- and 4,096-row seven-feature cases differ at 18 weights each,
+and the two eleven-feature cases each differ at 12 weights. The
+fixed-training replay passes on both hosts with the matching capture.
+The cross-host difference also reproduces on the integration baseline
+before the live-training-offer and prepared traversal changes.

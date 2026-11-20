@@ -11,7 +11,7 @@ from scipy.sparse import coo_matrix, csc_matrix, csr_matrix, issparse, tril, tri
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial import Delaunay
 from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.utils.validation import check_array
+from sklearn.utils.validation import check_array, check_is_fitted
 
 from . import _native
 from ._curve import _finite_float, _resolve_curve_params
@@ -139,7 +139,7 @@ def _validate_epochs(n_epochs):
 
 def _fit_graph_embedding(
     graph, features, metric, rng, initial, *, spectral, n_epochs, n_components,
-    checkpoint_epochs=None, densmap=None, **layout_options
+    checkpoint_epochs=None, densmap=None, mask_isolated=True, **layout_options
 ):
     # Public graph_ retains the CSR entries whose memberships were zeroed.
     # Fits of at most ten epochs use the default budget for this cutoff.
@@ -185,7 +185,8 @@ def _fit_graph_embedding(
     )
     embedding = np.asarray(coordinates, dtype=np.float32).reshape(shape)
     # Isolated rows participate in normalization and sampling before masking.
-    embedding[np.diff(sampling_graph.indptr) == 0] = np.nan
+    if mask_isolated:
+        embedding[np.diff(sampling_graph.indptr) == 0] = np.nan
     history = None if checkpoint_epochs is None else [
         np.asarray(values, dtype=np.float32).reshape(shape) for values in snapshots
     ]
@@ -194,6 +195,33 @@ def _fit_graph_embedding(
 
 def _fit_spectral_embedding(graph, features, metric, rng, **layout_options):
     return _fit_graph_embedding(graph, features, metric, rng, None, spectral=True, **layout_options)
+
+
+_COMPOSITION_PARAMETERS = (
+    "a", "b", "n_components", "n_neighbors", "init", "metric", "random_state",
+    "set_op_mix_ratio", "local_connectivity", "target_metric", "target_weight",
+    "target_n_neighbors", "learning_rate", "min_dist", "spread", "repulsion_strength",
+    "negative_sample_rate", "transform_seed", "dens_lambda", "dens_frac", "dens_var_shift",
+)
+
+
+def _composition_epochs(value):
+    if value is None:
+        return (-1,)
+    if isinstance(value, (tuple, list, np.ndarray)):
+        return tuple(value)
+    return (value,)
+
+
+def _composition_curves(estimator):
+    if isinstance(estimator.n_components, tuple):
+        return estimator._combined_curves
+    layout = getattr(estimator, "_embedding_transform_options", None)
+    if layout is not None:
+        return ((layout["a"], layout["b"]),)
+    return (_resolve_curve_params(
+        spread=estimator.spread, min_dist=estimator.min_dist, a=estimator.a, b=estimator.b,
+    ),)
 
 
 def _modern_rng_state(rng):
@@ -935,6 +963,71 @@ class UMAP(BaseEstimator, TransformerMixin):
             inverse_cutoff=transform_cutoff,
             inverse_distances=inverse_distances,
         )
+
+    def __add__(self, other):
+        return self._combine(other, "union")
+
+    def __mul__(self, other):
+        return self._combine(other, "intersection")
+
+    def __sub__(self, other):
+        return self._combine(other, "difference")
+
+    def _combine(self, other, operation):
+        if not isinstance(other, UMAP):
+            return NotImplemented
+        check_is_fitted(self, attributes=["graph_"])
+        check_is_fitted(other, attributes=["graph_"])
+        if self.graph_.shape != other.graph_.shape:
+            raise ValueError("UMAP models must have the same number of vertices to combine")
+        left = self.graph_.tocsr()
+        right = other.graph_.tocsr()
+        if not left.nnz or not right.nnz:
+            raise ValueError("zero-size array to reduction operation minimum which has no identity")
+        components, left_weights = _native._combine_fuzzy_graphs(
+            _csr_buffers(left), _csr_buffers(right), operation
+        )
+        if left_weights is not None:
+            left.data[:] = left_weights
+        graph = _csr_graph(components)
+        if not graph.nnz:
+            raise ValueError("zero-size array to reduction operation maximum which has no identity")
+
+        parameters = {}
+        for name in _COMPOSITION_PARAMETERS:
+            values = tuple(
+                item
+                for estimator in (self, other)
+                for item in (getattr(estimator, name) if isinstance(estimator.n_components, tuple)
+                             else (getattr(estimator, name),))
+            )
+            parameters[name] = values
+        epochs = _composition_epochs(self.n_epochs) + _composition_epochs(other.n_epochs)
+        parameters["n_epochs"] = epochs if max(epochs) >= 0 else None
+        n_epochs = _default_epochs(graph.shape[0]) if parameters["n_epochs"] is None else max(epochs)
+        curves = _composition_curves(self) + _composition_curves(other)
+        a, b = np.mean(curves, axis=0)
+        spectral = connected_components(graph, directed=False, return_labels=False) == 1
+        if not spectral:
+            warnings.warn(
+                "Combined graph is not connected but mult-component layout is unsupported. "
+                "Falling back to random initialization.",
+                UserWarning,
+                stacklevel=3,
+            )
+        embedding, _ = _fit_graph_embedding(
+            graph, None, "euclidean", np.random.RandomState(42), None,
+            spectral=spectral, mask_isolated=False, n_epochs=int(n_epochs),
+            n_components=min(parameters["n_components"]), a=float(a), b=float(b),
+            learning_rate=min(parameters["learning_rate"]),
+            repulsion_strength=float(np.mean(parameters["repulsion_strength"])),
+            negative_sample_rate=float(np.mean(parameters["negative_sample_rate"])),
+        )
+        result = UMAP(**parameters, compatibility_layout=True, optimizer="compatibility")
+        result._combined_curves = curves
+        result.graph_ = graph
+        result.embedding_ = embedding
+        return result
 
     def fit_transform(self, X, y=None, **fit_params):
         """Fit and return the fitted output."""

@@ -18,7 +18,7 @@ use umap_core::fit::{
     fit_precomputed_graph_with_cutoff, fit_precomputed_graph_with_options,
     fit_sparse_precomputed_ranked_graph, fit_supplied_neighbors_graph,
 };
-use umap_core::fuzzy_graph::{CsrGraph, GraphOptions};
+use umap_core::fuzzy_graph::{CsrGraph, FuzzySetOperation, GraphOptions, combine_fuzzy_graphs};
 use umap_core::inverse::{
     DenseInverseInput, DenseInverseLayout, InverseTriangulation, dense_inverse_epochs,
     fit_dense_inverse_scales_with_metric, fit_inverse_scales_from_ranked_distances,
@@ -133,6 +133,34 @@ fn csr_components(graph: CsrGraph) -> CsrComponents {
         graph.indices,
         graph.data,
     )
+}
+
+#[pyfunction]
+fn _combine_fuzzy_graphs(
+    py: Python<'_>,
+    left: CsrComponents,
+    right: CsrComponents,
+    operation: &str,
+) -> PyResult<(CsrComponents, Option<Vec<f32>>)> {
+    let operation = match operation {
+        "union" => FuzzySetOperation::Union,
+        "intersection" => FuzzySetOperation::Intersection,
+        "difference" => FuzzySetOperation::Difference,
+        _ => return Err(PyValueError::new_err("unknown fuzzy set operation")),
+    };
+    let [mut left, right] =
+        [left, right].map(|((n_rows, n_cols), indptr, indices, data)| CsrGraph {
+            n_rows,
+            n_cols,
+            indptr,
+            indices,
+            data,
+        });
+    let graph = py
+        .detach(|| combine_fuzzy_graphs(&mut left, &right, operation))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let left_weights = (operation == FuzzySetOperation::Difference).then_some(left.data);
+    Ok((csr_components(graph), left_weights))
 }
 
 #[pyfunction]
@@ -1204,6 +1232,7 @@ fn _inverse_transform_dense_embedding(
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", umap_core::VERSION)?;
+    module.add_function(wrap_pyfunction!(_combine_fuzzy_graphs, module)?)?;
     module.add_function(wrap_pyfunction!(_optimize_aligned_layout, module)?)?;
     module.add_function(wrap_pyfunction!(_prepare_parametric_edges, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_graph, module)?)?;

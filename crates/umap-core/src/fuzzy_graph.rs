@@ -8,7 +8,10 @@ use std::fmt;
 
 use crate::neighbors::Neighbor;
 
+mod composition;
 pub(crate) mod supplied_neighbors;
+
+pub use composition::{FuzzySetOperation, combine_fuzzy_graphs};
 
 const SMOOTH_TOLERANCE: f64 = 1e-5;
 const MIN_SCALE_MULTIPLIER: f64 = 0.001;

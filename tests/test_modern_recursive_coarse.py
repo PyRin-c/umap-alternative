@@ -16,14 +16,11 @@ FIXTURE = (
 CASES = json.loads(FIXTURE.read_text(encoding="utf-8"))["cases"]
 RESIDUALS = {
     "four-level-budget-3",
-    "ratio-three-stars-budget-4",
-    "ratio-three-stars-budget-11",
-    "ratio-three-stars-budget-None",
-    "ratio-three-stars-full-range",
     "ratio-three-stars-positive-only-eleven",
 }
 COORDINATE_BOUNDS = {
     "four-level-positive-only": 2e-5,
+    "ratio-three-stars-budget-None": 2e-5,
     "two-level-strong_to_one": 2e-5,
     "three-level-budget-4": 2e-5,
     "three-level-budget-6": 1e-4,

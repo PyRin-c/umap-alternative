@@ -1,5 +1,8 @@
 # Recursive coarse optimization in UMAP 0.6.0
 
+The [hub-order follow-up](modern_recursive_hub_reference.md) resolves four
+of the six coordinate residuals below.
+
 The [fixture generator](generate_modern_recursive_coarse_fixture.py) runs the
 pinned wheel through public `UMAP.fit` and `fit_transform`. Both methods agree
 on every observed CSR graph, RNG checkpoint and coordinate bit on each host.

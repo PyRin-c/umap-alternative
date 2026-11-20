@@ -11,6 +11,62 @@ use crate::layout::{LayoutError, validate_csr_rows, validate_csr_shape};
 use crate::numeric::pairwise_sum;
 use crate::rng::Mt19937;
 
+/// Rank recursive hubs by degree and preserve the observed order of equal degrees.
+pub fn recursive_hub_order(degrees: &[f32]) -> Vec<usize> {
+    let mut vertices: Vec<_> = (0..degrees.len()).collect();
+    sort_recursive_degrees(degrees, &mut vertices);
+    vertices
+}
+
+fn sort_recursive_degrees(degrees: &[f32], mut vertices: &mut [usize]) {
+    // The observed index quicksort switches to insertion sort below 16 rows.
+    while vertices.len() >= 16 {
+        let last = vertices.len() - 1;
+        let middle = last / 2;
+        for (left, right) in [(0, middle), (middle, last), (0, middle)] {
+            if degrees[vertices[right]] < degrees[vertices[left]] {
+                vertices.swap(left, right);
+            }
+        }
+        let pivot = degrees[vertices[middle]];
+        vertices.swap(middle, last);
+        let (mut left, mut right) = (0, last - 1);
+        loop {
+            while degrees[vertices[left]] < pivot {
+                left += 1;
+            }
+            while pivot < degrees[vertices[right]] {
+                right -= 1;
+            }
+            if left >= right {
+                break;
+            }
+            vertices.swap(left, right);
+            left += 1;
+            right -= 1;
+        }
+        vertices.swap(left, last);
+        let (lower, pivot_and_upper) = vertices.split_at_mut(left);
+        let upper = &mut pivot_and_upper[1..];
+        if lower.len() < upper.len() {
+            sort_recursive_degrees(degrees, lower);
+            vertices = upper;
+        } else {
+            sort_recursive_degrees(degrees, upper);
+            vertices = lower;
+        }
+    }
+    for i in 1..vertices.len() {
+        let value = vertices[i];
+        let mut j = i;
+        while j > 0 && degrees[value] < degrees[vertices[j - 1]] {
+            vertices[j] = vertices[j - 1];
+            j -= 1;
+        }
+        vertices[j] = value;
+    }
+}
+
 /// How to scale the centered initialization before optimization.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ModernInitRescale {

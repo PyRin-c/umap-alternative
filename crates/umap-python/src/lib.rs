@@ -30,7 +30,7 @@ use umap_core::inverse::{
     fit_inverse_scales_from_ranked_distances, inverse_transform_dense_with_metric,
 };
 use umap_core::modern_initialization::{
-    ModernInit, ModernInitConfig, ModernInitRescale, initialize_modern_layout,
+    ModernInit, ModernInitConfig, ModernInitRescale, initialize_modern_layout, recursive_hub_order,
 };
 use umap_core::modern_layout::{ModernLayoutConfig, ModernOptimizer};
 use umap_core::neighbors::DistanceMetric;
@@ -896,6 +896,11 @@ fn _recursive_part_labels(
     recursive_part_labels(seed, &rows, n_parts)
 }
 
+#[pyfunction]
+fn _recursive_hub_order(degrees: Vec<f32>) -> Vec<usize> {
+    recursive_hub_order(&degrees)
+}
+
 /// Apply modern epochs to already initialized coordinates.
 #[pyfunction]
 #[pyo3(signature = (
@@ -1604,6 +1609,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_initialize_modern_layout, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_modern_layout, module)?)?;
     module.add_function(wrap_pyfunction!(_recursive_part_labels, module)?)?;
+    module.add_function(wrap_pyfunction!(_recursive_hub_order, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_categorical_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_continuous_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_precomputed_graph, module)?)?;

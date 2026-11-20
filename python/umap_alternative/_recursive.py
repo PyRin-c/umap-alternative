@@ -92,7 +92,7 @@ def _validate_recursive_initialization(ratio, weights, kwds):
 def _recursive_partition(graph, n_parts, seed, *, layout_graph=None):
     degree_graph = graph if layout_graph is None else layout_graph
     degrees = np.asarray(degree_graph.sum(axis=1)).ravel()
-    hubs = np.argsort(degrees, kind="stable")[-n_parts:]
+    hubs = np.asarray(_native._recursive_hub_order(degrees.tolist())[-n_parts:], dtype=np.intp)
     labels = np.full(len(degrees), -1, dtype=np.intp)
     labels[hubs] = np.arange(n_parts)
     while True:

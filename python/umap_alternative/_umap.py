@@ -182,7 +182,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             if precomputed:
                 _native._fit_precomputed_graph([X_checked.item()], 1, 1)
             embedding = (
-                np.zeros((1, embedding_options["n_components"]), dtype=np.float32)
+                np.zeros((1, embedding_options["n_components"]), dtype=np.float64)
                 if embedding_mode
                 else None
             )
@@ -247,7 +247,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise NotImplementedError("additional fit parameters are not implemented")
         self.fit(X, y=y)
         if self.transform_mode == "embedding":
-            return self.embedding_
+            return self.embedding_.astype(np.float32, copy=False)
         return self.graph_
 
     def transform(self, X):

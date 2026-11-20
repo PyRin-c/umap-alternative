@@ -193,8 +193,10 @@ def test_invalid_feature_shape(data):
 def test_singleton_embedding_is_zero_and_removes_prior_graph():
     model = embedding_model(n_components=3).fit(WEIGHTED)
     returned = model.fit_transform(WEIGHTED[:1])
-    assert returned is model.embedding_
     assert_embedding_bits(returned, [[0, 0, 0]])
+    assert model.embedding_.dtype == np.float64
+    np.testing.assert_array_equal(model.embedding_.view(np.uint64), [[0, 0, 0]])
+    assert returned is not model.embedding_
     assert not hasattr(model, "graph_")
     assert not hasattr(model, "n_neighbors_")
     with pytest.raises(ValueError, match="only a single data sample"):

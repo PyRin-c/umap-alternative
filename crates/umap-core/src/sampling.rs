@@ -1,8 +1,6 @@
 //! Per-edge positive and negative sample timing for the UMAP optimizer.
 //!
-//! This module owns schedule arithmetic only.  It does not select negative
-//! vertices, draw random numbers, or apply embedding updates.  A cursor is
-//! initialized with the first positive and negative due times equal to their
+//! A cursor starts with the first positive and negative due times equal to their
 //! respective intervals.  That convention matches the published checkpoint
 //! behavior: with a unit positive interval and a unit negative sample rate,
 //! epoch one reports a positive edge but zero negative samples; the first
@@ -11,6 +9,10 @@
 //! reported at epoch one.
 
 use std::fmt;
+
+mod modern;
+
+pub use modern::{ModernEpoch, ModernSampledLayout, ModernSamplingConfig, ModernSamplingError};
 
 /// Build a serial compatibility-training interval from validated weights.
 ///

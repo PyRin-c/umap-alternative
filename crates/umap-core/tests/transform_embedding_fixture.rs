@@ -5,8 +5,12 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde_json::Value;
 use umap_core::embedding::{DenseEmbeddingConfig, DenseEmbeddingInit, fit_dense_embedding_seeded};
+use umap_core::fuzzy_graph::GraphOptions;
 use umap_core::neighbors::DistanceMetric;
-use umap_core::transform::{DenseEmbeddingTransformConfig, transform_dense_embedding};
+use umap_core::transform::{
+    DenseEmbeddingTransformConfig, transform_dense_embedding,
+    transform_dense_embedding_with_options,
+};
 
 const CHECKPOINTS: &str = include_str!(
     "../../../reference/fixtures/umap-learn-0.6.0-transform-embedding-windows-x86_64.json"
@@ -205,5 +209,60 @@ fn original_45_epoch_fit_and_transform_match_bit_for_bit() {
         "transformed",
         &transformed,
         transformed_bits.into_iter().flatten(),
+    );
+}
+
+#[test]
+fn embedding_transform_matches_public_nondefault_connectivity() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../reference/fixtures/umap-learn-0.6.0-estimator-graph-options-x86_64.json"
+    ))
+    .unwrap();
+    let case = fixture["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case.get("transformed_bits").is_some())
+        .unwrap();
+    let matrix =
+        |key: &str| -> Vec<Vec<f32>> { serde_json::from_value(fixture[key].clone()).unwrap() };
+    let bit_matrix =
+        |key: &str| -> Vec<Vec<u32>> { serde_json::from_value(case[key].clone()).unwrap() };
+    let (training, queries) = (matrix("X"), matrix("queries"));
+    let fitted = from_bits(&bit_matrix("coordinates_bits"));
+    let settings = &case["settings"];
+    let config = DenseEmbeddingTransformConfig {
+        n_neighbors: 4,
+        metric: DistanceMetric::Euclidean,
+        n_components: 2,
+        a: fixture["options"]["a"].as_f64().unwrap(),
+        b: fixture["options"]["b"].as_f64().unwrap(),
+        learning_rate: fixture["options"]["learning_rate"].as_f64().unwrap(),
+        fit_epochs: Some(settings["n_epochs"].as_u64().unwrap() as usize),
+        repulsion_strength: 1.0,
+        negative_sample_rate: 5.0,
+        transform_seed: 42,
+        disconnection_distance: None,
+    };
+    let options = GraphOptions::new(
+        settings["local_connectivity"].as_f64().unwrap(),
+        settings["set_op_mix_ratio"].as_f64().unwrap(),
+    )
+    .unwrap();
+    let transformed = transform_dense_embedding_with_options(
+        &training.concat(),
+        training.len(),
+        &queries.concat(),
+        queries.len(),
+        training[0].len(),
+        &fitted,
+        &config,
+        options,
+    )
+    .unwrap();
+    assert_bits(
+        "nondefault query connectivity",
+        &transformed,
+        bit_matrix("transformed_bits").into_iter().flatten(),
     );
 }

@@ -3,7 +3,8 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-use crate::fuzzy_graph::{CsrGraph, GraphError, fuzzy_simplicial_set};
+use crate::fit::build_fitted_graph;
+use crate::fuzzy_graph::{CsrGraph, GraphError, GraphOptions};
 use crate::neighbors::{DistanceMetric, Neighbor, collect_neighbors};
 
 /// Distance metrics for exhaustive sparse feature search.
@@ -297,9 +298,27 @@ pub fn fit_sparse_graph(
     k: usize,
     metric: impl Into<SparseDistanceMetric>,
 ) -> Result<CsrGraph, SparseGraphFitError> {
+    fit_sparse_graph_with_options(indptr, indices, data, n_rows, n_features, k, metric, None)
+}
+
+/// Fit a sorted CSR feature graph with optional fuzzy graph settings.
+///
+/// The inputs follow [`fit_sparse_graph`]. The optional settings follow
+/// [`crate::fit::fit_dense_graph_with_options`].
+#[allow(clippy::too_many_arguments)]
+pub fn fit_sparse_graph_with_options(
+    indptr: &[usize],
+    indices: &[usize],
+    data: &[f32],
+    n_rows: usize,
+    n_features: usize,
+    k: usize,
+    metric: impl Into<SparseDistanceMetric>,
+    options: Option<GraphOptions>,
+) -> Result<CsrGraph, SparseGraphFitError> {
     let neighbors = exhaustive_csr_knn(indptr, indices, data, n_rows, n_features, k, metric)
         .map_err(SparseGraphFitError::Knn)?;
-    fuzzy_simplicial_set(&neighbors).map_err(SparseGraphFitError::Graph)
+    build_fitted_graph(&neighbors, options).map_err(SparseGraphFitError::Graph)
 }
 
 #[derive(Clone, Copy)]

@@ -15,8 +15,8 @@ use umap_core::embedding::{
     DenseEmbedding, DenseEmbeddingConfig, DenseEmbeddingFitError, DenseEmbeddingInit,
     fit_dense_embedding_seeded,
 };
-use umap_core::fit::DenseGraphFitError;
-use umap_core::fuzzy_graph::CsrGraph;
+use umap_core::fit::{DenseGraphFitError, fit_dense_graph_with_options};
+use umap_core::fuzzy_graph::{CsrGraph, GraphOptions};
 use umap_core::initialization::InitializationError;
 use umap_core::layout::LayoutError;
 use umap_core::neighbors::DistanceMetric;
@@ -251,11 +251,12 @@ fn as_owned_graph<'a>(handle: *const UmapCapiCsrGraph) -> Result<&'a OwnedGraph,
     }
 
     // SAFETY: The ABI contract requires a non-null handle to be a live pointer
-    // previously returned by `umap_capi_fit_dense_graph`; the alignment was
+    // previously returned by a dense graph fit. The alignment was
     // checked above.  The returned reference is borrowed only for this call.
     Ok(unsafe { &*handle.cast::<OwnedGraph>() })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fit_dense_graph_impl(
     data: *const f32,
     data_len: usize,
@@ -263,6 +264,7 @@ fn fit_dense_graph_impl(
     n_features: usize,
     k: usize,
     metric: u32,
+    options: Option<GraphOptions>,
     out_graph: *mut *mut UmapCapiCsrGraph,
 ) -> u32 {
     if let Err(status) = validate_required_pointer(out_graph) {
@@ -280,11 +282,17 @@ fn fit_dense_graph_impl(
     // promises readable storage for `data_len` contiguous values.
     let data = unsafe { input_slice(data, data_len) };
 
-    let graph =
-        match umap_core::fit::fit_dense_graph(data, n_rows, n_features, k, metric.into_core()) {
-            Ok(graph) => graph,
-            Err(error) => return map_core_error(error),
-        };
+    let graph = match fit_dense_graph_with_options(
+        data,
+        n_rows,
+        n_features,
+        k,
+        metric.into_core(),
+        options,
+    ) {
+        Ok(graph) => graph,
+        Err(error) => return map_core_error(error),
+    };
 
     let handle = Box::into_raw(Box::new(OwnedGraph { graph })).cast::<UmapCapiCsrGraph>();
 
@@ -448,7 +456,49 @@ pub unsafe extern "C" fn umap_capi_fit_dense_graph(
     metric: u32,
     out_graph: *mut *mut UmapCapiCsrGraph,
 ) -> u32 {
-    catch_status(|| fit_dense_graph_impl(data, data_len, n_rows, n_features, k, metric, out_graph))
+    catch_status(|| {
+        fit_dense_graph_impl(
+            data, data_len, n_rows, n_features, k, metric, None, out_graph,
+        )
+    })
+}
+
+/// Fit a dense CSR graph with explicit connectivity and fuzzy set mixing.
+///
+/// Invalid graph settings return [`STATUS_INVALID_CONFIG`] and leave the
+/// output slot untouched.
+///
+/// # Safety
+///
+/// The data and output slot must meet the same requirements as
+/// [`umap_capi_fit_dense_graph`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn umap_capi_fit_dense_graph_with_options(
+    data: *const f32,
+    data_len: usize,
+    n_rows: usize,
+    n_features: usize,
+    k: usize,
+    metric: u32,
+    local_connectivity: f64,
+    set_op_mix_ratio: f64,
+    out_graph: *mut *mut UmapCapiCsrGraph,
+) -> u32 {
+    catch_status(|| {
+        let Ok(options) = GraphOptions::new(local_connectivity, set_op_mix_ratio) else {
+            return STATUS_INVALID_CONFIG;
+        };
+        fit_dense_graph_impl(
+            data,
+            data_len,
+            n_rows,
+            n_features,
+            k,
+            metric,
+            Some(options),
+            out_graph,
+        )
+    })
 }
 
 /// Fill a caller-owned view with borrowed pointers into an opaque CSR handle.
@@ -456,7 +506,8 @@ pub unsafe extern "C" fn umap_capi_fit_dense_graph(
 /// # Safety
 ///
 /// `graph` must be a live, aligned handle returned by
-/// [`umap_capi_fit_dense_graph`].  `out_view` must be non-null, aligned for
+/// [`umap_capi_fit_dense_graph`] or [`umap_capi_fit_dense_graph_with_options`].
+/// `out_view` must be non-null, aligned for
 /// [`UmapCapiCsrView`], and point to writable storage for one complete view.
 /// The returned pointers must not be read after the handle is released.
 #[unsafe(no_mangle)]

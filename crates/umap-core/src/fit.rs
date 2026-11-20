@@ -12,9 +12,13 @@
 
 use std::fmt;
 
-use crate::fuzzy_graph::{CsrGraph, GraphError, categorical_intersection, fuzzy_simplicial_set};
+use crate::fuzzy_graph::{
+    CsrGraph, GraphError, GraphOptions, categorical_intersection, fuzzy_simplicial_set,
+    fuzzy_simplicial_set_with_options,
+};
 use crate::neighbors::{
-    DistanceMetric, KnnError, PrecomputedKnnError, exhaustive_knn_with_metric, precomputed_knn,
+    DistanceMetric, KnnError, Neighbor, PrecomputedKnnError, exhaustive_knn_with_metric,
+    precomputed_knn,
 };
 
 /// Errors returned while fitting a dense fuzzy graph.
@@ -90,8 +94,24 @@ pub fn fit_dense_graph(
     k: usize,
     metric: DistanceMetric,
 ) -> Result<CsrGraph, DenseGraphFitError> {
+    fit_dense_graph_with_options(data, n_rows, n_features, k, metric, None)
+}
+
+/// Fit a dense fuzzy graph with explicit graph settings when provided.
+///
+/// The neighbors follow [`fit_dense_graph`]. Passing `Some(options)` uses
+/// [`fuzzy_simplicial_set_with_options`]. Passing `None` uses the original
+/// graph fit.
+pub fn fit_dense_graph_with_options(
+    data: &[f32],
+    n_rows: usize,
+    n_features: usize,
+    k: usize,
+    metric: DistanceMetric,
+    options: Option<GraphOptions>,
+) -> Result<CsrGraph, DenseGraphFitError> {
     let neighbors = exhaustive_knn_with_metric(data, n_rows, n_features, k, metric)?;
-    Ok(fuzzy_simplicial_set(&neighbors)?)
+    Ok(build_fitted_graph(&neighbors, options)?)
 }
 
 /// Errors returned while fitting a dense categorical fuzzy graph.
@@ -164,6 +184,33 @@ pub fn fit_dense_categorical_graph(
     labels: &[i64],
     target_weight: f64,
 ) -> Result<CsrGraph, DenseCategoricalGraphFitError> {
+    fit_dense_categorical_graph_with_options(
+        data,
+        n_rows,
+        n_features,
+        k,
+        metric,
+        labels,
+        target_weight,
+        None,
+    )
+}
+
+/// Fit a dense categorical graph, applying the settings before target weighting.
+///
+/// The features and targets follow [`fit_dense_categorical_graph`]. The optional
+/// graph settings follow [`fit_dense_graph_with_options`].
+#[allow(clippy::too_many_arguments)]
+pub fn fit_dense_categorical_graph_with_options(
+    data: &[f32],
+    n_rows: usize,
+    n_features: usize,
+    k: usize,
+    metric: DistanceMetric,
+    labels: &[i64],
+    target_weight: f64,
+    options: Option<GraphOptions>,
+) -> Result<CsrGraph, DenseCategoricalGraphFitError> {
     if labels.len() != n_rows {
         return Err(DenseCategoricalGraphFitError::LabelCount {
             n_rows,
@@ -174,7 +221,7 @@ pub fn fit_dense_categorical_graph(
         return Err(DenseCategoricalGraphFitError::InvalidTargetWeight { target_weight });
     }
 
-    let graph = fit_dense_graph(data, n_rows, n_features, k, metric)
+    let graph = fit_dense_graph_with_options(data, n_rows, n_features, k, metric, options)
         .map_err(DenseCategoricalGraphFitError::DenseGraph)?;
     Ok(categorical_intersection(graph, labels, target_weight))
 }
@@ -195,8 +242,31 @@ pub fn fit_precomputed_graph(
     n_rows: usize,
     k: usize,
 ) -> Result<CsrGraph, DenseGraphFitError> {
+    fit_precomputed_graph_with_options(distances, n_rows, k, None)
+}
+
+/// Fit a precomputed-distance graph with optional fuzzy graph settings.
+///
+/// The distances follow [`fit_precomputed_graph`]. The optional graph settings
+/// follow [`fit_dense_graph_with_options`].
+pub fn fit_precomputed_graph_with_options(
+    distances: &[f32],
+    n_rows: usize,
+    k: usize,
+    options: Option<GraphOptions>,
+) -> Result<CsrGraph, DenseGraphFitError> {
     let neighbors = precomputed_knn(distances, n_rows, k).map_err(DenseGraphFitError::from)?;
-    Ok(fuzzy_simplicial_set(&neighbors)?)
+    Ok(build_fitted_graph(&neighbors, options)?)
+}
+
+pub(crate) fn build_fitted_graph(
+    neighbors: &[Vec<Neighbor>],
+    options: Option<GraphOptions>,
+) -> Result<CsrGraph, GraphError> {
+    match options {
+        Some(options) => fuzzy_simplicial_set_with_options(neighbors, options),
+        None => fuzzy_simplicial_set(neighbors),
+    }
 }
 
 #[cfg(test)]

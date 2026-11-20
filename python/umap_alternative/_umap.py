@@ -221,14 +221,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         self._validate_mode()
         sparse = issparse(X)
         metric = self._validate_metric(sparse=sparse)
-        if self.set_op_mix_ratio != 1.0:
-            raise NotImplementedError(
-                "set_op_mix_ratio values other than 1.0 are not implemented"
-            )
-        if self.local_connectivity != 1.0:
-            raise NotImplementedError(
-                "local_connectivity values other than 1.0 are not implemented"
-            )
+        graph_options = self._graph_options()
         if not isinstance(self.n_neighbors, numbers.Integral):
             raise ValueError("n_neighbors must be an integer")
         n_neighbors = int(self.n_neighbors)
@@ -295,7 +288,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         embedding = None
         if precomputed:
             components = _native._fit_precomputed_graph(
-                X_checked.ravel(order="C").tolist(), n_rows, n_neighbors
+                X_checked.ravel(order="C").tolist(), n_rows, n_neighbors, graph_options=graph_options
             )
         elif sparse:
             components = _native._fit_sparse_graph(
@@ -305,21 +298,25 @@ class UMAP(BaseEstimator, TransformerMixin):
                 X_checked.shape,
                 n_neighbors,
                 metric,
+                graph_options=graph_options,
             )
         else:
             values = X_checked.ravel(order="C").tolist()
             dense_args = (values, n_rows, n_features, n_neighbors, metric)
             if embedding_mode and not spectral:
                 components, embedding_shape, coordinates = _native._fit_dense_embedding(
-                    *dense_args, initial_coordinates=initial_coordinates, **embedding_options
+                    *dense_args,
+                    initial_coordinates=initial_coordinates,
+                    graph_options=graph_options,
+                    **embedding_options,
                 )
                 embedding = np.asarray(coordinates, dtype=np.float32).reshape(embedding_shape)
             elif y is None:
-                components = _native._fit_dense_graph(*dense_args)
+                components = _native._fit_dense_graph(*dense_args, graph_options=graph_options)
             else:
                 labels = self._categorical_labels(y, n_rows)
                 components = _native._fit_dense_categorical_graph(
-                    *dense_args, labels, self.target_weight
+                    *dense_args, labels, self.target_weight, graph_options=graph_options
                 )
         shape, indptr, indices, data = components
         graph = csr_matrix(
@@ -402,6 +399,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             n_features,
             self.n_neighbors_,
             metric,
+            local_connectivity=self.local_connectivity,
         )
         return coo_matrix(
             (
@@ -425,6 +423,15 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise NotImplementedError(
                 "supported transform_mode values are 'graph' and 'embedding'"
             )
+
+    def _graph_options(self):
+        connectivity = _finite_float(self.local_connectivity, "local_connectivity")
+        mix = _finite_float(self.set_op_mix_ratio, "set_op_mix_ratio")
+        if connectivity < 0.0:
+            raise ValueError("local_connectivity must be nonnegative")
+        if not 0.0 <= mix <= 1.0:
+            raise ValueError("set_op_mix_ratio must be between 0 and 1, inclusive")
+        return None if (connectivity, mix) == (1.0, 1.0) else (connectivity, mix)
 
     def _store_fit(self, n_features, transform_fit, graph, n_neighbors, embedding):
         if graph is not None:

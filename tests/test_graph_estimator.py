@@ -154,8 +154,20 @@ def test_unknown_mode_fails_explicitly():
         model.transform(BASELINE)
 
 
-def test_non_default_graph_mix_parameters_fail_explicitly():
-    with pytest.raises(NotImplementedError, match="set_op_mix_ratio"):
-        graph_model(set_op_mix_ratio=0.5).fit(BASELINE)
-    with pytest.raises(NotImplementedError, match="local_connectivity"):
-        graph_model(local_connectivity=2.0).fit(BASELINE)
+@pytest.mark.parametrize(
+    "parameter,value",
+    [
+        ("set_op_mix_ratio", np.nextafter(0.0, -1.0)),
+        ("set_op_mix_ratio", np.nextafter(1.0, 2.0)),
+        ("set_op_mix_ratio", np.nan),
+        ("local_connectivity", -1.0),
+        ("local_connectivity", np.inf),
+    ],
+)
+def test_invalid_graph_settings_preserve_fitted_graph(parameter, value):
+    model = graph_model().fit(BASELINE)
+    previous = model.graph_
+    model.set_params(**{parameter: value})
+    with pytest.raises(ValueError, match=parameter):
+        model.fit(BASELINE)
+    assert model.graph_ is previous

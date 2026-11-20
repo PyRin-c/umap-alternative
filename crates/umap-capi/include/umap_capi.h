@@ -15,7 +15,7 @@
 extern "C" {
 #endif
 
-/* A handle returned by umap_capi_fit_dense_graph.  Its representation is
+/* A handle returned by either dense graph fit.  Its representation is
  * private and must not be allocated, copied, or inspected by callers. */
 typedef struct umap_capi_csr_graph umap_capi_csr_graph_t;
 
@@ -146,8 +146,25 @@ umap_capi_status_t umap_capi_fit_dense_graph(
     umap_capi_csr_graph_t **out_graph);
 
 /*
+ * Fit with explicit fuzzy graph settings.  The data and output ownership
+ * follow umap_capi_fit_dense_graph.  local_connectivity must be finite and
+ * nonnegative.  set_op_mix_ratio ranges from 0 (intersection) to 1 (union).
+ * Invalid settings return INVALID_CONFIG.  Zero memberships are omitted.
+ */
+umap_capi_status_t umap_capi_fit_dense_graph_with_options(
+    const float *data,
+    size_t data_len,
+    size_t n_rows,
+    size_t n_features,
+    size_t k,
+    umap_capi_metric_t metric,
+    double local_connectivity,
+    double set_op_mix_ratio,
+    umap_capi_csr_graph_t **out_graph);
+
+/*
  * Fill a caller-provided view of graph.  graph must be a live handle returned
- * by umap_capi_fit_dense_graph and out_view must be a non-NULL, aligned,
+ * by a dense graph fit and out_view must be a non-NULL, aligned,
  * writable pointer to a complete umap_capi_csr_view_t.  The output borrows the
  * handle's storage; it must not outlive the handle.
  */
@@ -157,7 +174,7 @@ umap_capi_status_t umap_capi_csr_graph_view(
 
 /*
  * Release an owning graph handle.  NULL is accepted as a no-op.  A non-NULL
- * pointer must be a live handle returned by umap_capi_fit_dense_graph and must
+ * pointer must be a live handle returned by a dense graph fit and must
  * not be used again after this call.  Any borrowed view pointers become
  * invalid when this function returns.
  */

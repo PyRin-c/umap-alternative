@@ -42,6 +42,33 @@ static void check_graph_only(void) {
     CHECK(umap_capi_csr_graph_release(graph) == UMAP_CAPI_STATUS_OK);
 }
 
+static void check_graph_options(void) {
+    const float points[] = {0.0f, 1.0f, 3.0f, 7.0f};
+    const size_t indptr[] = {0, 1, 2, 2, 2};
+    umap_capi_csr_graph_t *graph = NULL;
+    CHECK(umap_capi_fit_dense_graph_with_options(
+        points, COUNT(points), 4, 1, 2, UMAP_CAPI_METRIC_EUCLIDEAN, 1.0, 0.0, &graph
+    ) == UMAP_CAPI_STATUS_OK);
+    umap_capi_csr_view_t view = {0};
+    CHECK(umap_capi_csr_graph_view(graph, &view) == UMAP_CAPI_STATUS_OK);
+    CHECK(view.n_rows == 4 && view.n_cols == 4);
+    CHECK(view.indptr_len == COUNT(indptr) && view.indices_len == 2 && view.data_len == 2);
+    CHECK(memcmp(view.indptr, indptr, sizeof indptr) == 0);
+    CHECK(view.indices[0] == 1 && view.indices[1] == 0);
+    CHECK(view.data[0] == 1.0f && view.data[1] == 1.0f);
+
+    umap_capi_csr_graph_t *original = graph;
+    const double invalid[][2] = {{-1.0, 1.0}, {INFINITY, 0.0}, {1.0, NAN}, {1.0, 1.0000000000000002}};
+    for (size_t index = 0; index < COUNT(invalid); ++index) {
+        CHECK(umap_capi_fit_dense_graph_with_options(
+            points, COUNT(points), 4, 1, 2, UMAP_CAPI_METRIC_EUCLIDEAN,
+            invalid[index][0], invalid[index][1], &graph
+        ) == UMAP_CAPI_STATUS_INVALID_CONFIG);
+        CHECK(graph == original);
+    }
+    CHECK(umap_capi_csr_graph_release(graph) == UMAP_CAPI_STATUS_OK);
+}
+
 /* weighted_explicit_min_seed, weighted_random_max_seed and weighted_k4 in
  * reference/fixtures/umap-learn-0.6.0-seeded-fit-windows-x86_64.json. */
 static const float weighted[] = {
@@ -336,6 +363,7 @@ static void check_empty_graph(void) {
 
 int main(void) {
     check_graph_only();
+    check_graph_options();
     check_seeded_checkpoints();
     check_boundaries();
     check_empty_graph();

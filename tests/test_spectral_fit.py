@@ -106,10 +106,10 @@ def test_spectral_fit_builds_graph_once_and_prunes_before_initializing(monkeypat
     initializer = _umap._spectral_initialization
     builds = 0
 
-    def count_graph(*args):
+    def count_graph(*args, **kwargs):
         nonlocal builds
         builds += 1
-        return fit_graph(*args)
+        return fit_graph(*args, **kwargs)
 
     def check_positive_graph(graph, components, rng):
         assert np.all(graph.data >= np.float32(1 / 11))

@@ -37,9 +37,11 @@ Wheel は `target/wheels/` に生成されます。Python パッケージ名は 
 
 `UMAP(transform_mode="graph").fit(X)` と `fit_transform(X)` は、Euclidean、Manhattan、Chebyshev、cosine の教師なし学習で SciPy の CSR、CSC、COO 形式の疎な特徴量を受け取ります。入力を変更せずに CSR に変換し、`float32` の CSR グラフを作ります。Cosine は圧縮形式の行に格納された重複要素を保持して距離を計算します。距離ゼロの同順位により自分自身が近傍から外れる場合は `ValueError` になります。疎行列での事前計算済み距離と変換は未実装です。形式ごとの検証結果は [疎グラフの参照記録](reference/sparse_graph_reference.md) を参照してください。
 
+`local_connectivity` は有限の非負値、`set_op_mix_ratio` は0から1までを受け付けます。Python の対応済みグラフ学習と固定シードの密な埋め込みに適用できます。C の `umap_capi_fit_dense_graph_with_options` でも密なグラフに両設定を渡せます。[C ヘッダー](crates/umap-capi/include/umap_capi.h)
+
 `UMAP(transform_mode="graph").transform(X)` は、学習データと同じ特徴数の密な入力を受け取ります。学習データと `float32` 変換後のビット列が一致すれば `graph_` をそのまま返します。新しい入力に対しては、行が入力サンプル、列が学習サンプルに対応する `float32` の SciPy COO 行列を返し、近傍順と明示的なゼロ要素を保持します。
 
-変換は Euclidean、Manhattan、Chebyshev と既存の別名に対応し、`local_connectivity=1.0` を使用します。距離が等しい近傍は学習行の添字順で並べます。ビット単位の一致は記録済みの Euclidean fixture で検証しています。変換の対応範囲と公開 API の境界ケースは [変換の参照記録](reference/transform_reference.md) を参照してください。
+変換は Euclidean、Manhattan、Chebyshev と既存の別名に対応します。変換時の `local_connectivity` から1を引き、下限を0として外部入力のグラフに適用します。距離が等しい近傍は学習行の添字順で並べます。ビット単位の一致は記録済みの Euclidean fixture で検証しています。変換の対応範囲と公開 API の境界ケースは [変換の参照記録](reference/transform_reference.md) を参照してください。
 
 ## 独立実装と数値互換性
 

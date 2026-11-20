@@ -4,14 +4,17 @@ use pyo3::wrap_pyfunction;
 
 use umap_core::embedding::{
     DenseEmbedding, DenseEmbeddingConfig, DenseEmbeddingInit, EmbeddingLayoutConfig,
-    fit_dense_embedding_seeded, fit_graph_embedding_with_rng,
+    fit_dense_embedding_seeded_with_graph_options, fit_graph_embedding_with_rng,
 };
-use umap_core::fit::{fit_dense_categorical_graph, fit_dense_graph, fit_precomputed_graph};
-use umap_core::fuzzy_graph::CsrGraph;
+use umap_core::fit::{
+    fit_dense_categorical_graph_with_options, fit_dense_graph_with_options,
+    fit_precomputed_graph_with_options,
+};
+use umap_core::fuzzy_graph::{CsrGraph, GraphOptions};
 use umap_core::neighbors::DistanceMetric;
 use umap_core::rng::Mt19937;
-use umap_core::sparse::{SparseDistanceMetric, fit_sparse_graph};
-use umap_core::transform::{CooGraph, transform_dense_graph};
+use umap_core::sparse::{SparseDistanceMetric, fit_sparse_graph_with_options};
+use umap_core::transform::{CooGraph, transform_dense_graph_with_options};
 
 type CsrComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
 type CooComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
@@ -44,24 +47,43 @@ fn parse_metric(metric: &str) -> PyResult<DistanceMetric> {
     }
 }
 
+fn parse_graph_options(settings: Option<(f64, f64)>) -> PyResult<Option<GraphOptions>> {
+    settings
+        .map(|(local_connectivity, set_op_mix_ratio)| {
+            GraphOptions::new(local_connectivity, set_op_mix_ratio)
+                .map_err(|error| PyValueError::new_err(error.to_string()))
+        })
+        .transpose()
+}
+
 /// Fit a fuzzy graph from a flat row-major f32 matrix and return its CSR data.
 #[pyfunction]
-#[pyo3(signature = (data, n_rows, n_features, k, metric))]
+#[pyo3(signature = (data, n_rows, n_features, k, metric, *, graph_options=None))]
 fn _fit_dense_graph(
     data: Vec<f32>,
     n_rows: usize,
     n_features: usize,
     k: usize,
     metric: &str,
+    graph_options: Option<(f64, f64)>,
 ) -> PyResult<CsrComponents> {
     let metric = parse_metric(metric)?;
-    fit_dense_graph(&data, n_rows, n_features, k, metric)
-        .map(csr_components)
-        .map_err(|error| PyValueError::new_err(error.to_string()))
+    fit_dense_graph_with_options(
+        &data,
+        n_rows,
+        n_features,
+        k,
+        metric,
+        parse_graph_options(graph_options)?,
+    )
+    .map(csr_components)
+    .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
 /// Fit a fuzzy graph from sorted CSR features and return its CSR data.
 #[pyfunction]
+#[pyo3(signature = (indptr, indices, data, shape, k, metric, *, graph_options=None))]
+#[allow(clippy::too_many_arguments)]
 fn _fit_sparse_graph(
     py: Python<'_>,
     indptr: Vec<usize>,
@@ -70,6 +92,7 @@ fn _fit_sparse_graph(
     shape: (usize, usize),
     k: usize,
     metric: &str,
+    graph_options: Option<(f64, f64)>,
 ) -> PyResult<CsrComponents> {
     let metric = if metric.eq_ignore_ascii_case("cosine") {
         SparseDistanceMetric::Cosine
@@ -77,13 +100,19 @@ fn _fit_sparse_graph(
         parse_metric(metric)?.into()
     };
     let (n_rows, n_features) = shape;
-    py.detach(|| fit_sparse_graph(&indptr, &indices, &data, n_rows, n_features, k, metric))
-        .map(csr_components)
-        .map_err(|error| PyValueError::new_err(error.to_string()))
+    let options = parse_graph_options(graph_options)?;
+    py.detach(|| {
+        fit_sparse_graph_with_options(
+            &indptr, &indices, &data, n_rows, n_features, k, metric, options,
+        )
+    })
+    .map(csr_components)
+    .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
 /// Fit the serial seeded dense layout and return its CSR graph and coordinates.
 #[pyfunction]
+#[pyo3(signature = (data, n_rows, n_features, k, metric, n_components, a, b, learning_rate, n_epochs, repulsion_strength, negative_sample_rate, seed, initial_coordinates=None, *, graph_options=None))]
 #[allow(clippy::too_many_arguments)]
 fn _fit_dense_embedding(
     py: Python<'_>,
@@ -101,8 +130,10 @@ fn _fit_dense_embedding(
     negative_sample_rate: f64,
     seed: u32,
     initial_coordinates: Option<Vec<f32>>,
+    graph_options: Option<(f64, f64)>,
 ) -> PyResult<EmbeddingComponents> {
     let metric = parse_metric(metric)?;
+    let options = parse_graph_options(graph_options)?;
     let init = match initial_coordinates {
         Some(values) => DenseEmbeddingInit::Explicit { values },
         None => DenseEmbeddingInit::random(seed),
@@ -124,7 +155,11 @@ fn _fit_dense_embedding(
         coordinates,
         shape,
     } = py
-        .detach(|| fit_dense_embedding_seeded(&data, n_rows, n_features, &config, seed))
+        .detach(|| {
+            fit_dense_embedding_seeded_with_graph_options(
+                &data, n_rows, n_features, &config, seed, options,
+            )
+        })
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     Ok((csr_components(graph), shape, coordinates))
 }
@@ -176,6 +211,8 @@ fn _fit_graph_embedding_with_rng(
 
 /// Fit a fuzzy graph from dense features and one categorical label per row.
 #[pyfunction]
+#[pyo3(signature = (data, n_rows, n_features, k, metric, labels, target_weight, *, graph_options=None))]
+#[allow(clippy::too_many_arguments)]
 fn _fit_dense_categorical_graph(
     data: Vec<f32>,
     n_rows: usize,
@@ -184,23 +221,41 @@ fn _fit_dense_categorical_graph(
     metric: &str,
     labels: Vec<i64>,
     target_weight: f64,
+    graph_options: Option<(f64, f64)>,
 ) -> PyResult<CsrComponents> {
     let metric = parse_metric(metric)?;
-    fit_dense_categorical_graph(&data, n_rows, n_features, k, metric, &labels, target_weight)
-        .map(csr_components)
-        .map_err(|error| PyValueError::new_err(error.to_string()))
+    fit_dense_categorical_graph_with_options(
+        &data,
+        n_rows,
+        n_features,
+        k,
+        metric,
+        &labels,
+        target_weight,
+        parse_graph_options(graph_options)?,
+    )
+    .map(csr_components)
+    .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
 /// Fit a fuzzy graph from a flat row-major square f32 distance matrix.
 #[pyfunction]
-fn _fit_precomputed_graph(distances: Vec<f32>, n_rows: usize, k: usize) -> PyResult<CsrComponents> {
-    fit_precomputed_graph(&distances, n_rows, k)
+#[pyo3(signature = (distances, n_rows, k, *, graph_options=None))]
+fn _fit_precomputed_graph(
+    distances: Vec<f32>,
+    n_rows: usize,
+    k: usize,
+    graph_options: Option<(f64, f64)>,
+) -> PyResult<CsrComponents> {
+    fit_precomputed_graph_with_options(&distances, n_rows, k, parse_graph_options(graph_options)?)
         .map(csr_components)
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
 /// Return the shape, row indices, column indices, and memberships in COO order.
 #[pyfunction]
+#[pyo3(signature = (training, n_training_rows, queries, n_query_rows, n_features, k, metric, *, local_connectivity=1.0))]
+#[allow(clippy::too_many_arguments)]
 fn _transform_dense_graph(
     training: Vec<f32>,
     n_training_rows: usize,
@@ -209,15 +264,18 @@ fn _transform_dense_graph(
     n_features: usize,
     k: usize,
     metric: &str,
+    local_connectivity: f64,
 ) -> PyResult<CooComponents> {
     let metric = parse_metric(metric)?;
+    let options = GraphOptions::new(local_connectivity, 1.0)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
     let CooGraph {
         n_rows,
         n_cols,
         row,
         col,
         data,
-    } = transform_dense_graph(
+    } = transform_dense_graph_with_options(
         &training,
         n_training_rows,
         &queries,
@@ -225,6 +283,7 @@ fn _transform_dense_graph(
         n_features,
         k,
         metric,
+        options,
     )
     .map_err(|error| PyValueError::new_err(error.to_string()))?;
     Ok(((n_rows, n_cols), row, col, data))

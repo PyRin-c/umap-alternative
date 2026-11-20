@@ -50,6 +50,12 @@ impl GraphOptions {
             set_op_mix_ratio,
         })
     }
+
+    /// Return the local connectivity used when fitting the graph.
+    #[must_use]
+    pub fn local_connectivity(self) -> f64 {
+        self.local_connectivity
+    }
 }
 
 impl Default for GraphOptions {
@@ -524,7 +530,11 @@ fn local_offset(distances: &[f32], local_connectivity: f64) -> f32 {
     }
 }
 
-fn row_parameters(distances: &[f32], local_connectivity: f64, batch_floor: f32) -> (f32, f32) {
+pub(crate) fn row_parameters(
+    distances: &[f32],
+    local_connectivity: f64,
+    batch_floor: f32,
+) -> (f32, f32) {
     let rho = local_offset(distances, local_connectivity);
     let target = (distances.len() as f64).log2();
     // Omit one zero for self. The other zero-distance candidates still
@@ -541,7 +551,7 @@ fn row_parameters(distances: &[f32], local_connectivity: f64, batch_floor: f32) 
     (rho, search_scale(&offsets, target, false).max(floor))
 }
 
-fn batch_scale_floor(distances: &[f32]) -> f32 {
+pub(crate) fn batch_scale_floor(distances: &[f32]) -> f32 {
     // The batch mean rounds before multiplication. The row mean stays wide.
     let mean = mean_distance(distances) as f32;
     (MIN_SCALE_MULTIPLIER * f64::from(mean)) as f32

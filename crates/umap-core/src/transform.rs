@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::fuzzy_graph::membership;
+use crate::fuzzy_graph::{GraphOptions, batch_scale_floor, membership, row_parameters};
 use crate::layout::{
     attractive_update_fixed_tail, negative_update_fixed_tail, validate_parameters,
     validate_repulsion_strength,
@@ -244,6 +244,33 @@ pub fn transform_dense_embedding(
     fitted_embedding: &[f32],
     config: &DenseEmbeddingTransformConfig,
 ) -> Result<Vec<f32>, DenseEmbeddingTransformError> {
+    transform_dense_embedding_with_options(
+        training,
+        n_training_rows,
+        queries,
+        n_query_rows,
+        n_features,
+        fitted_embedding,
+        config,
+        GraphOptions::default(),
+    )
+}
+
+/// Transform held-out points with the specified training local connectivity.
+///
+/// The directed query graph uses the local connectivity from `options`.
+/// Other arguments follow [`transform_dense_embedding`].
+#[allow(clippy::too_many_arguments)]
+pub fn transform_dense_embedding_with_options(
+    training: &[f32],
+    n_training_rows: usize,
+    queries: &[f32],
+    n_query_rows: usize,
+    n_features: usize,
+    fitted_embedding: &[f32],
+    config: &DenseEmbeddingTransformConfig,
+    options: GraphOptions,
+) -> Result<Vec<f32>, DenseEmbeddingTransformError> {
     use DenseEmbeddingTransformError as Error;
 
     let cutoff = config.disconnection_distance.unwrap_or(f32::INFINITY);
@@ -259,6 +286,7 @@ pub fn transform_dense_embedding(
         config.n_neighbors,
         config.metric,
         cutoff,
+        options,
     )
     .map_err(Error::Graph)?;
     let mut embedding =
@@ -507,6 +535,32 @@ pub fn transform_dense_graph(
     k: usize,
     metric: DistanceMetric,
 ) -> Result<CooGraph, DenseGraphTransformError> {
+    transform_dense_graph_with_options(
+        training,
+        n_training_rows,
+        queries,
+        n_query_rows,
+        n_features,
+        k,
+        metric,
+        GraphOptions::default(),
+    )
+}
+
+/// Build a held-out graph using `max(0, local_connectivity - 1)` as query connectivity.
+///
+/// The query graph is directed, so fuzzy-set mixing does not affect it.
+#[allow(clippy::too_many_arguments)]
+pub fn transform_dense_graph_with_options(
+    training: &[f32],
+    n_training_rows: usize,
+    queries: &[f32],
+    n_query_rows: usize,
+    n_features: usize,
+    k: usize,
+    metric: DistanceMetric,
+    options: GraphOptions,
+) -> Result<CooGraph, DenseGraphTransformError> {
     transform_dense_graph_with_cutoff(
         training,
         n_training_rows,
@@ -516,6 +570,7 @@ pub fn transform_dense_graph(
         k,
         metric,
         f32::INFINITY,
+        options,
     )
 }
 
@@ -529,6 +584,7 @@ fn transform_dense_graph_with_cutoff(
     k: usize,
     metric: DistanceMetric,
     cutoff: f32,
+    options: GraphOptions,
 ) -> Result<CooGraph, DenseGraphTransformError> {
     if n_features == 0 {
         return Err(DenseGraphTransformError::NoFeatures);
@@ -584,14 +640,23 @@ fn transform_dense_graph_with_cutoff(
     }
 
     let target = (k as f64).log2();
-    let minimum_scale = minimum_transform_scale(&graph.data);
+    let connectivity = (options.local_connectivity() - 1.0).max(0.0);
+    let min_scale = if connectivity == 0.0 {
+        minimum_transform_scale(&graph.data)
+    } else {
+        batch_scale_floor(&graph.data)
+    };
     for distances in graph.data.chunks_exact_mut(k) {
-        let sigma = transform_scale(distances, target).max(minimum_scale);
+        let (rho, sigma) = if connectivity == 0.0 {
+            (0.0, transform_scale(distances, target).max(min_scale))
+        } else {
+            row_parameters(distances, connectivity, min_scale)
+        };
         for distance in distances {
             *distance = if *distance >= cutoff {
                 0.0
             } else {
-                membership(*distance, 0.0, sigma)
+                membership(*distance, rho, sigma)
             };
         }
     }

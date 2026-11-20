@@ -5,8 +5,8 @@
 
 use std::fmt;
 
-use crate::fit::{DenseGraphFitError, fit_dense_graph};
-use crate::fuzzy_graph::CsrGraph;
+use crate::fit::{DenseGraphFitError, fit_dense_graph_with_options};
+use crate::fuzzy_graph::{CsrGraph, GraphOptions};
 use crate::initialization::{
     InitializationError, normalize_columns, random_initialization_with_rng,
 };
@@ -211,7 +211,7 @@ pub fn fit_dense_embedding<F>(
 where
     F: FnMut(usize) -> usize,
 {
-    let (graph, coordinates, _) = prepare_dense_embedding(data, n_rows, n_features, config)?;
+    let (graph, coordinates, _) = prepare_dense_embedding(data, n_rows, n_features, config, None)?;
     finish_embedding(
         graph,
         coordinates,
@@ -239,8 +239,44 @@ pub fn fit_dense_embedding_seeded(
     config: &DenseEmbeddingConfig<impl Copy + Into<f64>, impl Copy + Into<f64>>,
     explicit_seed: u32,
 ) -> Result<DenseEmbedding, DenseEmbeddingFitError> {
-    let (graph, coordinates, caller_rng) =
-        prepare_dense_embedding(data, n_rows, n_features, config)?;
+    fit_dense_embedding_seeded_with_graph_options(
+        data,
+        n_rows,
+        n_features,
+        config,
+        explicit_seed,
+        None,
+    )
+}
+
+/// Fit a serial seeded embedding with optional fuzzy graph settings.
+///
+/// With explicit settings, retain weak memberships as stored zeros using
+/// the public compatibility fit's epoch-dependent threshold.
+pub fn fit_dense_embedding_seeded_with_graph_options(
+    data: &[f32],
+    n_rows: usize,
+    n_features: usize,
+    config: &DenseEmbeddingConfig<impl Copy + Into<f64>, impl Copy + Into<f64>>,
+    explicit_seed: u32,
+    graph_options: Option<GraphOptions>,
+) -> Result<DenseEmbedding, DenseEmbeddingFitError> {
+    let (mut graph, coordinates, caller_rng) =
+        prepare_dense_embedding(data, n_rows, n_features, config, graph_options)?;
+    if graph_options.is_some() {
+        let sampling_epochs = match config.n_epochs {
+            epochs if epochs > 10 => epochs,
+            _ if n_rows <= 10_000 => 500,
+            _ => 200,
+        };
+        let maximum = graph.data.iter().copied().fold(0.0_f32, f32::max);
+        let cutoff = maximum / sampling_epochs as f32;
+        for weight in &mut graph.data {
+            if *weight < cutoff {
+                *weight = 0.0;
+            }
+        }
+    }
     let mut caller_rng = caller_rng.unwrap_or_else(|| Mt19937::new(explicit_seed));
     finish_seeded_embedding(graph, coordinates, &config.layout_config(), &mut caller_rng)
 }
@@ -313,8 +349,16 @@ fn prepare_dense_embedding(
     n_rows: usize,
     n_features: usize,
     config: &DenseEmbeddingConfig<impl Copy + Into<f64>, impl Copy + Into<f64>>,
+    graph_options: Option<GraphOptions>,
 ) -> Result<(CsrGraph, Vec<f32>, Option<Mt19937>), DenseEmbeddingFitError> {
-    let graph = fit_dense_graph(data, n_rows, n_features, config.n_neighbors, config.metric)?;
+    let graph = fit_dense_graph_with_options(
+        data,
+        n_rows,
+        n_features,
+        config.n_neighbors,
+        config.metric,
+        graph_options,
+    )?;
 
     let (coordinates, caller_rng) = match &config.init {
         DenseEmbeddingInit::Random { seed } => {

@@ -13,6 +13,7 @@ pub mod modern_layout;
 pub mod neighbors;
 mod numeric;
 pub mod optimize;
+pub mod parametric;
 pub mod rng;
 pub mod sampling;
 pub mod sparse;

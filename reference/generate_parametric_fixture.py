@@ -19,7 +19,7 @@ FIXTURE = Path(__file__).with_name("fixtures") / "umap-learn-0.6.0-parametric-wi
 REQUIREMENTS = Path(__file__).with_name("parametric-windows-x86_64.txt")
 
 
-def capture() -> dict:
+def configure_reference_environment():
     if (
         platform.system() != "Windows"
         or platform.machine().lower() not in ("amd64", "x86_64")
@@ -42,6 +42,26 @@ def capture() -> dict:
         NUMBA_NUM_THREADS="1",
     )
 
+
+def dense_model(tf, name, n_features, n_outputs, seed, input_layer=None, activation=None):
+    inputs = tf.keras.Input(shape=(n_features,))
+    features = inputs if input_layer is None else input_layer(inputs)
+    hidden = tf.keras.layers.Dense(
+        8,
+        activation="relu",
+        kernel_initializer=tf.keras.initializers.GlorotUniform(seed=seed),
+    )(features)
+    values = tf.keras.layers.Dense(
+        n_outputs,
+        activation=activation,
+        kernel_initializer=tf.keras.initializers.GlorotUniform(seed=seed + 1),
+    )(hidden)
+    return tf.keras.Model(inputs, values, name=name)
+
+
+def capture() -> dict:
+    configure_reference_environment()
+
     import numpy as np
     import tensorflow as tf
     from umap import ParametricUMAP
@@ -63,19 +83,6 @@ def capture() -> dict:
             "bits": values.ravel().view(np.uint32).tolist(),
         }
 
-    def dense_model(name, n_features, n_outputs, seed):
-        inputs = tf.keras.Input(shape=(n_features,))
-        hidden = tf.keras.layers.Dense(
-            8,
-            activation="relu",
-            kernel_initializer=tf.keras.initializers.GlorotUniform(seed=seed),
-        )(inputs)
-        values = tf.keras.layers.Dense(
-            n_outputs,
-            kernel_initializer=tf.keras.initializers.GlorotUniform(seed=seed + 1),
-        )(hidden)
-        return tf.keras.Model(inputs, values, name=name)
-
     packages = ("umap-learn", "tensorflow", "keras", "numpy", "scipy", "scikit-learn")
     report = {"versions": {name: version(name) for name in packages}, "cases": {}}
     for reconstruct in (False, True):
@@ -89,8 +96,8 @@ def capture() -> dict:
             compatibility_layout=True,
             batch_size=16,
             n_jobs=1,
-            encoder=dense_model("encoder", 3, 2, 41),
-            decoder=dense_model("decoder", 2, 3, 51) if reconstruct else None,
+            encoder=dense_model(tf, "encoder", 3, 2, 41),
+            decoder=dense_model(tf, "decoder", 2, 3, 51) if reconstruct else None,
             parametric_reconstruction=reconstruct,
             keras_fit_kwargs={"verbose": 0, "shuffle": False},
         )
@@ -143,4 +150,5 @@ def main():
 
 
 if __name__ == "__main__":
+    sys.tracebacklimit = 0
     main()

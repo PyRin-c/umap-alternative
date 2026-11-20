@@ -11,11 +11,23 @@ use std::fmt;
 pub struct Neighbor {
     /// Row index of the candidate in the input matrix.
     pub index: usize,
-    /// Euclidean distance from the query row to [`Neighbor::index`].
+    /// Distance from the query row to [`Neighbor::index`].
     pub distance: f32,
 }
 
-/// Input validation failures for [`exhaustive_knn`].
+/// Distance functions supported by exhaustive nearest-neighbor search.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DistanceMetric {
+    /// Euclidean (L2) distance.
+    Euclidean,
+    /// Manhattan (city-block or L1) distance.
+    Manhattan,
+    /// Chebyshev (L-infinity) distance.
+    Chebyshev,
+}
+
+/// Input validation failures for [`exhaustive_knn`] and
+/// [`exhaustive_knn_with_metric`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum KnnError {
     /// `n_rows * n_features` overflowed `usize`, or did not equal `data.len()`.
@@ -29,7 +41,7 @@ pub enum KnnError {
     },
     /// `k` must be at least one and no greater than the number of rows.
     InvalidK { k: usize, n_rows: usize },
-    /// Euclidean distance is undefined for a non-finite matrix value.
+    /// The selected distance is undefined for a non-finite matrix value.
     NonFiniteValue { index: usize, value: f32 },
 }
 
@@ -79,6 +91,32 @@ pub fn exhaustive_knn(
     n_features: usize,
     k: usize,
 ) -> Result<Vec<Vec<Neighbor>>, KnnError> {
+    exhaustive_knn_with_metric(data, n_rows, n_features, k, DistanceMetric::Euclidean)
+}
+
+/// Find the `k` nearest rows for every row of a dense matrix using `metric`.
+///
+/// `data` is interpreted as a contiguous row-major matrix with shape
+/// `n_rows x n_features`.  The returned outer vector has one entry per query
+/// row, and each inner vector is sorted from nearest to farthest.  Every query
+/// row, including the query itself, is considered as a candidate, so a valid
+/// `k` is in `1..=n_rows`.
+///
+/// Euclidean distances use `f64` subtraction, multiplication, accumulation
+/// (in feature order), and square root before rounding to `f32`.  Manhattan
+/// distances sum the absolute `f64` coordinate differences, and Chebyshev
+/// distances select the largest absolute `f64` coordinate difference; both are
+/// rounded to `f32` for the returned neighbor record. Ties are ordered
+/// deterministically by ascending candidate row index after [`f32::total_cmp`]
+/// distance ordering. Matrix values must be finite; reject non-finite values
+/// rather than returning an undefined distance.
+pub fn exhaustive_knn_with_metric(
+    data: &[f32],
+    n_rows: usize,
+    n_features: usize,
+    k: usize,
+    metric: DistanceMetric,
+) -> Result<Vec<Vec<Neighbor>>, KnnError> {
     let expected_values = n_rows.checked_mul(n_features);
     if expected_values != Some(data.len()) {
         return Err(KnnError::InvalidShape {
@@ -112,7 +150,7 @@ pub fn exhaustive_knn(
             let candidate = &data[candidate_start..candidate_start + n_features];
             candidates.push(Neighbor {
                 index: candidate_index,
-                distance: euclidean_distance(query, candidate),
+                distance: metric.distance(query, candidate),
             });
         }
 
@@ -128,6 +166,16 @@ pub fn exhaustive_knn(
     Ok(result)
 }
 
+impl DistanceMetric {
+    fn distance(self, left: &[f32], right: &[f32]) -> f32 {
+        match self {
+            Self::Euclidean => euclidean_distance(left, right),
+            Self::Manhattan => manhattan_distance(left, right),
+            Self::Chebyshev => chebyshev_distance(left, right),
+        }
+    }
+}
+
 fn euclidean_distance(left: &[f32], right: &[f32]) -> f32 {
     debug_assert_eq!(left.len(), right.len());
     let squared_sum = left
@@ -140,9 +188,31 @@ fn euclidean_distance(left: &[f32], right: &[f32]) -> f32 {
     squared_sum.sqrt() as f32
 }
 
+fn manhattan_distance(left: &[f32], right: &[f32]) -> f32 {
+    debug_assert_eq!(left.len(), right.len());
+    let absolute_sum = left
+        .iter()
+        .zip(right)
+        .fold(0.0_f64, |sum, (&left_value, &right_value)| {
+            let difference = f64::from(left_value) - f64::from(right_value);
+            sum + difference.abs()
+        });
+    absolute_sum as f32
+}
+
+fn chebyshev_distance(left: &[f32], right: &[f32]) -> f32 {
+    debug_assert_eq!(left.len(), right.len());
+    left.iter()
+        .zip(right)
+        .fold(0.0_f64, |maximum, (&left_value, &right_value)| {
+            let difference = (f64::from(left_value) - f64::from(right_value)).abs();
+            maximum.max(difference)
+        }) as f32
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{KnnError, Neighbor, exhaustive_knn};
+    use super::{DistanceMetric, KnnError, Neighbor, exhaustive_knn, exhaustive_knn_with_metric};
 
     #[test]
     fn computes_analytic_euclidean_distances() {
@@ -186,6 +256,62 @@ mod tests {
     }
 
     #[test]
+    fn metric_selection_changes_order_and_reports_analytic_distances() {
+        let data = [0.0, 0.0, 4.0, 1.0, 3.0, 3.0];
+        let euclidean = exhaustive_knn(&data, 3, 2, 3).expect("valid matrix");
+        let euclidean_from_selection =
+            exhaustive_knn_with_metric(&data, 3, 2, 3, DistanceMetric::Euclidean)
+                .expect("valid matrix");
+        let manhattan = exhaustive_knn_with_metric(&data, 3, 2, 3, DistanceMetric::Manhattan)
+            .expect("valid matrix");
+        let chebyshev = exhaustive_knn_with_metric(&data, 3, 2, 3, DistanceMetric::Chebyshev)
+            .expect("valid matrix");
+
+        assert_eq!(euclidean, euclidean_from_selection);
+        assert_eq!(
+            euclidean[0]
+                .iter()
+                .map(|neighbor| neighbor.index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(
+            manhattan[0],
+            vec![
+                Neighbor {
+                    index: 0,
+                    distance: 0.0,
+                },
+                Neighbor {
+                    index: 1,
+                    distance: 5.0,
+                },
+                Neighbor {
+                    index: 2,
+                    distance: 6.0,
+                },
+            ]
+        );
+        assert_eq!(
+            chebyshev[0],
+            vec![
+                Neighbor {
+                    index: 0,
+                    distance: 0.0,
+                },
+                Neighbor {
+                    index: 2,
+                    distance: 3.0,
+                },
+                Neighbor {
+                    index: 1,
+                    distance: 4.0,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn singleton_includes_itself() {
         let neighbors = exhaustive_knn(&[3.0, -4.0], 1, 2, 1).expect("valid matrix");
 
@@ -217,6 +343,23 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 0, 3, 2]
         );
+    }
+
+    #[test]
+    fn non_euclidean_ties_are_ordered_by_index() {
+        let data = [0.0, 0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 0.0];
+        for metric in [DistanceMetric::Manhattan, DistanceMetric::Chebyshev] {
+            let neighbors =
+                exhaustive_knn_with_metric(&data, 4, 2, 4, metric).expect("valid matrix");
+
+            assert_eq!(
+                neighbors[0]
+                    .iter()
+                    .map(|neighbor| neighbor.index)
+                    .collect::<Vec<_>>(),
+                vec![0, 3, 1, 2]
+            );
+        }
     }
 
     #[test]
@@ -274,5 +417,19 @@ mod tests {
                 value: f32::INFINITY,
             })
         );
+    }
+
+    #[test]
+    fn every_metric_rejects_non_finite_values() {
+        for metric in [
+            DistanceMetric::Euclidean,
+            DistanceMetric::Manhattan,
+            DistanceMetric::Chebyshev,
+        ] {
+            assert!(matches!(
+                exhaustive_knn_with_metric(&[0.0, f32::NAN], 1, 2, 1, metric),
+                Err(KnnError::NonFiniteValue { index: 1, value }) if value.is_nan()
+            ));
+        }
     }
 }

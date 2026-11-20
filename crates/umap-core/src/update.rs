@@ -1,4 +1,4 @@
-//! Graph rebuilding and coordinate initialization for dense incremental fits.
+//! Graph rebuilding and coordinate initialization for incremental fits.
 
 use crate::embedding::{DenseEmbedding, EmbeddingLayoutConfig, zero_weak_memberships};
 use crate::fit::{DenseGraphFitError, build_fitted_graph, build_graph_with_cutoff};
@@ -8,7 +8,7 @@ use crate::initialization::{
     validate_finite, write_mean,
 };
 use crate::layout::{validate_parameters, validate_repulsion_strength};
-use crate::neighbors::{DistanceMetric, Neighbor, exhaustive_knn_with_metric};
+use crate::neighbors::{DistanceMetric, exhaustive_knn_with_metric};
 use crate::optimize::OptimizeError;
 use crate::rng::Mt19937;
 use crate::sampling::EdgeSamplingCursor;
@@ -154,6 +154,50 @@ pub fn update_dense_embedding(
     let mut embedding = prepare_with_rng(
         data, n_rows, n_features, n_existing, fitted, config, &mut rng,
     )?;
+    optimize_prepared_update(&mut embedding, layout, &mut rng)?;
+    Ok(embedding)
+}
+
+/// Initialize and optimize an update using an already rebuilt graph and the
+/// appended rows' neighbor columns, in distance order and with a uniform rank width.
+pub fn update_embedding_from_ranked_graph(
+    graph: CsrGraph,
+    n_existing: usize,
+    appended_ranks: &[usize],
+    fitted: &[f32],
+    transform_seed: u32,
+    layout: &EmbeddingLayoutConfig<impl Copy + Into<f64>, impl Copy + Into<f64>>,
+) -> Result<DenseEmbedding, DenseUpdateError> {
+    let n_appended = graph.n_rows.saturating_sub(n_existing);
+    if n_existing == 0
+        || n_appended == 0
+        || appended_ranks.is_empty()
+        || !appended_ranks.len().is_multiple_of(n_appended)
+        || appended_ranks.iter().any(|&column| column >= graph.n_rows)
+    {
+        return Err(InitializationError::InvalidShape {
+            n_rows: n_appended,
+            n_components: appended_ranks.len().checked_div(n_appended).unwrap_or(0),
+            values: appended_ranks.len(),
+        }
+        .into());
+    }
+    let width = layout.n_components;
+    let init = validate_fitted_layout(n_existing, graph.n_rows, width, fitted)?;
+    let mut rng = begin_update_layout_rng(transform_seed);
+    let rows = appended_ranks
+        .chunks_exact(appended_ranks.len() / n_appended)
+        .map(|row| row.iter().copied());
+    let mut embedding = prepare_ranked_update(graph, fitted, width, init, rows, &mut rng)?;
+    optimize_prepared_update(&mut embedding, layout, &mut rng)?;
+    Ok(embedding)
+}
+
+fn optimize_prepared_update(
+    embedding: &mut DenseEmbedding,
+    layout: &EmbeddingLayoutConfig<impl Copy + Into<f64>, impl Copy + Into<f64>>,
+    rng: &mut Mt19937,
+) -> Result<(), DenseUpdateError> {
     zero_weak_memberships(&mut embedding.graph, layout.n_epochs, false);
     if embedding.coordinates[0].is_nan() {
         // Rows masked by the original fit cause every normalized coordinate
@@ -169,15 +213,10 @@ pub fn update_dense_embedding(
         EdgeSamplingCursor::from_positive_interval(1.0, layout.negative_sample_rate)
             .map_err(|error| DenseUpdateError::Optimization(error.into()))?;
     } else {
-        optimize_update_layout(
-            &mut embedding.coordinates,
-            &embedding.graph,
-            layout,
-            &mut rng,
-        )
-        .map_err(DenseUpdateError::Optimization)?;
+        optimize_update_layout(&mut embedding.coordinates, &embedding.graph, layout, rng)
+            .map_err(DenseUpdateError::Optimization)?;
     }
-    Ok(embedding)
+    Ok(())
 }
 
 fn prepare_with_rng(
@@ -197,7 +236,38 @@ fn prepare_with_rng(
         });
     }
     let width = config.n_components;
-    let shape = (n_rows, width);
+    let init = validate_fitted_layout(n_existing, n_rows, width, fitted)?;
+    let neighbors =
+        exhaustive_knn_with_metric(data, n_rows, n_features, config.n_neighbors, config.metric)
+            .map_err(|error| DenseUpdateError::Graph(error.into()))?;
+    let graph = if config.metric.is_angular() {
+        build_graph_with_cutoff(
+            &neighbors,
+            config.n_neighbors,
+            f32::INFINITY,
+            config.graph_options.unwrap_or_default(),
+        )
+    } else {
+        build_fitted_graph(&neighbors, config.graph_options)
+    }
+    .map_err(|error| DenseUpdateError::Graph(error.into()))?;
+    let rows = neighbors[n_existing..]
+        .iter()
+        .map(|neighbors| neighbors.iter().map(|neighbor| neighbor.index));
+    prepare_ranked_update(graph, fitted, width, init, rows, rng)
+}
+
+struct ValidatedLayout {
+    length: usize,
+    has_masked_rows: bool,
+}
+
+fn validate_fitted_layout(
+    n_existing: usize,
+    n_rows: usize,
+    width: usize,
+    fitted: &[f32],
+) -> Result<ValidatedLayout, DenseUpdateError> {
     let length = n_rows
         .checked_mul(width)
         .ok_or(InitializationError::ShapeOverflow {
@@ -228,30 +298,31 @@ fn prepare_with_rng(
             })?;
         }
     }
-    let neighbors =
-        exhaustive_knn_with_metric(data, n_rows, n_features, config.n_neighbors, config.metric)
-            .map_err(|error| DenseUpdateError::Graph(error.into()))?;
-    let graph = if config.metric.is_angular() {
-        build_graph_with_cutoff(
-            &neighbors,
-            config.n_neighbors,
-            f32::INFINITY,
-            config.graph_options.unwrap_or_default(),
-        )
-    } else {
-        build_fitted_graph(&neighbors, config.graph_options)
-    }
-    .map_err(|error| DenseUpdateError::Graph(error.into()))?;
-    let mut coordinates = Vec::with_capacity(length);
+    Ok(ValidatedLayout {
+        length,
+        has_masked_rows,
+    })
+}
+
+fn prepare_ranked_update(
+    graph: CsrGraph,
+    fitted: &[f32],
+    width: usize,
+    init: ValidatedLayout,
+    appended_rows: impl Iterator<Item = impl Iterator<Item = usize>>,
+    rng: &mut Mt19937,
+) -> Result<DenseEmbedding, DenseUpdateError> {
+    let shape = (graph.n_rows, width);
+    let mut coordinates = Vec::with_capacity(init.length);
     coordinates.extend_from_slice(fitted);
-    coordinates.resize(length, 0.0);
+    coordinates.resize(init.length, 0.0);
     append_centroids(
         &mut coordinates[fitted.len()..],
         fitted,
         width,
-        &neighbors[n_existing..],
+        appended_rows,
     );
-    if has_masked_rows {
+    if init.has_masked_rows {
         if has_coincident_rows(&coordinates, width) {
             return Err(DenseUpdateError::CoincidentNonFiniteLayout { graph });
         }
@@ -261,7 +332,7 @@ fn prepare_with_rng(
         if has_coincident_rows(&coordinates, width) {
             perturb_coincident_layout(&mut coordinates, width, rng);
         }
-        normalize_columns(&mut coordinates, n_rows, width)?;
+        normalize_columns(&mut coordinates, shape.0, width)?;
     }
     Ok(DenseEmbedding {
         graph,
@@ -274,14 +345,12 @@ fn append_centroids(
     appended: &mut [f32],
     fitted: &[f32],
     width: usize,
-    neighbors: &[Vec<Neighbor>],
+    neighbors: impl Iterator<Item = impl Iterator<Item = usize>>,
 ) {
     let n_existing = fitted.len() / width;
     let mut fallback = None;
     for (coordinate, neighbors) in appended.chunks_exact_mut(width).zip(neighbors) {
         let selected = neighbors
-            .iter()
-            .map(|neighbor| neighbor.index)
             .filter(|&row| row < n_existing)
             .map(|row| &fitted[row * width..(row + 1) * width]);
         let mut selected = selected.peekable();

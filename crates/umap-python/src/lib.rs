@@ -34,15 +34,17 @@ use umap_core::rng::Mt19937;
 use umap_core::sampling::{ModernSampledLayout, ModernSamplingConfig};
 use umap_core::sparse::{
     CsrFeatures, SparseTieDistances, fit_sparse_euclidean_graph_with_cutoff,
-    fit_sparse_feature_graph_with_cutoff, fit_sparse_graph_with_options,
-    rank_sparse_feature_queries, unique_csr_rows,
+    fit_sparse_euclidean_update_graph, fit_sparse_feature_graph_with_cutoff,
+    fit_sparse_graph_with_options, rank_sparse_feature_queries, unique_csr_rows,
 };
 use umap_core::transform::{
     CooGraph, DenseEmbeddingTransformConfig, transform_dense_embedding_with_options,
     transform_dense_graph_with_cutoff, transform_dense_graph_with_tie_ranking,
     transform_embedding_from_graph, transform_ranked_neighbors_graph,
 };
-use umap_core::update::{DenseUpdateConfig, DenseUpdateError, update_dense_embedding};
+use umap_core::update::{
+    DenseUpdateConfig, DenseUpdateError, update_dense_embedding, update_embedding_from_ranked_graph,
+};
 
 type CsrComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
 type RowGroups = (Vec<usize>, Vec<usize>, Vec<usize>);
@@ -457,6 +459,80 @@ fn _update_dense_embedding(
         }
         Err(error) => return Err(PyValueError::new_err(error.to_string())),
     };
+    Ok((csr_components(graph), shape, coordinates))
+}
+
+/// Rebuild the sparse Euclidean graph and return only the ranks used to initialize new rows.
+#[pyfunction]
+#[pyo3(signature = (data, n_existing, k, *, graph_options=None))]
+fn _fit_sparse_euclidean_update_graph(
+    py: Python<'_>,
+    data: CsrComponents,
+    n_existing: usize,
+    k: usize,
+    graph_options: Option<(f64, f64)>,
+) -> PyResult<(CsrComponents, Vec<usize>)> {
+    let options = parse_graph_options(graph_options)?.unwrap_or_default();
+    py.detach(|| fit_sparse_euclidean_update_graph(csr_features(&data), n_existing, k, options))
+        .map(|(graph, ranks)| (csr_components(graph), ranks))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+/// Initialize and optimize appended rows from the rebuilt graph and their ranks.
+#[pyfunction]
+#[pyo3(signature = (
+    graph, n_existing, appended_ranks, fitted, *, n_components, a, b, learning_rate,
+    n_epochs, repulsion_strength, negative_sample_rate, transform_seed
+))]
+#[allow(clippy::too_many_arguments)]
+fn _update_ranked_embedding(
+    py: Python<'_>,
+    graph: CsrComponents,
+    n_existing: usize,
+    appended_ranks: Vec<usize>,
+    fitted: Vec<f32>,
+    n_components: usize,
+    a: f64,
+    b: f64,
+    learning_rate: f64,
+    n_epochs: usize,
+    repulsion_strength: f64,
+    negative_sample_rate: f64,
+    transform_seed: u32,
+) -> PyResult<EmbeddingComponents> {
+    let ((n_rows, n_cols), indptr, indices, data) = graph;
+    let graph = CsrGraph {
+        n_rows,
+        n_cols,
+        indptr,
+        indices,
+        data,
+    };
+    let layout = EmbeddingLayoutConfig {
+        n_components,
+        a,
+        b,
+        learning_rate,
+        n_epochs,
+        repulsion_strength,
+        negative_sample_rate,
+    };
+    let DenseEmbedding {
+        graph,
+        coordinates,
+        shape,
+    } = py
+        .detach(|| {
+            update_embedding_from_ranked_graph(
+                graph,
+                n_existing,
+                &appended_ranks,
+                &fitted,
+                transform_seed,
+                &layout,
+            )
+        })
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
     Ok((csr_components(graph), shape, coordinates))
 }
 
@@ -1276,6 +1352,11 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_embedding, module)?)?;
     module.add_function(wrap_pyfunction!(_update_dense_embedding, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        _fit_sparse_euclidean_update_graph,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(_update_ranked_embedding, module)?)?;
     module.add_function(wrap_pyfunction!(_density_radius_log_inputs, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_graph_embedding_with_rng, module)?)?;
     module.add_function(wrap_pyfunction!(_initialize_modern_layout, module)?)?;

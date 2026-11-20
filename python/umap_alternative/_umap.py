@@ -8,7 +8,7 @@ import warnings
 from functools import partial
 
 import numpy as np
-from scipy.sparse import coo_matrix, csc_matrix, csr_matrix, issparse, tril, triu
+from scipy.sparse import coo_matrix, csc_matrix, csr_matrix, issparse, tril, triu, vstack
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial import Delaunay
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -379,7 +379,7 @@ def _check_compressed_storage(X):
     _check_sparse_indices(indices, data.size, minor_size)
 
 
-def _check_sparse_input(X, *, input_name):
+def _check_sparse_input(X, *, input_name, ensure_all_finite=True):
     if X.ndim != 2:
         raise ValueError(f"{input_name} must be two-dimensional")
     if X.format in ("csr", "csc"):
@@ -387,7 +387,7 @@ def _check_sparse_input(X, *, input_name):
     elif X.format == "coo":
         _check_sparse_indices(np.asarray(X.row), X.data.size, X.shape[0])
         _check_sparse_indices(np.asarray(X.col), X.data.size, X.shape[1])
-    return check_array(X, dtype=np.float32, accept_sparse="csr")
+    return check_array(X, dtype=np.float32, accept_sparse="csr", ensure_all_finite=ensure_all_finite)
 
 
 def _rank_sparse_distances(X, k, *, requested_neighbors=None):
@@ -499,7 +499,7 @@ def _sparse_features(X, *, preserve_duplicates):
         constructor = csr_matrix if compressed_rows else csc_matrix
         csr = constructor((data, indices, offsets), shape=X.shape, copy=True).tocsr()
     if preserve_duplicates:
-        # Cosine normalizes compressed rows with their stored values intact.
+        # Some distance paths need the individual stored values.
         csr.sort_indices()
     else:
         csr.sum_duplicates()
@@ -902,8 +902,11 @@ class UMAP(BaseEstimator, TransformerMixin):
                     graph_options=(graph_options or (1.0, 1.0)) if embedding_mode else graph_options,
                 )
         elif ranked_sparse_graph:
+            # Euclidean pairwise distances coalesce these validated entries
+            # after widening their values, while the identity keeps them stored.
+            ranking_input = fitted_input if metric == "euclidean" else X_checked
             components, removed = _native._fit_sparse_feature_graph_with_cutoff(
-                _csr_buffers(X_checked),
+                _csr_buffers(ranking_input),
                 n_neighbors,
                 metric,
                 cutoff,
@@ -968,6 +971,12 @@ class UMAP(BaseEstimator, TransformerMixin):
                 stacklevel=2,
             )
         if graph.nnz == 0 and (embedding_mode or empty_continuous_graph):
+            if sparse_feature_layout and metric == "euclidean" and not hasattr(self, "_graph_transform_fit"):
+                # A cold fit can publish the empty graph before layout fails.
+                self._store_fit(
+                    n_features, transform_fit, graph, n_neighbors, None,
+                    transform_cutoff=transform_cutoff, exact_fit_input=fitted_input,
+                )
             raise ValueError("zero-size array to reduction operation maximum which has no identity")
         if modern:
             if embedding_options["negative_sample_rate"] == 0:
@@ -1263,7 +1272,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         return np.asarray(coordinates, dtype=np.float32).reshape(queries.shape[0], n_components)
 
     def update(self, X, ensure_all_finite=True):
-        """Append dense features and update the fitted embedding in place."""
+        """Append dense or sparse Euclidean features and update the fitted embedding."""
         if not hasattr(self, "_graph_transform_fit"):
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '_raw_data'")
         if self._graph_transform_fit is None or self._graph_transform_fit[1] == "precomputed":
@@ -1273,8 +1282,11 @@ class UMAP(BaseEstimator, TransformerMixin):
         if getattr(self, "_supervised_fit", False):
             raise ValueError("Updating supervised models is not currently supported")
         training, metric = self._graph_transform_fit
-        if issparse(training) or self._supplied_transform_error is not None:
+        sparse = issparse(training)
+        if (sparse and metric != "euclidean") or self._supplied_transform_error is not None:
             raise NotImplementedError("update requires dense features with computed neighbors")
+        if sparse:
+            return self._update_sparse_euclidean(X, training, ensure_all_finite)
         batch = check_array(
             X, dtype=np.float32, order="C", ensure_all_finite=ensure_all_finite
         )
@@ -1334,6 +1346,43 @@ class UMAP(BaseEstimator, TransformerMixin):
             embedding,
             embedding_options=self._embedding_transform_options,
             transform_cutoff=self._transform_cutoff,
+        )
+
+    def _update_sparse_euclidean(self, X, training, ensure_all_finite):
+        if issparse(X):
+            batch = _check_sparse_input(X, input_name="sparse features", ensure_all_finite=ensure_all_finite)
+        else:
+            batch = check_array(X, dtype=np.float32, order="C", ensure_all_finite=ensure_all_finite)
+        snapshot = self._exact_fit_input
+        retained = snapshot if snapshot is not None and snapshot.shape == training.shape else training
+        stacked = vstack((retained, batch))
+        combined = _sparse_features(stacked, preserve_duplicates=True)
+        seed = self._embedding_transform_seed()
+        k = self.n_neighbors_
+        n_existing = training.shape[0]
+        components, appended_ranks = _native._fit_sparse_euclidean_update_graph(
+            _csr_buffers(combined), n_existing, k, graph_options=self._graph_options(),
+        )
+        # The combined graph and training rows are visible before layout starts.
+        self.graph_ = _csr_graph(components)
+        self._graph_transform_fit = (combined, "euclidean")
+        fitted = self.embedding_
+        epochs = self.n_epochs
+        if epochs is not None and not isinstance(epochs, (numbers.Integral, list, tuple, np.ndarray)):
+            raise TypeError(_EPOCHS_ERROR)
+        n_epochs = 0 if epochs is None else _validate_epochs(epochs)
+        repulsion, negative_rate = self._sampling_options()
+        components, shape, coordinates = _native._update_ranked_embedding(
+            components, n_existing, appended_ranks, fitted.ravel().tolist(),
+            n_components=fitted.shape[1], n_epochs=n_epochs, repulsion_strength=repulsion,
+            negative_sample_rate=negative_rate, transform_seed=seed,
+            **self._embedding_transform_options,
+        )
+        embedding = np.asarray(coordinates, dtype=np.float32).reshape(shape)
+        self._store_fit(
+            combined.shape[1], (combined, "euclidean"), _csr_graph(components), k, embedding,
+            embedding_options=self._embedding_transform_options,
+            transform_cutoff=self._transform_cutoff, exact_fit_input=stacked,
         )
 
     def inverse_transform(self, X):

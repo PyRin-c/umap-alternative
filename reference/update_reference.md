@@ -141,11 +141,74 @@ and four updated weight differences on the metric control. Native dense
 cutoff fits use the same distance and ranking kernels as the corresponding
 uncut fits, and retain only a row of candidates and the selected ranks.
 
-Sparse feature updates, additional metrics, externally supplied neighbors,
-general equal-distance ranking, and failures during the optimizer remain
-open.
+Sparse Euclidean feature updates are covered below. Additional sparse metrics,
+externally supplied neighbors, and failures during the optimizer remain open.
 
-### Finite-cutoff fit timing
+## Sparse Euclidean updates
+
+Python `UMAP.update` accepts finite feature batches after an unsupervised
+sparse Euclidean compatibility fit with computed neighbors. The public
+fixture exercises CSR, CSC, and COO fits, dense and CSR, CSC, and COO
+appends, and appends from SciPy `csr_array`. The update retains the
+effective neighbor count from the first fit, including truncation to one
+or to one less than the original row count. Changing `n_neighbors` after
+fit leaves that effective count in use.
+
+The native search rebuilds the graph over all combined rows, using the
+fitted metric and no distance cutoff. Equal distances rank by row index,
+including when a tied row does not select itself. It returns only the
+rebuilt CSR graph and the appended rows' neighbor columns. The shared
+serial update prepares the appended centroids, normalizes the combined
+layout, samples both old and new rows, and retains the positions of weak
+memberships that become stored zeros. The fitted cutoff still applies to
+subsequent held-out transforms.
+
+Float32 CSR batches may store repeated columns and signed zeros. The search
+coalesces repeated values in float64, then rounds the sum of squared
+differences to float32 before the square root. On the `base_coo` case's
+second append, summing repeated values in float32 changes 12 CSR weights.
+The same precision rule also applies to ranked sparse Euclidean fits.
+Input storage, previous graph objects, and previous embedding arrays
+keep their original contents. Sparse features remain sparse through the
+update, including a test with 200,001 columns.
+
+An empty batch, the wrong feature width, a disallowed nonfinite batch, and
+an invalid transform seed fail before graph publication. A failed two-row
+fit can already expose an empty graph. Updating that model or a graph-only
+model publishes the next graph before raising `AttributeError` for the
+missing embedding. A failed layout caused by invalid epochs or duplicate
+provisional coordinates with NaNs retains the prior embedding and
+exact-input shortcut while publishing the expanded graph. A successful
+append replaces both the graph and the embedding. A combined CSR snapshot
+takes the fitted-input shortcut in the matching cases. The mixed dense
+append exercised the held-out path for the reconstructed combined CSR.
+
+The two pinned hosts generated the same fixture. Its 53 fit cases and
+70 update calls include 55 successful updates. The comparisons cover
+2,406 fitted CSR weights, 3,810 weights across the update checkpoints,
+974 fitted coordinates, and 1,078 retained and 208 appended coordinates
+after successful calls. Failure checkpoints check 198 retained coordinates.
+The fixture fixes `a` and `b` and exercises omitted, zero, one, and positive
+epoch counts, epoch lists, repeated calls, and both unsigned transform seed
+endpoints.
+[Generator](generate_sparse_update_fixture.py) · [Fixture](fixtures/umap-learn-0.6.0-sparse-update-x86_64.json)
+
+```sh
+uv run --project reference --locked python reference/generate_sparse_update_fixture.py \
+  --output reference/fixtures/umap-learn-0.6.0-sparse-update-x86_64.json --check
+```
+
+Two residuals are reproducible from that fixture. In `nan_allowed`, a CSR
+batch containing NaN with `ensure_all_finite=False` expands the public graph
+from 9 to 10 rows, stores NaN weights, and returns a finite embedding. The
+next finite append raises `ValueError`. The port raises `ValueError` before
+publishing any change on the NaN call. In `cutoff_tie`, `negative_epochs`,
+and `noninteger_epochs`, the exact old-input shortcut agrees after the failed
+updates. For the newly expanded held-out inputs, the port detects the stale
+layout size and raises `ValueError`. The public wheel returns a 10-by-2
+result in `cutoff_tie` and raises `IndexError` in the four invalid-epoch probes.
+
+## Finite-cutoff fit timing
 
 The Windows benchmark uses dense Euclidean features from NumPy
 `default_rng(20261121).standard_normal((n_rows, 8)).astype(np.float32)`,

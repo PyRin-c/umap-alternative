@@ -164,7 +164,7 @@ pub enum SparseKnnError {
         column: usize,
         n_features: usize,
     },
-    /// Stored column indices must be sorted, and may only repeat for cosine distance.
+    /// Column indices must be sorted and unique when the path requires canonical CSR.
     UnorderedColumnIndices {
         row: usize,
         position: usize,
@@ -358,7 +358,8 @@ pub fn exhaustive_csr_knn(
         data,
         shape: (n_rows, n_features),
     };
-    csr_knn_counting_cutoff(input, k, metric.into(), f32::INFINITY).map(|(neighbors, _)| neighbors)
+    csr_knn_counting_cutoff(input, k, metric.into(), f32::INFINITY, false)
+        .map(|(neighbors, _)| neighbors)
 }
 
 fn csr_knn_counting_cutoff(
@@ -366,6 +367,7 @@ fn csr_knn_counting_cutoff(
     k: usize,
     metric: SparseDistanceMetric,
     cutoff: f32,
+    allow_duplicates: bool,
 ) -> Result<(Vec<Vec<Neighbor>>, usize), SparseKnnError> {
     let metric = match metric {
         SparseDistanceMetric::Dense(DistanceMetric::Cosine) => SparseDistanceMetric::Cosine,
@@ -374,7 +376,11 @@ fn csr_knn_counting_cutoff(
         }
         metric => metric,
     };
-    validate_csr_features(input, Some(k), metric == SparseDistanceMetric::Cosine)?;
+    validate_csr_features(
+        input,
+        Some(k),
+        allow_duplicates || metric == SparseDistanceMetric::Cosine,
+    )?;
     let normalized_data = (metric == SparseDistanceMetric::Cosine)
         .then(|| normalize_sparse_rows(input.indptr, input.data));
     let input = CsrFeatures {
@@ -703,7 +709,8 @@ pub fn fit_sparse_graph_with_options(
 }
 
 /// Fit canonical CSR from Euclidean feature ranks, counting all ordered
-/// pairs at or above the cutoff. Zero-distance ties may exclude self.
+/// pairs at or above the cutoff. Repeated feature entries are coalesced in
+/// float64 before measuring distances. Zero-distance ties may exclude self.
 pub fn fit_sparse_euclidean_graph_with_cutoff(
     indptr: &[usize],
     indices: &[usize],
@@ -719,8 +726,31 @@ pub fn fit_sparse_euclidean_graph_with_cutoff(
         data,
         shape,
     };
-    fit_index_ranked_sparse_graph(input, k, DistanceMetric::Euclidean, cutoff, options)
+    let (graph, _, removed) =
+        fit_index_ranked_sparse_graph(input, k, DistanceMetric::Euclidean, cutoff, options)?;
+    Ok((graph, removed))
 }
+
+/// Rebuild an uncut Euclidean graph and retain the neighbor columns of the
+/// appended rows for layout initialization. Ranks break ties by row index.
+pub fn fit_sparse_euclidean_update_graph(
+    input: CsrFeatures<'_>,
+    n_existing: usize,
+    k: usize,
+    options: GraphOptions,
+) -> Result<(CsrGraph, Vec<usize>), SparseGraphFitError> {
+    let (graph, neighbors, _) =
+        fit_index_ranked_sparse_graph(input, k, DistanceMetric::Euclidean, f32::INFINITY, options)?;
+    let appended_ranks = neighbors
+        .into_iter()
+        .skip(n_existing)
+        .flatten()
+        .map(|rank| rank.index)
+        .collect();
+    Ok((graph, appended_ranks))
+}
+
+type IndexRankedGraph = (CsrGraph, Vec<Vec<Neighbor>>, usize);
 
 fn fit_index_ranked_sparse_graph(
     input: CsrFeatures<'_>,
@@ -728,12 +758,12 @@ fn fit_index_ranked_sparse_graph(
     metric: DistanceMetric,
     cutoff: f32,
     options: GraphOptions,
-) -> Result<(CsrGraph, usize), SparseGraphFitError> {
-    let (neighbors, removed) = csr_knn_counting_cutoff(input, k, metric.into(), cutoff)
+) -> Result<IndexRankedGraph, SparseGraphFitError> {
+    let (neighbors, removed) = csr_knn_counting_cutoff(input, k, metric.into(), cutoff, true)
         .map_err(SparseGraphFitError::Knn)?;
     let graph = build_graph_with_cutoff(&neighbors, k, cutoff, options)
         .map_err(SparseGraphFitError::Graph)?;
-    Ok((graph, removed))
+    Ok((graph, neighbors, removed))
 }
 
 /// Fit from sorted CSR, keeping Manhattan distances wide through selection
@@ -750,7 +780,9 @@ pub fn fit_sparse_feature_graph_with_cutoff(
     use SparseGraphFitError as Error;
     validate_feature_metric(metric).map_err(Error::Knn)?;
     if metric == DistanceMetric::Cosine {
-        return fit_index_ranked_sparse_graph(input, k, metric, cutoff as f32, options);
+        let (graph, _, removed) =
+            fit_index_ranked_sparse_graph(input, k, metric, cutoff as f32, options)?;
+        return Ok((graph, removed));
     }
     validate_csr_features(input, Some(k), false).map_err(Error::Knn)?;
     let mut ranking = SparseFeatureRanking::new(input, metric);
@@ -791,13 +823,32 @@ struct CsrRow<'a> {
     values: &'a [f32],
 }
 
-impl CsrRow<'_> {
+impl<'a> CsrRow<'a> {
     fn prefix(self, width: usize) -> Self {
         let end = self.columns.partition_point(|&column| column < width);
         Self {
             columns: &self.columns[..end],
             values: &self.values[..end],
         }
+    }
+
+    fn entries(self) -> impl Iterator<Item = (usize, f32)> + 'a {
+        self.columns
+            .iter()
+            .copied()
+            .zip(self.values.iter().copied())
+    }
+
+    fn wide_entries(self) -> impl Iterator<Item = (usize, f64)> + 'a {
+        let mut entries = self.entries().peekable();
+        std::iter::from_fn(move || {
+            let (column, value) = entries.next()?;
+            let mut sum = f64::from(value);
+            while let Some((_, duplicate)) = entries.next_if(|&(next, _)| next == column) {
+                sum += f64::from(duplicate);
+            }
+            Some((column, sum))
+        })
     }
 }
 
@@ -850,37 +901,24 @@ fn merged_features<'a>(
     left: CsrRow<'a>,
     right: CsrRow<'a>,
 ) -> impl Iterator<Item = (f32, f32)> + 'a {
-    let (mut left_position, mut right_position) = (0, 0);
+    merged_entries(left.entries(), right.entries())
+}
+
+fn merged_entries<T: Default + Copy>(
+    left: impl Iterator<Item = (usize, T)>,
+    right: impl Iterator<Item = (usize, T)>,
+) -> impl Iterator<Item = (T, T)> {
+    let mut left = left.peekable();
+    let mut right = right.peekable();
     std::iter::from_fn(move || {
         // Validated feature indices are always less than usize::MAX.
-        let left_column = left
-            .columns
-            .get(left_position)
-            .copied()
-            .unwrap_or(usize::MAX);
-        let right_column = right
-            .columns
-            .get(right_position)
-            .copied()
-            .unwrap_or(usize::MAX);
+        let left_column = left.peek().map_or(usize::MAX, |&(column, _)| column);
+        let right_column = right.peek().map_or(usize::MAX, |&(column, _)| column);
         Some(match left_column.cmp(&right_column) {
-            Ordering::Less => {
-                let value = left.values[left_position];
-                left_position += 1;
-                (value, 0.0)
-            }
-            Ordering::Greater => {
-                let value = right.values[right_position];
-                right_position += 1;
-                (0.0, value)
-            }
+            Ordering::Less => (left.next()?.1, T::default()),
+            Ordering::Greater => (T::default(), right.next()?.1),
             Ordering::Equal if left_column == usize::MAX => return None,
-            Ordering::Equal => {
-                let values = (left.values[left_position], right.values[right_position]);
-                left_position += 1;
-                right_position += 1;
-                values
-            }
+            Ordering::Equal => (left.next()?.1, right.next()?.1),
         })
     })
 }
@@ -889,17 +927,21 @@ fn sparse_distance(left: CsrRow<'_>, right: CsrRow<'_>, metric: DistanceMetric) 
     if metric == DistanceMetric::Manhattan {
         return manhattan_distance_pairs(merged_features(left, right));
     }
-    let differences = merged_features(left, right)
-        .map(|(left_value, right_value)| f64::from(left_value) - f64::from(right_value));
     match metric {
         DistanceMetric::Euclidean => {
-            let squared_sum =
-                differences.fold(0.0, |sum, difference| sum + difference * difference);
+            let squared_sum = merged_entries(left.wide_entries(), right.wide_entries()).fold(
+                0.0,
+                |sum, (left, right)| {
+                    let difference = left - right;
+                    sum + difference * difference
+                },
+            );
             (squared_sum as f32).sqrt()
         }
-        DistanceMetric::Chebyshev => {
-            differences.fold(0.0_f64, |maximum, difference| maximum.max(difference.abs())) as f32
-        }
+        DistanceMetric::Chebyshev => merged_features(left, right)
+            .fold(0.0_f64, |maximum, (left, right)| {
+                maximum.max((f64::from(left) - f64::from(right)).abs())
+            }) as f32,
         DistanceMetric::Manhattan | DistanceMetric::Cosine | DistanceMetric::Correlation => {
             unreachable!("CSR metric was dispatched before merging coordinates")
         }

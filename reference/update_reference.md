@@ -1,0 +1,93 @@
+# Public UMAP update reference
+
+`generate_update_fixture.py` records `UMAP.fit` and `UMAP.update` from the
+published `umap-learn==0.6.0` wheel. It uses the public `graph_` and
+`embedding_` attributes. Each case records inputs, parameter overrides, call
+results, warning categories and messages, and the public state after each call.
+All update calls use the default validation options.
+
+The fixture stores IEEE-754 words as `bits_uint32` for float32 arrays and
+`bits_uint64` for the singleton float64 embedding. A CSR graph preserves the
+published `indptr`, `indices`, and `data_bits_uint32` arrays in storage order.
+A null attribute denotes absence. All 34 cases were repeated with fresh inputs
+and a fresh estimator. Separate Python processes with separate Numba caches
+produced byte-identical fixture files.
+
+## Update and graph behavior
+
+| Cases | Public result |
+| --- | --- |
+| Dense and CSR success | `None`. The graph and embedding grow from eight rows to nine or ten. The checkpoints cover a single row, close and far pairs, a duplicate row, one feature, and successive calls. |
+| Update compared with fresh combined fit | With the original requested neighbor count available at fit, the compared graphs match in shape, CSR order, and every weight bit. The paired and sequential examples end with the same graph and different embedding coordinates. |
+| Requested neighbors equal to or above the eight training rows | Fit warns and caps the count at seven. Update graphs match fresh fits of the combined data with `n_neighbors=7`. Fresh fits using the original requests of eight or twelve produce different graphs. |
+| `n_neighbors=1` | Fit raises `ValueError`. |
+| One or two training rows | The one-row fit returns a float64 zero embedding of shape `(1, 2)` with no graph. Its update raises `AttributeError` and preserves that state. For two rows, fit warns about the neighbor cap and disconnected vertices, then raises `ValueError` with the empty `(2, 2)` graph already published. |
+| Empty, wrong-width, zero-feature, one-dimensional, or NaN batch | Update raises `ValueError`. Every stored graph and embedding bit is preserved. |
+| Supervised or precomputed fit | Update raises `ValueError` and preserves graph and embedding. |
+| Graph-only fit | Update raises `AttributeError` after publishing the expanded graph. The new graph matches a fresh combined graph-mode fit, and the embedding is absent throughout. |
+| Fresh estimator | Update raises `AttributeError` and leaves both attributes absent. |
+
+## Independent initialization model
+
+`analyze_update_fixture.py` predicts the layout using NumPy, the fixture's input
+rows, and the public embedding before each update. Graph weights enter only the
+weighted-centroid comparison. These steps reproduced every coordinate in all
+17 zero- and one-epoch update checkpoints.
+
+1. Stack old and new feature rows. For each new row, sort by squared Euclidean
+   distance and take the first `min(n_neighbors, original_training_rows - 1)`
+   indices, including the new row itself. The cases used for the model have
+   distinct input rows.
+2. Retain indices from before the current update and average their existing
+   float32 coordinates in distance order. Use the mean of the entire old
+   embedding when this leaves an empty list. Each row in a simultaneous batch
+   uses the same pre-update embedding.
+3. Append the centroids in input order. When the resulting layout has
+   coincident coordinates, take the mean Euclidean distance to each row's
+   closest other row, counting zero distances. Multiply the mean by 0.001
+   for the Gaussian standard deviation. Create a NumPy `RandomState` from
+   `transform_seed`, advance it by three uint32 words, draw one Gaussian per
+   coordinate in row order, and cast the perturbed layout to float32. The
+   seed controls vary `random_state` and `transform_seed` independently.
+4. Apply `10 * (x - min) / (max - min)` in float32 separately to each column.
+   This can change existing coordinates even when the layout required no
+   jitter.
+
+The single added row uses old indices `[2, 4, 1]`. Its appended bits are
+`[1086032232, 1082285404]`, and 15 of 16 old coordinates retain their bits.
+Both rows in the closest pair select old indices `[2, 4]`. Their identical
+provisional coordinates become distinct after jitter, and 4 of 16 old coordinates retain
+their bits. Reversing this pair gives the same positional embedding bits
+because the two provisional coordinates coincide. The pair with distinct
+anchors uses `[3, 4]` and `[3, 1]` respectively, and its outputs distinguish
+this model from one that feeds the first appended coordinate into the second
+centroid. At `n_neighbors=2`, the closest pair selects only itself and its
+batch partner, so both provisional coordinates use the old embedding mean.
+
+The analyzer also reports bit-match counts for alternative initializations.
+For the closest pair, omitting jitter or using graph-weighted centroids
+matches 4 of 20 coordinates. Ranking old rows alone or counting the batch
+partner as a zero coordinate matches 16 of 20. For the distinct-anchor pair,
+allowing the first appended row to influence the second matches 18 of 20.
+
+The one-epoch single and paired checkpoints match their zero-epoch
+counterparts. At two epochs, the paired embedding differs from the predicted
+initial layout. The model covers initialization, with the later optimizer
+checkpoints available as public observations.
+
+## Reproduction
+
+Run from the repository root. The reference lock specifies CPython 3.13.12
+and all package versions. The generator checks the Python version and the
+seven main numerical package pins and sets the thread limits before imports.
+
+```powershell
+$updateReferenceRoot = Join-Path $env:LOCALAPPDATA 'Temp\umap-update-reference'
+$env:UV_PROJECT_ENVIRONMENT = Join-Path $updateReferenceRoot 'venv'
+$env:UV_CACHE_DIR = Join-Path $updateReferenceRoot 'uv'
+$env:NUMBA_CACHE_DIR = Join-Path $updateReferenceRoot 'numba'
+uv sync --project reference --locked --python 3.13.12
+$updateFixture = 'reference/fixtures/umap-learn-0.6.0-update-windows-x86_64.json'
+uv run --project reference --no-sync python -I reference/generate_update_fixture.py --output $updateFixture
+uv run --project reference --no-sync python -I reference/analyze_update_fixture.py $updateFixture --check
+```

@@ -4,9 +4,9 @@ The fixtures call the public `fit`, `fit_transform`, and `update` methods of
 `umap-learn==0.6.0`. They record `embeddings_`, the graphs exposed by
 `mappers_`, and the fitted state available after validation errors. The
 Windows and Ubuntu WSL runs use CPython 3.13.12 and the reference lockfile.
-Each uses one numerical thread and a fresh Numba cache. Numba can emit a
-type-safety warning on the first compiled update. The fixture records the
-estimator warnings separately from that compilation warning.
+Each uses one numerical thread and a fresh Numba cache. Warning records
+cover the estimator. Numba can also emit a type-safety notice on the first
+compiled update.
 
 ## Initial alignment
 
@@ -40,12 +40,17 @@ neighboring slices considered and the coefficient as the strength of
 the alignment objective. [AlignedUMAP usage guide](https://umap-learn.readthedocs.io/en/latest/aligned_umap_basic_usage.html)
 
 The update probe appends a third slice to a two-slice fit. Both
-existing layouts retain their exact bits at 0, 2, and 8 epochs.
-At zero epochs each new row in the complete update probe receives the
-coordinate of its linked row from the preceding slice. The appended
+existing layouts retain their exact bits at 0, 2, and 8 epochs. The appended
 layout differs from the zero-epoch layout of the three-slice batch fit.
-The optimizer arithmetic and the fallback for rows without usable
-relations require separate replays.
+At zero epochs, linked new rows receive the coordinates of their
+counterparts. For a new row that links indirectly via its fuzzy graph,
+accumulate the weight times the linked neighbor's coordinates in
+ascending stored-column order, rounding the product and sum to float32.
+Sum the weights and divide in float64, then round the coordinates to
+float32. The complete and partial initialization replays match 32 bits.
+Separate Windows probes returned different coordinates across processes
+for rows with neither a direct link nor a linked neighbor, at identical
+seed settings. The fallback RNG and positive-epoch optimizer remain open.
 
 The probe also covers missing relations, a relation list shorter or
 longer than the number of adjacent slice pairs, and an empty set of

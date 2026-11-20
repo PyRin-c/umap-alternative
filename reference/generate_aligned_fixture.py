@@ -61,6 +61,30 @@ def align_initial_layout(graphs, relations, n_components):
     return layout
 
 
+def update_initial_layout(previous, graph, links):
+    import numpy as np
+
+    inverse = {destination: source for source, destination in links.items()}
+    weights = np.asarray(graph["bits"], dtype=np.uint32).view(np.float32)
+    output = np.empty((len(graph["indptr"]) - 1, previous.shape[1]), dtype=np.float32)
+    for row, (begin, end) in enumerate(zip(graph["indptr"], graph["indptr"][1:])):
+        if row in inverse:
+            output[row] = previous[inverse[row]]
+            continue
+        total = 0.0
+        accum = np.zeros(previous.shape[1], dtype=np.float32)
+        for entry in range(begin, end):
+            column = graph["indices"][entry]
+            weight = weights[entry]
+            if column in inverse and weight > 0:
+                accum += weight * previous[inverse[column]]
+                total += float(weight)
+        if total == 0.0:
+            raise ValueError("update replay requires at least one linked neighbor per unlinked row")
+        output[row] = accum.astype(np.float64) / total
+    return output
+
+
 def capture():
     import numpy as np
     from umap import AlignedUMAP
@@ -176,13 +200,26 @@ def capture():
     fit("fit-transform", n_epochs=8, method="fit_transform")
     fit("holdout", group="holdout", family_name="holdout", n_components=3, random_state=7)
 
-    for epochs in (0, 2, 8):
+    update_links = {src: dst for src, dst in r_bc.items() if dst in (0, 2, 4, 6)}
+    initial_update_bits = {}
+    updates = [(f"update-{epochs}", epochs, r_bc) for epochs in (0, 2, 8)]
+    updates.append(("update-partial-0", 0, update_links))
+    for name, epochs, links in updates:
         np.random.seed(839)
         model = AlignedUMAP(**(base_settings | {"n_epochs": epochs}))
         before = observe(model, lambda: model.fit([first.copy(), second.copy()], relations=[r_ab]))
-        after = observe(model, lambda: model.update(third.copy(), relations=r_bc))
+        after = observe(model, lambda: model.update(third.copy(), relations=links))
         assert before["embeddings"] == after["embeddings"][:2]
-        cases[f"update-{epochs}"] = {"overrides": {"n_epochs": epochs}, "before": before, "after": after}
+        cases[name] = {
+            "overrides": {"n_epochs": epochs}, "relations": list(links.items()),
+            "before": before, "after": after,
+        }
+        if epochs == 0:
+            previous = np.asarray(before["embeddings"][-1], dtype=np.uint32).view(np.float32)
+            replay = update_initial_layout(previous, graphs[after["graphs"][-1]], links)
+            expected = after["embeddings"][-1]
+            assert bits(replay) == expected, name
+            initial_update_bits[name] = replay.size
 
     # Replay from the captured adjacency, independently of the estimator.
     counts = {}
@@ -211,6 +248,7 @@ def capture():
         "graphs": graphs,
         "cases": cases,
         "initial_replay_matching_bits": counts,
+        "initial_update_matching_bits": initial_update_bits,
     }
 
 

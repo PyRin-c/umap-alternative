@@ -45,8 +45,10 @@ recursive model reproduces the observed caller RNG checkpoints, with
 coordinate errors up to 10.48 on a held-out graph. Direct calls to
 `simplicial_set_embedding` without an estimator can use a different robust
 target. The fixture records two such calls with a zero target span. The
-Python estimator supports random and explicit modern layouts. Recursive
-and modern spectral initialization and transform and update parity for
+Python estimator supports connected spectral, random, and explicit modern
+layouts. The connected estimator case uses the separate
+[spectral fit handoff](modern_spectral_fit_reference.md). Recursive and
+disconnected spectral initialization and transform and update parity for
 modern fits remain open.
 
 ## Reproduce

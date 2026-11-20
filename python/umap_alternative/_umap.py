@@ -15,7 +15,11 @@ from sklearn.utils.validation import check_array
 
 from . import _native
 from ._curve import _finite_float, _resolve_curve_params
-from ._spectral import _disconnected_spectral_initialization, _spectral_initialization
+from ._spectral import (
+    _disconnected_spectral_initialization,
+    _modern_spectral_initialization,
+    _spectral_initialization,
+)
 
 
 _METRIC_ALIASES = {
@@ -206,9 +210,10 @@ def _restore_modern_rng(rng, state):
 
 def _fit_modern_initialization(
     components, rng, initial, n_components, rescale, scale_factor, n_epochs, repulsion_strength,
+    *, spectral,
 ):
     n_rows = components[0][0]
-    if rescale == "graph_edge":
+    if spectral or rescale == "graph_edge":
         shape, indptr, indices, weights = components
         weights = np.asarray(weights, dtype=np.float32)
         budget = n_epochs if n_epochs > 10 else _default_epochs(n_rows)
@@ -216,11 +221,17 @@ def _fit_modern_initialization(
         if weak.any():
             weights[weak] = 0.0
             components = (shape, indptr, indices, weights.tolist())
+    init = "random" if initial is None else "explicit"
+    if spectral:
+        sampling_graph = _csr_graph(components)
+        sampling_graph.eliminate_zeros()
+        initial = _modern_spectral_initialization(sampling_graph, n_components, rng).ravel().tolist()
+        init = "prepared"
     coordinates, state = _native._initialize_modern_layout(
         components,
         _modern_rng_state(rng),
         n_components=n_components,
-        init="random" if initial is None else "explicit",
+        init=init,
         init_rescale=rescale if rescale == "graph_edge" else "unscaled",
         init_scale_factor=scale_factor,
         coordinates=initial,
@@ -245,12 +256,13 @@ def _rank_tied_dense_distances(distances, k):
 def _fit_modern_embedding(
     components, rng, initial, *, optimizer, n_components, n_epochs,
     rescale, scale_factor, checkpoint_epochs, negative_selection_range,
-    exclude_graph_neighbors, repulsion_strength, **layout_options,
+    exclude_graph_neighbors, repulsion_strength, spectral, **layout_options,
 ):
     if not isinstance(rng, np.random.RandomState):
         rng = np.random.RandomState(rng)
     embedding = _fit_modern_initialization(
         components, rng, initial, n_components, rescale, scale_factor, n_epochs, repulsion_strength,
+        spectral=spectral,
     )
     if n_epochs == 0:
         rng.randint(-2**31 + 1, 2**31 - 2, 3)
@@ -518,7 +530,7 @@ class UMAP(BaseEstimator, TransformerMixin):
     dense, CSR, CSC, and COO queries. Float64 queries return float64
     coordinates for this path.
     A singleton has a zero embedding and no graph. Seeded modern Adam and
-    momentum layouts accept random or explicit initialization.
+    momentum layouts accept connected spectral, random, and explicit initialization.
     For a fitted dense embedding, ``inverse_transform`` reconstructs
     the original features as a new float32 array. It warns when any query
     requires extrapolation outside the convex hull of the fitted layout.
@@ -867,6 +879,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             embedding, history = _fit_modern_embedding(
                 components, rng, initial_coordinates,
                 optimizer="momentum" if self.optimizer == "momentum" else "adam",
+                spectral=spectral,
                 rescale=self.init_rescale, scale_factor=scale_factor,
                 checkpoint_epochs=checkpoint_epochs, negative_selection_range=selection_range,
                 exclude_graph_neighbors=bool(self.exclude_graph_neighbors), **layout_options,
@@ -1397,9 +1410,9 @@ class UMAP(BaseEstimator, TransformerMixin):
         if isinstance(self.init, str):
             if self.init == "random" or (n_rows == 1 and self.init == "auto"):
                 return None
-            if self.init == "spectral" and not modern:
+            if self.init == "spectral":
                 return None
-            if self.init in ("auto", "pca", "tswspectral", "recursive", "spectral"):
+            if self.init in ("auto", "pca", "tswspectral", "recursive"):
                 raise NotImplementedError(f"init={self.init!r} is not implemented for embedding")
             raise ValueError(f"Unknown embedding init {self.init!r}")
         if not isinstance(self.init, np.ndarray):

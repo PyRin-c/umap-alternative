@@ -72,8 +72,10 @@ The locked workspace tests passed with 180 Rust tests and two existing
 ignored probes. Both platforms passed all 1,240 Python tests, and the
 workspace passed formatting and Clippy with warnings denied.
 
-Further coverage includes larger and approximate graphs, modern spectral
-and recursive initialization, the hybrid compatibility optimizer,
+The [connected spectral study](modern_spectral_fit_reference.md) covers
+the same fit path with spectral initialization.
+Further coverage includes larger and approximate graphs, disconnected
+spectral and recursive initialization, the hybrid compatibility optimizer,
 density and nondefault negative scaling, and held-out transforms or
 updates from a modern fit. The Rust-owned projection path still rejects
 ambiguous ranking keys. The Python fit resolves these with its local

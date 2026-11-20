@@ -1,5 +1,6 @@
 """Spectral initialization for fuzzy graphs."""
 
+import warnings
 from math import isqrt
 
 import numpy as np
@@ -32,15 +33,17 @@ def _spectral_initialization(
     return _scale_and_perturb(selected, rng)
 
 
-def _spectral_eigenvectors(graph, n_components, rng):
-    n_rows = graph.shape[0]
+def _normalized_adjacency(graph):
     graph = graph.astype(np.float32, copy=False)
     degrees = np.asarray(graph.sum(axis=0)).ravel()
     inverse_sqrt_degrees = diags(1.0 / np.sqrt(degrees))
+    return inverse_sqrt_degrees @ graph @ inverse_sqrt_degrees
+
+
+def _spectral_eigenvectors(graph, n_components, rng):
+    n_rows = graph.shape[0]
     # Keep the weighted adjacency product in float32 and promote at subtraction.
-    laplacian = eye(n_rows, dtype=np.float64, format="csr") - (
-        inverse_sqrt_degrees @ graph @ inverse_sqrt_degrees
-    )
+    laplacian = eye(n_rows, dtype=np.float64, format="csr") - _normalized_adjacency(graph)
 
     n_eigenpairs = n_components + 1
     if n_eigenpairs == n_rows:
@@ -58,6 +61,39 @@ def _spectral_eigenvectors(graph, n_components, rng):
     # Account for the normal starting block before drawing the coordinate noise.
     rng.standard_normal((n_rows, n_eigenpairs))
     return eigenvectors[:, np.argsort(eigenvalues)[1:n_eigenpairs]]
+
+
+def _modern_spectral_initialization(graph, n_components, rng):
+    """Return the connected modern layout before centering and rescaling."""
+    n_rows = graph.shape[0]
+    if n_components >= n_rows:
+        warnings.warn(
+            "Spectral initialisation needs more samples than n_components.\n"
+            "Falling back to random initialisation!",
+            UserWarning,
+            stacklevel=4,
+        )
+        coordinates = rng.uniform(low=-10.0, high=10.0, size=(n_rows, n_components))
+    else:
+        if connected_components(graph, directed=False, return_labels=False) != 1:
+            raise NotImplementedError("modern spectral initialization requires a connected graph")
+        adjacency = _normalized_adjacency(graph)
+        count = n_components + 1
+        if count == n_rows:
+            laplacian = eye(n_rows, dtype=np.float64, format="csr") - adjacency
+            eigenvalues, vectors = eigh(laplacian.toarray())
+            order = np.argsort(eigenvalues)
+        else:
+            eigenvalues, vectors = eigsh(
+                adjacency, k=count, which="LA", v0=np.ones(n_rows, dtype=np.float32),
+                ncv=max(2 * count + 1, isqrt(n_rows)), tol=1e-4,
+            )
+            order = np.argsort(eigenvalues)[::-1]
+        coordinates = vectors[:, order[1:count]]
+    scale = 40.0 / np.max(np.abs(coordinates))
+    coordinates = np.ascontiguousarray(scale * coordinates, dtype=np.float32)
+    coordinates += rng.normal(scale=0.01, size=coordinates.shape).astype(np.float32)
+    return coordinates
 
 
 def _scale_and_perturb(coordinates, rng):

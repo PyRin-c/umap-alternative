@@ -1,4 +1,4 @@
-//! Directed bipartite graph construction for held-out dense UMAP inputs.
+//! Directed bipartite graphs and embedding initialization for held-out UMAP inputs.
 
 use std::fmt;
 
@@ -67,6 +67,209 @@ impl std::error::Error for DenseGraphTransformError {
             _ => None,
         }
     }
+}
+
+/// Validation failures for [`initialize_transform_embedding`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum TransformInitializationError {
+    /// The fitted coordinates do not have the shape implied by the graph.
+    InvalidFittedShape {
+        n_rows: usize,
+        n_components: usize,
+        values: usize,
+    },
+    /// The requested output length exceeds the addressable range.
+    OutputShapeOverflow { n_rows: usize, n_components: usize },
+    /// COO rows, columns, and weights must have equal lengths.
+    InconsistentGraphLengths,
+    /// An entry is outside the graph shape or its row is out of order.
+    InvalidGraphIndex {
+        position: usize,
+        row: usize,
+        column: usize,
+    },
+    /// A membership is outside `[0, 1]`.
+    InvalidMembership { position: usize, weight: f32 },
+    /// A query and training row share multiple nonzero entries.
+    RepeatedEdge { row: usize, column: usize },
+}
+
+impl fmt::Display for TransformInitializationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidFittedShape {
+                n_rows,
+                n_components,
+                values,
+            } => write!(
+                formatter,
+                "fitted embedding requires a positive component count and shape {n_rows}x{n_components}, got {values} values"
+            ),
+            Self::OutputShapeOverflow {
+                n_rows,
+                n_components,
+            } => write!(
+                formatter,
+                "transform embedding shape {n_rows}x{n_components} exceeds the addressable range"
+            ),
+            Self::InconsistentGraphLengths => {
+                write!(formatter, "COO row, column, and weight lengths differ")
+            }
+            Self::InvalidGraphIndex {
+                position,
+                row,
+                column,
+            } => write!(
+                formatter,
+                "COO entry {position} at ({row}, {column}) is out of bounds or out of row order"
+            ),
+            Self::InvalidMembership { position, weight } => write!(
+                formatter,
+                "COO membership at entry {position} is outside [0, 1]: {weight}"
+            ),
+            Self::RepeatedEdge { row, column } => {
+                write!(
+                    formatter,
+                    "COO graph repeats the nonzero edge ({row}, {column})"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for TransformInitializationError {}
+
+/// Initialize a row-major query embedding from the held-out graph and fitted coordinates.
+///
+/// The fitted matrix has shape `graph.n_cols x n_components` with at least
+/// one component. The output shape is `graph.n_rows x n_components`.
+/// The nonzero COO entries must be grouped by ascending query row, with
+/// unique training columns within each query row. Stored zeros are skipped.
+/// A query with no positive memberships starts with NaN coordinates.
+/// When a membership is exactly one, the initializer
+/// copies the fitted row at the smallest training column with that membership.
+/// Otherwise it L1-normalizes the weights and accumulates weighted fitted
+/// coordinates in descending training-column order, with separate float32
+/// rounding at each step. Fitted NaNs propagate from contributing rows.
+///
+/// # Errors
+///
+/// Returns an error for an invalid embedding shape or malformed COO entries.
+pub fn initialize_transform_embedding(
+    graph: &CooGraph,
+    fitted_embedding: &[f32],
+    n_components: usize,
+) -> Result<Vec<f32>, TransformInitializationError> {
+    use TransformInitializationError as Error;
+
+    if n_components == 0 || graph.n_cols.checked_mul(n_components) != Some(fitted_embedding.len()) {
+        return Err(Error::InvalidFittedShape {
+            n_rows: graph.n_cols,
+            n_components,
+            values: fitted_embedding.len(),
+        });
+    }
+    if graph.row.len() != graph.col.len() || graph.row.len() != graph.data.len() {
+        return Err(Error::InconsistentGraphLengths);
+    }
+    let output_len = graph
+        .n_rows
+        .checked_mul(n_components)
+        .filter(|&len| len <= isize::MAX as usize / std::mem::size_of::<f32>())
+        .ok_or(Error::OutputShapeOverflow {
+            n_rows: graph.n_rows,
+            n_components,
+        })?;
+    let mut embedding = vec![f32::NAN; output_len];
+    let mut entries = Vec::new();
+    let mut previous_row = None;
+    let mut positions = (0..graph.data.len())
+        .filter(|&position| graph.data[position] != 0.0)
+        .peekable();
+
+    while let Some(&start) = positions.peek() {
+        let row = graph.row[start];
+        if row >= graph.n_rows || previous_row.is_some_and(|previous| row <= previous) {
+            return Err(Error::InvalidGraphIndex {
+                position: start,
+                row,
+                column: graph.col[start],
+            });
+        }
+        previous_row = Some(row);
+        entries.clear();
+        while let Some(position) = positions.next_if(|&position| graph.row[position] == row) {
+            let column = graph.col[position];
+            let weight = graph.data[position];
+            if column >= graph.n_cols {
+                return Err(Error::InvalidGraphIndex {
+                    position,
+                    row,
+                    column,
+                });
+            }
+            if !(0.0..=1.0).contains(&weight) {
+                return Err(Error::InvalidMembership { position, weight });
+            }
+            entries.push((column, weight));
+        }
+        entries.sort_unstable_by_key(|&(column, _)| column);
+        if let Some(pair) = entries.windows(2).find(|pair| pair[0].0 == pair[1].0) {
+            return Err(Error::RepeatedEdge {
+                row,
+                column: pair[0].0,
+            });
+        }
+        let row_start = row * n_components;
+        let coordinates = &mut embedding[row_start..row_start + n_components];
+        if let Some(&(column, _)) = entries.iter().find(|&&(_, weight)| weight == 1.0) {
+            let start = column * n_components;
+            coordinates.copy_from_slice(&fitted_embedding[start..start + n_components]);
+            continue;
+        }
+
+        // The sparse row reduction adds the first membership after summing the tail.
+        let scale = (sum_memberships(&entries[1..]) + entries[0].1).recip();
+        coordinates.fill(0.0);
+        for &(column, weight) in entries.iter().rev() {
+            let start = column * n_components;
+            let normalized = weight * scale;
+            for (coordinate, &fitted) in coordinates
+                .iter_mut()
+                .zip(&fitted_embedding[start..start + n_components])
+            {
+                *coordinate += normalized * fitted;
+            }
+        }
+    }
+    Ok(embedding)
+}
+
+// The float32 tail reduction starts with eight lanes and splits large
+// blocks at a lane boundary. Keep the grouping to preserve the rounding.
+fn sum_memberships(entries: &[(usize, f32)]) -> f32 {
+    if entries.len() < 8 {
+        return entries.iter().map(|&(_, weight)| weight).sum();
+    }
+    if entries.len() > 128 {
+        let middle = (entries.len() / 2) & !7;
+        let (left, right) = entries.split_at(middle);
+        return sum_memberships(left) + sum_memberships(right);
+    }
+
+    let mut blocks = entries.chunks_exact(8);
+    let mut lanes = [0.0; 8];
+    for block in &mut blocks {
+        for (lane, &(_, weight)) in lanes.iter_mut().zip(block) {
+            *lane += weight;
+        }
+    }
+    let [a, b, c, d, e, f, g, h] = lanes;
+    let sum = ((a + b) + (c + d)) + ((e + f) + (g + h));
+    blocks
+        .remainder()
+        .iter()
+        .fold(sum, |total, &(_, weight)| total + weight)
 }
 
 /// Construct the fuzzy graph from held-out query rows to fitted training rows.

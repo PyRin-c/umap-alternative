@@ -57,7 +57,7 @@ Wheel は `target/wheels/` に生成されます。Python パッケージ名は 
 
 密な入力の現代レイアウトは、乱数シードを指定し、連結グラフでの `init="spectral"`、`init="random"`、または NumPy の初期座標で学習できます。`compatibility_layout=False` か `optimizer="adam"` または `"momentum"` で選択し、`init_rescale` と `init_scale_factor` で初期座標を調整できます。エポック番号のリストを指定すると、対応する座標を `embedding_list_` に格納します。[現代レイアウトの比較記録](reference/modern_fit_reference.md) [スペクトル初期化の比較記録](reference/modern_spectral_fit_reference.md)
 
-Adam と momentum による正のエポック数の学習は未実装です。固定シードの検証条件と適用範囲は [スペクトル初期化を使った学習の参照記録](reference/spectral_fit_reference.md) と [ランダム初期化と初期座標を指定した学習の参照記録](reference/seeded_fit_reference.md) を参照してください。
+`init="recursive"` は、固定シードでグラフを縮約し、粗い段階を Adam で最適化してから元の解像度へ戻します。4段の縮約や事前計算距離による星型グラフの一部では、公開版と座標差が残ります。[再帰学習の比較記録](reference/modern_recursive_coarse_reference.md)
 
 Euclidean、Manhattan、Chebyshev、cosine の互換レイアウトでは、CSR、CSC、COO の特徴量を学習できます。有限の切断距離で孤立した行の座標は `NaN` になります。これらの距離で疎な特徴量を学習したモデルは、密な入力と CSR、CSC、COO の入力を変換できます。グラフモードは近傍順の COO グラフを、埋め込みモードは座標を返します。[疎な Manhattan と Chebyshev の比較記録](reference/sparse_graph_reference.md#sparse-manhattan-and-chebyshev)・[疎な cosine の比較記録](reference/sparse_graph_reference.md#sparse-cosine)
 
@@ -76,6 +76,8 @@ Euclidean、Manhattan、Chebyshev、cosine の互換レイアウトでは、CSR�
 `unique=True` は重複をまとめてグラフを学習し、埋め込みと密度半径を元の入力行に戻します。疎行の代表行、逆対応、件数は `umap_alternative.utils.csr_unique` で取得できます。[重複行学習の参照記録](reference/unique_reference.md)
 
 特徴量の距離には `canberra` と `braycurtis` も指定できます。密・CSR の互換レイアウト学習・変換・更新と、密な逆変換を公開版と比較しています。[距離の比較記録](reference/ratio_metrics_reference.md)
+
+`hamming` は特徴量の値を比較します。`matching`、`jaccard`、`dice`、`russellrao`、`rogerstanimoto`、`sokalmichener`、`sokalsneath`、`yule`、`kulsinski` は各特徴量の値が非ゼロかどうかを比較します。これらの距離は密な特徴量のグラフ学習、互換レイアウトの学習、外部変換で使えます。CSR の学習では `yule` が `ValueError` になります。逆変換を呼ぶと `ValueError` になります。[ブール距離の比較記録](reference/boolean_metric_reference.md)
 
 `umap_alternative.umap_` で近傍距離の平滑化、メンバーシップ、近傍配列からのグラフ構築を利用できます。孤立した入力行は `umap_alternative.utils.disconnected_vertices` で確認できます。[グラフ補助関数の参照記録](reference/graph_primitives_reference.md)
 

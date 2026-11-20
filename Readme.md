@@ -2,7 +2,7 @@
 
 UMAP を Rust で独立実装するリポジトリです。`umap-learn` との数値の完全一致を検証したうえで高速化し、Rust ライブラリ、C ABI、PyO3 + Maturin による Python Wheel として提供します。
 
-`crates/umap-core` が Rust 本体の置き場で、`crates/umap-python` が Python 拡張です。現段階の Python Wheel は、密な入力に対する graph-only `UMAP(transform_mode="graph")` の `fit`、`fit_transform`、`transform` を提供し、PyO3 の native graph primitive を内部で使います。`crates/umap-capi` は CSR graph を返す graph-only C ABI とヘッダーを提供します。埋め込みを含む full UMAP estimator、追加機能、一般的な bit parity は今後の実装・検証範囲であり、記録済み fixture は個別の証拠であって一般的な一致を主張しません。
+`crates/umap-core` が Rust 本体の置き場で、`crates/umap-python` が Python 拡張です。Python Wheel は `UMAP(transform_mode="graph")` のグラフ構築と変換、および固定シードを使った密な入力の埋め込みを提供します。`crates/umap-capi` は CSR graph を返す graph-only C ABI とヘッダーを提供します。数値のビット単位の一致は、記録済みの fixture で検証しています。
 
 ## 開発環境
 
@@ -30,6 +30,10 @@ uv run --locked maturin build --release --locked --interpreter python
 ```
 
 Wheel は `target/wheels/` に生成されます。Python パッケージ名は `umap-alternative`、インポート名は `umap_alternative` です。Windows と Linux の CI では Wheel を隔離環境にインストールし、インポートまで確認します。
+
+`UMAP(init="random", random_state=42, n_jobs=1, compatibility_layout=True).fit_transform(X)` は、密な特徴量から `float32` の `embedding_` を作り、学習時の CSR graph を `graph_` に格納します。初期座標として、各行が異なり各列に幅がある NumPy 配列も渡せます。`n_epochs` には非負の整数を指定でき、小規模データでは `None` が 500 エポックになります。学習データとビット列が一致する入力の `transform` は `embedding_` を返します。
+
+埋め込みではスペクトル初期化、教師あり入力、疎行列、事前計算済み距離、Adam と momentum、未知の入力の変換、逆変換は未実装です。固定シードの検証条件は [埋め込みの参照記録](reference/seeded_fit_reference.md) を参照してください。
 
 `UMAP(transform_mode="graph").transform(X)` は、学習データと同じ特徴数の密な入力を受け取ります。学習データと `float32` 変換後のビット列が一致すれば `graph_` をそのまま返します。新しい入力に対しては、行が入力サンプル、列が学習サンプルに対応する `float32` の SciPy COO 行列を返し、近傍順と明示的なゼロ要素を保持します。
 

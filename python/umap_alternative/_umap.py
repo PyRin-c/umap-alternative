@@ -1,4 +1,4 @@
-"""Public estimator for the dense graph primitives in the native extension."""
+"""Public estimator for dense graph and serial seeded embedding fits."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_array
 
 from . import _native
+from ._curve import _finite_float, _resolve_curve_params
 
 
 _METRIC_ALIASES = {
@@ -38,10 +39,18 @@ _DISCONNECTION_WARNING = (
     "these points from your data.\n"
     "Use umap.utils.disconnected_vertices() to identify them."
 )
+_COMPATIBILITY_WARNING = (
+    "compatibility_layout was not set, so UMAP is using the legacy (0.5.x) "
+    "nearest-neighbor, initialization and layout pipeline. In a future release "
+    "the default will change to compatibility_layout=False, which uses recursive "
+    "initialization and the Adam optimizer and produces different embeddings. "
+    "Set compatibility_layout=True to keep the current behavior and silence this "
+    "warning, or compatibility_layout=False (or optimizer='adam') to adopt the new behavior now."
+)
 
 
 class UMAP(BaseEstimator, TransformerMixin):
-    """A public, graph-only UMAP estimator.
+    """Fit a fuzzy graph or a serial seeded dense UMAP embedding.
 
     Dense ``transform_mode="graph"`` fitting is implemented and returns the
     fuzzy simplicial-set graph as a SciPy CSR matrix.
@@ -60,10 +69,13 @@ class UMAP(BaseEstimator, TransformerMixin):
     distances are accepted. Each row's selected neighbors must include its
     diagonal entry, which can be excluded when there are ties at zero distance.
 
-    The constructor keeps the commonly used public UMAP parameters needed by
-    the graph contract.  Parameters related only to a future embedding stage
-    are retained as configuration values where they are part of that public
-    contract; they do not alter graph construction.
+    For an embedding, use dense features, an integer ``random_state`` in
+    ``[0, 2**32 - 1]``, and ``compatibility_layout=True``. ``init`` can be
+    ``"random"`` or a finite NumPy array of shape ``(n_samples, n_components)``
+    with distinct rows and nonconstant columns. Fitting exposes ``embedding_``
+    and ``graph_``. A singleton has a zero embedding and no graph. Spectral
+    initialization, supervised embeddings, modern optimizers, out-of-sample
+    embedding transforms, and inverse transforms raise explicit errors.
     """
 
     def __init__(
@@ -75,12 +87,20 @@ class UMAP(BaseEstimator, TransformerMixin):
         random_state=None,
         n_jobs=-1,
         n_epochs=None,
-        compatibility_layout=False,
+        compatibility_layout=None,
         set_op_mix_ratio=1.0,
         local_connectivity=1.0,
         transform_mode="embedding",
         target_metric="categorical",
         target_weight=0.5,
+        learning_rate=1.0,
+        min_dist=0.1,
+        spread=1.0,
+        repulsion_strength=1.0,
+        negative_sample_rate=5,
+        a=None,
+        b=None,
+        optimizer=None,
     ):
         self.n_components = n_components
         self.n_neighbors = n_neighbors
@@ -95,14 +115,17 @@ class UMAP(BaseEstimator, TransformerMixin):
         self.transform_mode = transform_mode
         self.target_metric = target_metric
         self.target_weight = target_weight
+        self.learning_rate = learning_rate
+        self.min_dist = min_dist
+        self.spread = spread
+        self.repulsion_strength = repulsion_strength
+        self.negative_sample_rate = negative_sample_rate
+        self.a = a
+        self.b = b
+        self.optimizer = optimizer
 
     def fit(self, X, y=None):
-        """Fit the dense fuzzy graph and return this estimator.
-
-        For one input row, the captured public behavior is an estimator with
-        no ``graph_`` attribute.  Consequently ``fit_transform`` on that input
-        raises the same attribute error as the public contract.
-        """
+        """Fit the fuzzy graph and, in embedding mode, the training layout."""
 
         self._validate_mode()
         self._validate_metric()
@@ -123,6 +146,11 @@ class UMAP(BaseEstimator, TransformerMixin):
         if issparse(X):
             raise TypeError("sparse input is not supported; pass a dense array")
         precomputed = self.metric == "precomputed"
+        embedding_mode = self.transform_mode == "embedding"
+        if embedding_mode and precomputed:
+            raise NotImplementedError("metric='precomputed' requires transform_mode='graph'")
+        if embedding_mode and y is not None:
+            raise NotImplementedError("supervised embedding fit is not implemented")
         if precomputed and y is not None:
             raise NotImplementedError(
                 "supervised fitting with metric='precomputed' is not implemented"
@@ -147,31 +175,35 @@ class UMAP(BaseEstimator, TransformerMixin):
             if n_rows != n_features:
                 raise ValueError("precomputed distances must be a square matrix")
             warnings.warn(_PRECOMPUTED_WARNING, UserWarning, stacklevel=2)
+        embedding_options = self._embedding_options(n_rows) if embedding_mode else None
 
-        # A singleton is accepted by fit but has no graph in the public
-        # behavior captured for this project.  Remove a stale graph when a
-        # fitted estimator is reused so this branch remains truthful.
+        # Singletons have no graph. Embedding mode exposes the public zero layout.
         if n_rows == 1:
             if precomputed:
                 _native._fit_precomputed_graph([X_checked.item()], 1, 1)
-            self.n_features_in_ = n_features
-            if hasattr(self, "graph_"):
-                del self.graph_
-            if hasattr(self, "n_neighbors_"):
-                del self.n_neighbors_
-            self._graph_transform_fit = transform_fit
-            return self
+            embedding = (
+                np.zeros((1, embedding_options["n_components"]), dtype=np.float32)
+                if embedding_mode
+                else None
+            )
+            return self._store_fit(n_features, transform_fit, None, None, embedding)
 
         if n_neighbors > n_rows - 1:
             warnings.warn(_TRUNCATION_WARNING, UserWarning, stacklevel=2)
             n_neighbors = n_rows - 1
 
         values = X_checked.ravel(order="C").tolist()
+        embedding = None
         if precomputed:
             components = _native._fit_precomputed_graph(values, n_rows, n_neighbors)
         else:
             dense_args = (values, n_rows, n_features, n_neighbors, metric)
-            if y is None:
+            if embedding_mode:
+                components, embedding_shape, coordinates = _native._fit_dense_embedding(
+                    *dense_args, **embedding_options
+                )
+                embedding = np.asarray(coordinates, dtype=np.float32).reshape(embedding_shape)
+            elif y is None:
                 components = _native._fit_dense_graph(*dense_args)
             else:
                 labels = self._categorical_labels(y, n_rows)
@@ -188,34 +220,38 @@ class UMAP(BaseEstimator, TransformerMixin):
             shape=tuple(shape),
             dtype=np.float32,
         )
-        # The tiny two-row case has no edges after self-neighbors are removed;
-        # preserve the public warning text for this disconnected graph.
+        # Two rows have no edges after self-neighbors are removed. The public
+        # graph fit returns the empty graph and the layout fit rejects it.
         if graph.nnz == 0:
             warnings.warn(
                 _DISCONNECTION_WARNING.format(count=n_rows),
                 UserWarning,
                 stacklevel=2,
             )
-        self.n_features_in_ = n_features
-        self.graph_ = graph
-        self.n_neighbors_ = n_neighbors
-        self._graph_transform_fit = transform_fit
-        return self
+            if embedding_mode:
+                raise ValueError(
+                    "zero-size array to reduction operation maximum which has no identity"
+                )
+        if embedding is not None:
+            embedding[np.diff(graph.indptr) == 0] = np.nan
+        return self._store_fit(n_features, transform_fit, graph, n_neighbors, embedding)
 
     def fit_transform(self, X, y=None, **fit_params):
-        """Fit and return the exact ``graph_`` CSR object."""
+        """Fit and return the fitted output."""
 
         if fit_params:
-            raise NotImplementedError(
-                "fit parameters are not implemented for the graph-only path"
-            )
+            if self.transform_mode == "graph":
+                raise NotImplementedError(
+                    "fit parameters are not implemented for the graph-only path"
+                )
+            raise NotImplementedError("additional fit parameters are not implemented")
         self.fit(X, y=y)
-        # Deliberately access the public fitted attribute directly: on a
-        # singleton this reproduces the captured AttributeError behavior.
+        if self.transform_mode == "embedding":
+            return self.embedding_
         return self.graph_
 
     def transform(self, X):
-        """Return the fitted CSR graph or a held-out dense query-to-training COO graph."""
+        """Return the fitted output or a held-out query-to-training COO graph."""
 
         self._validate_mode()
         if not hasattr(self, "_graph_transform_fit"):
@@ -238,7 +274,9 @@ class UMAP(BaseEstimator, TransformerMixin):
             )
         # The observed fast path compares normalized float32 data by bits.
         if np.array_equal(queries.view(np.uint32), training.view(np.uint32)):
-            return self.graph_
+            return self.embedding_ if self.transform_mode == "embedding" else self.graph_
+        if self.transform_mode == "embedding":
+            raise NotImplementedError("out-of-sample embedding transform is not implemented")
 
         shape, row, col, data = _native._transform_dense_graph(
             training.ravel().tolist(),
@@ -258,17 +296,144 @@ class UMAP(BaseEstimator, TransformerMixin):
         )
 
     def inverse_transform(self, X):
-        """Reject inverse transforms until embedding support exists."""
+        """Reject inverse transforms."""
 
-        raise NotImplementedError(
-            "inverse_transform is not implemented for the graph-only estimator"
-        )
+        if self.transform_mode == "graph":
+            raise NotImplementedError(
+                "inverse_transform is not implemented for the graph-only estimator"
+            )
+        raise NotImplementedError("inverse_transform is not implemented")
 
     def _validate_mode(self):
-        if self.transform_mode != "graph":
+        if self.transform_mode not in ("graph", "embedding"):
             raise NotImplementedError(
-                "only transform_mode='graph' is implemented; embedding mode is not supported"
+                "supported transform_mode values are 'graph' and 'embedding'"
             )
+
+    def _store_fit(self, n_features, transform_fit, graph, n_neighbors, embedding):
+        if graph is not None:
+            self.graph_ = graph
+            self.n_neighbors_ = n_neighbors
+        elif hasattr(self, "graph_"):
+            del self.graph_
+            del self.n_neighbors_
+        if embedding is not None:
+            self.embedding_ = embedding
+        elif hasattr(self, "embedding_"):
+            del self.embedding_
+        self.n_features_in_ = n_features
+        self._graph_transform_fit = transform_fit
+        return self
+
+    def _validate_embedding_optimizer(self):
+        optimizer = self.optimizer
+        compatibility = self.compatibility_layout
+        if compatibility is not None and not isinstance(compatibility, (bool, np.bool_)):
+            raise ValueError("compatibility_layout must be a boolean or None")
+        if optimizer is not None and not isinstance(optimizer, str):
+            raise ValueError("optimizer must be a string or None")
+        if optimizer in ("adam", "momentum"):
+            if compatibility:
+                raise ValueError(
+                    f"optimizer={optimizer!r} requires compatibility_layout=False; "
+                    "compatibility_layout=True always uses the legacy optimizer."
+                )
+            raise NotImplementedError(f"optimizer={optimizer!r} is not implemented")
+        if compatibility is None:
+            warnings.warn(_COMPATIBILITY_WARNING, FutureWarning, stacklevel=4)
+        if optimizer not in (None, "compatibility"):
+            raise ValueError(
+                f"Unknown optimizer {optimizer!r}. Must be one of "
+                "'adam', 'momentum', 'compatibility'."
+            )
+        if compatibility is not None and not compatibility:
+            raise NotImplementedError("embedding with compatibility_layout=False is not implemented")
+
+    def _embedding_options(self, n_rows):
+        self._validate_embedding_optimizer()
+        n_components = self.n_components
+        if isinstance(n_components, (bool, np.bool_)):
+            raise TypeError("an integer is required for n_components")
+        if not isinstance(n_components, numbers.Real):
+            raise ValueError("n_components must be an int")
+        if n_components <= 0:
+            raise ValueError("n_components must be greater than 0")
+        if n_components != int(n_components):
+            raise ValueError("n_components must be a whole number")
+        n_components = int(n_components)
+
+        n_epochs = self.n_epochs
+        if n_epochs is None:
+            n_epochs = 500 if n_rows <= 10_000 else 200
+        elif isinstance(n_epochs, (list, tuple)):
+            raise NotImplementedError("embedding supports a scalar n_epochs")
+        elif (
+            isinstance(n_epochs, bool)
+            or not isinstance(n_epochs, numbers.Integral)
+            or n_epochs < 0
+        ):
+            raise ValueError("n_epochs must be a nonnegative integer")
+
+        seed = self.random_state
+        if seed is None and n_rows == 1:
+            seed = 0  # The singleton layout uses no random draws.
+        if isinstance(seed, bool) or not isinstance(seed, numbers.Integral):
+            raise ValueError("embedding requires random_state to be an integer seed")
+        if not 0 <= seed <= 2**32 - 1:
+            raise ValueError("Seed must be between 0 and 2**32 - 1")
+
+        if not isinstance(self.n_jobs, numbers.Integral) or self.n_jobs < -1 or self.n_jobs == 0:
+            raise ValueError("n_jobs must be a positive integer or -1")
+        if self.n_jobs != 1 and self.random_state is not None:
+            warnings.warn(
+                f"n_jobs value {self.n_jobs} overridden to 1 by setting random_state. "
+                "Use no seed for parallelism.",
+                UserWarning,
+                stacklevel=3,
+            )
+
+        a, b = _resolve_curve_params(self.spread, self.min_dist, self.a, self.b)
+        learning_rate = _finite_float(self.learning_rate, "learning_rate")
+        repulsion_strength = _finite_float(self.repulsion_strength, "repulsion_strength")
+        negative_sample_rate = _finite_float(self.negative_sample_rate, "negative_sample_rate")
+        if learning_rate < 0:
+            raise ValueError("learning_rate must be nonnegative")
+        if repulsion_strength < 0:
+            raise ValueError("repulsion_strength must be nonnegative")
+        if negative_sample_rate <= 0:
+            raise ValueError("negative_sample_rate must be positive")
+
+        return dict(
+            n_components=n_components,
+            n_epochs=int(n_epochs),
+            seed=int(seed),
+            a=a,
+            b=b,
+            learning_rate=learning_rate,
+            repulsion_strength=repulsion_strength,
+            negative_sample_rate=negative_sample_rate,
+            initial_coordinates=self._embedding_init(n_rows, n_components),
+        )
+
+    def _embedding_init(self, n_rows, n_components):
+        if isinstance(self.init, str):
+            if self.init == "random" or (
+                n_rows == 1 and self.init in ("auto", "spectral")
+            ):
+                return None
+            if self.init in ("auto", "pca", "tswspectral", "spectral", "recursive"):
+                raise NotImplementedError(f"init={self.init!r} is not implemented for embedding")
+            raise ValueError(f"Unknown embedding init {self.init!r}")
+        if not isinstance(self.init, np.ndarray):
+            raise ValueError("init must be a string or ndarray")
+        initial = check_array(self.init, dtype=np.float32, order="C")
+        if initial.shape[1] != n_components:
+            raise ValueError("init ndarray must match n_components value")
+        if initial.shape[0] != n_rows:
+            raise ValueError("init ndarray must have the same number of rows as X")
+        if np.unique(initial, axis=0).shape[0] != n_rows:
+            raise NotImplementedError("explicit init with repeated rows is not implemented")
+        return initial.ravel().tolist()
 
     def _validate_metric(self):
         if callable(self.metric):

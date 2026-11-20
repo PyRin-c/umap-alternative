@@ -146,13 +146,12 @@ def test_validation_matches_public_graph_contract():
         )
 
 
-def test_embedding_mode_fails_explicitly():
-    with pytest.raises(NotImplementedError, match="transform_mode='graph'"):
-        UMAP().fit(BASELINE)
-    with pytest.raises(NotImplementedError, match="transform_mode='graph'"):
-        UMAP().fit(BASELINE, np.array([0, 1, 0, 1]))
-    with pytest.raises(NotImplementedError, match="transform_mode='graph'"):
-        UMAP().transform(BASELINE)
+def test_unknown_mode_fails_explicitly():
+    model = UMAP(transform_mode="unknown")
+    with pytest.raises(NotImplementedError, match="supported transform_mode"):
+        model.fit(BASELINE)
+    with pytest.raises(NotImplementedError, match="supported transform_mode"):
+        model.transform(BASELINE)
 
 
 def test_non_default_graph_mix_parameters_fail_explicitly():

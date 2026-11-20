@@ -73,11 +73,15 @@ def capture():
             encoded["coordinates_by_epoch"] = [encode(a) for a in model.embedding_list_]
         if name in {"dense", "dense_graph", "csr", "csr_graph", "csc", "coo", "truncated"}:
             encoded["training_transform"] = encode(model.transform(convert(x)))
-            encoded["query_transform"] = encode(model.transform(convert(q)))
-        if name == "dense":
+            with warnings.catch_warnings(record=True) as seen:
+                warnings.simplefilter("always")
+                encoded["query_transform"] = encode(model.transform(convert(q)))
+            encoded["query_warnings"] = [notice.category.__name__ for notice in seen]
+        if name in ("dense", "csr"):
             model.set_params(n_epochs=0)
-            encoded["inverse"] = encode(model.inverse_transform(model.embedding_[[1, 4]]))
-            model.update(q)
+            if name == "dense":
+                encoded["inverse"] = encode(model.inverse_transform(model.embedding_[[1, 4]]))
+            model.update(convert(q))
             encoded["updated_graph"] = encode(model.graph_)
             encoded["updated_embedding"] = encode(model.embedding_)
         cases.append(encoded)

@@ -24,9 +24,14 @@ repeated original row. The port uses a row's representative scale for
 original indices beyond that prefix. Exact parity for positive inverse
 optimization that uses those extra indices remains open.
 
+For the duplicate inverse case in the fixture, replace its queries with
+`[[8.81, 8.73], [8.55, 8.51]]` to exercise the appended row in the supplied
+layout. Two independent Windows reference processes at 48 epochs disagreed
+on all six coordinate bits for these queries even with fixed seeds.
+
 The fixture records distinct-row graph bits, final and checkpoint coordinates,
-training and held-out transforms, the initialized inverse, and a dense
-update. It covers dense, CSR, CSC and COO inputs, categorical and continuous
+training and held-out transforms, the initialized inverse, and dense and
+CSR updates. It covers dense, CSR, CSC and COO inputs, categorical and continuous
 targets, the compatibility optimizer and Adam, and truncated neighbor
 counts. Explicit curve coefficients are used in the common fixture since
 inferred coefficients can differ between Windows and Ubuntu WSL.

@@ -68,10 +68,14 @@ def test_public_unique_checkpoints(case, method):
             _assert_matches(coordinates, expected)
     if "training_transform" in case:
         _assert_matches(model.transform(x), case["training_transform"])
-        _assert_matches(model.transform(queries), case["query_transform"])
+        with warnings.catch_warnings(record=True) as seen:
+            warnings.simplefilter("always")
+            _assert_matches(model.transform(queries), case["query_transform"])
+        assert [notice.category.__name__ for notice in seen] == case["query_warnings"]
     if "updated_graph" in case:
         model.set_params(n_epochs=0)
-        _assert_matches(model.inverse_transform(model.embedding_[[1, 4]]), case["inverse"])
+        if "inverse" in case:
+            _assert_matches(model.inverse_transform(model.embedding_[[1, 4]]), case["inverse"])
         assert model.update(queries) is None
         _assert_matches(model.graph_, case["updated_graph"])
         _assert_matches(model.embedding_, case["updated_embedding"])

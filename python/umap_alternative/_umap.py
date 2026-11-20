@@ -904,7 +904,9 @@ class UMAP(BaseEstimator, TransformerMixin):
         elif ranked_sparse_graph:
             # Euclidean pairwise distances coalesce these validated entries
             # after widening their values, while the identity keeps them stored.
-            ranking_input = fitted_input if metric == "euclidean" else X_checked
+            ranking_input = (
+                fitted_input if metric == "euclidean" and inverse_rows is None else X_checked
+            )
             components, removed = _native._fit_sparse_feature_graph_with_cutoff(
                 _csr_buffers(ranking_input),
                 n_neighbors,

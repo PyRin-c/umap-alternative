@@ -103,6 +103,13 @@ pub struct ModernSampledLayout {
 }
 
 impl ModernSampledLayout {
+    /// Select the refinement schedule before running the first epoch of a
+    /// recursively initialized layout.
+    pub fn with_refinement_schedule(mut self) -> Self {
+        self.layout.use_refinement_schedule();
+        self
+    }
+
     /// Seed the dispatch from the caller RNG even when the epoch count is zero.
     /// Validation completes before the caller RNG advances.
     pub fn new(

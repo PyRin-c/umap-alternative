@@ -74,6 +74,7 @@ impl std::error::Error for ModernLayoutError {}
 /// An in-progress modern layout with zero-initialized running state.
 pub struct ModernLayout {
     config: ModernLayoutConfig,
+    refinement_schedule: bool,
     epoch: usize,
     coordinates: Vec<f32>,
     moments: Vec<[f32; 2]>,
@@ -112,12 +113,17 @@ impl ModernLayout {
         }
         Ok(Self {
             config,
+            refinement_schedule: false,
             epoch: 0,
             coordinates,
             moments: vec![[0.0; 2]; len],
             forces: vec![0.0; len],
             pending: vec![(0.0, [0.0; 2]); len],
         })
+    }
+
+    pub(crate) fn use_refinement_schedule(&mut self) {
+        self.refinement_schedule = true;
     }
 
     /// The current row-major coordinates.
@@ -190,7 +196,7 @@ impl ModernLayout {
 
         let components = self.config.n_components;
         let n_rows = self.coordinates.len() / components;
-        let update = EpochUpdate::new(self.config, self.epoch, scheduled);
+        let update = EpochUpdate::new(self.config, self.epoch, scheduled, self.refinement_schedule);
         let (distance, repulsion_strength) = if scheduled {
             // The seeded layouts share a blocked squared-distance reduction.
             (
@@ -281,14 +287,19 @@ enum EpochUpdate {
 }
 
 impl EpochUpdate {
-    fn new(config: ModernLayoutConfig, epoch: usize, scheduled: bool) -> Self {
+    fn new(config: ModernLayoutConfig, epoch: usize, scheduled: bool, refinement: bool) -> Self {
         let epochs = config.n_epochs;
         match config.optimizer {
             ModernOptimizer::Momentum => {
                 let remaining = 1.0 - epoch as f64 / epochs as f64;
                 let previous = 1.0 - epoch.saturating_sub(1) as f64 / epochs as f64;
-                let alpha = 0.125 * config.learning_rate * remaining * remaining;
-                let carry = 0.5 - 0.125 * previous * previous;
+                let mut alpha = 0.125 * config.learning_rate * remaining * remaining;
+                let carry = if refinement {
+                    alpha += 0.0025;
+                    0.5 - 0.5 * previous * previous
+                } else {
+                    0.5 - 0.125 * previous * previous
+                };
                 if scheduled {
                     Self::ScheduledMomentum { alpha, carry }
                 } else {
@@ -296,10 +307,14 @@ impl EpochUpdate {
                 }
             }
             ModernOptimizer::Adam => {
-                let early_epochs = (epochs / 2).min(100);
+                let (early_epochs, initial_rate) = if refinement {
+                    ((epochs / 8).min(100), 0.5 * config.learning_rate)
+                } else {
+                    ((epochs / 2).min(100), 2.0 * config.learning_rate)
+                };
                 let alpha = if epoch < early_epochs {
                     let remaining = 1.0 - epoch as f64 / early_epochs as f64;
-                    0.1 + (2.0 * config.learning_rate - 0.1) * remaining * remaining
+                    0.1 + (initial_rate - 0.1) * remaining * remaining
                 } else {
                     0.2 - 0.15 * (epoch - early_epochs) as f64 / (epochs - early_epochs) as f64
                 };

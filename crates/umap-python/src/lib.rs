@@ -609,7 +609,7 @@ fn _initialize_modern_layout(
 #[pyo3(signature = (
     components, coordinates, rng_state, *, optimizer, n_components, n_epochs, a, b,
     learning_rate, repulsion_strength, negative_sample_rate, exclude_graph_neighbors,
-    checkpoint_epochs=None, project=None
+    checkpoint_epochs=None, project=None, refinement_schedule=false
 ))]
 #[allow(clippy::too_many_arguments)]
 fn _fit_modern_layout(
@@ -628,6 +628,7 @@ fn _fit_modern_layout(
     exclude_graph_neighbors: bool,
     checkpoint_epochs: Option<Vec<usize>>,
     project: Option<Py<PyAny>>,
+    refinement_schedule: bool,
 ) -> PyResult<ModernEmbeddingComponents> {
     let ((n_rows, n_cols), indptr, indices, data) = components;
     let graph = CsrGraph {
@@ -671,6 +672,9 @@ fn _fit_modern_layout(
             }
         })
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    if refinement_schedule {
+        sampled = sampled.with_refinement_schedule();
+    }
     let mut order = if use_projection {
         (0..n_rows).collect()
     } else {

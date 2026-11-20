@@ -5,6 +5,7 @@ from __future__ import annotations
 import numbers
 import sys
 import warnings
+from functools import partial
 
 import numpy as np
 from scipy.sparse import coo_matrix, csc_matrix, csr_matrix, issparse, tril, triu
@@ -15,6 +16,7 @@ from sklearn.utils.validation import check_array, check_is_fitted
 
 from . import _native
 from ._curve import _finite_float, _resolve_curve_params
+from ._recursive import _modern_recursive_initialization, _validate_recursive_initialization
 from ._spectral import (
     _disconnected_spectral_initialization,
     _modern_spectral_initialization,
@@ -240,10 +242,10 @@ def _restore_modern_rng(rng, state):
 
 def _fit_modern_initialization(
     components, rng, initial, n_components, rescale, scale_factor, n_epochs, repulsion_strength,
-    *, spectral_input,
+    *, graph_initializer,
 ):
     n_rows = components[0][0]
-    if spectral_input is not None or rescale == "graph_edge":
+    if graph_initializer is not None or rescale == "graph_edge":
         shape, indptr, indices, weights = components
         weights = np.asarray(weights, dtype=np.float32)
         budget = n_epochs if n_epochs > 10 else _default_epochs(n_rows)
@@ -252,13 +254,10 @@ def _fit_modern_initialization(
             weights[weak] = 0.0
             components = (shape, indptr, indices, weights.tolist())
     init = "random" if initial is None else "explicit"
-    if spectral_input is not None:
-        features, metric = spectral_input
+    if graph_initializer is not None:
         sampling_graph = _csr_graph(components)
         sampling_graph.eliminate_zeros()
-        initial = _modern_spectral_initialization(
-            sampling_graph, features, metric, n_components, rng,
-        ).ravel().tolist()
+        initial = graph_initializer(sampling_graph, n_components=n_components, rng=rng).ravel().tolist()
         init = "prepared"
     coordinates, state = _native._initialize_modern_layout(
         components,
@@ -297,13 +296,13 @@ def _sparse_tie_ranker(metric):
 def _fit_modern_embedding(
     components, rng, initial, *, optimizer, n_components, n_epochs,
     rescale, scale_factor, checkpoint_epochs, negative_selection_range,
-    exclude_graph_neighbors, repulsion_strength, spectral_input, **layout_options,
+    exclude_graph_neighbors, repulsion_strength, graph_initializer, refinement_schedule, **layout_options,
 ):
     if not isinstance(rng, np.random.RandomState):
         rng = np.random.RandomState(rng)
     embedding = _fit_modern_initialization(
         components, rng, initial, n_components, rescale, scale_factor, n_epochs, repulsion_strength,
-        spectral_input=spectral_input,
+        graph_initializer=graph_initializer,
     )
     if n_epochs == 0:
         rng.randint(-2**31 + 1, 2**31 - 2, 3)
@@ -328,6 +327,7 @@ def _fit_modern_embedding(
         components, embedding.ravel().tolist(), _modern_rng_state(rng),
         optimizer=optimizer, n_components=n_components, n_epochs=n_epochs,
         checkpoint_epochs=checkpoint_epochs, project=projector,
+        refinement_schedule=refinement_schedule,
         exclude_graph_neighbors=exclude_graph_neighbors,
         repulsion_strength=repulsion_strength, **layout_options,
     )
@@ -570,6 +570,8 @@ class UMAP(BaseEstimator, TransformerMixin):
     CSC, and COO queries. Float64 queries return float64 coordinates for this path.
     A singleton has a zero embedding and no graph. Seeded modern Adam and
     momentum layouts accept spectral, random, and explicit initialization.
+    Dense recursive initialization supports the PCA base case and coarsening
+    with one eligible hub per non-hub component and zero coarse epochs.
     For a fitted dense embedding, ``inverse_transform`` reconstructs
     the original features as a new float32 array. It warns when any query
     requires extrapolation outside the convex hull of the fitted layout.
@@ -577,8 +579,12 @@ class UMAP(BaseEstimator, TransformerMixin):
     diagnostic log radii for dense Euclidean features.
     """
 
-    # Estimators serialized before this option keep the original row behavior.
+    # Defaults for estimators serialized before these options were introduced.
     unique = False
+    recursive_coarsening_ratio = 4
+    recursive_init_kwds = None
+    coarse_layout_weights = "transition"
+    coarsen_on_layout_weights = True
 
     def __init__(
         self,
@@ -617,6 +623,10 @@ class UMAP(BaseEstimator, TransformerMixin):
         exclude_graph_neighbors=False,
         negative_selection_range=200_000,
         unique=False,
+        recursive_coarsening_ratio=4,
+        recursive_init_kwds=None,
+        coarse_layout_weights="transition",
+        coarsen_on_layout_weights=True,
     ):
         self.n_components = n_components
         self.n_neighbors = n_neighbors
@@ -653,6 +663,10 @@ class UMAP(BaseEstimator, TransformerMixin):
         self.exclude_graph_neighbors = exclude_graph_neighbors
         self.negative_selection_range = negative_selection_range
         self.unique = unique
+        self.recursive_coarsening_ratio = recursive_coarsening_ratio
+        self.recursive_init_kwds = recursive_init_kwds
+        self.coarse_layout_weights = coarse_layout_weights
+        self.coarsen_on_layout_weights = coarsen_on_layout_weights
 
     def fit(self, X, y=None):
         """Fit the fuzzy graph and, in embedding mode, the training layout."""
@@ -735,6 +749,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             n_rows = X_checked.shape[0]
         spectral = False
         modern = False
+        recursive_options = None
         checkpoint_epochs = None
         if embedding_mode:
             modern = self._uses_modern_layout()
@@ -755,6 +770,10 @@ class UMAP(BaseEstimator, TransformerMixin):
                 selection_range = _finite_float(
                     self.negative_selection_range, "negative_selection_range"
                 )
+                if isinstance(self.init, str) and self.init in ("recursive", "auto"):
+                    recursive_options = _validate_recursive_initialization(
+                        self.recursive_coarsening_ratio, self.coarse_layout_weights, self.recursive_init_kwds,
+                    )
             if self.unique and not isinstance(self.init, str):
                 raw_init = np.asarray(self.init)
                 if raw_init.ndim == 2 and raw_init.shape[0] != n_rows:
@@ -955,10 +974,20 @@ class UMAP(BaseEstimator, TransformerMixin):
                 warnings.warn("divide by zero encountered in divide", RuntimeWarning, stacklevel=2)
             layout_options = embedding_options.copy()
             rng = layout_options.pop("seed")
+            graph_initializer = None
+            if spectral:
+                graph_initializer = partial(_modern_spectral_initialization, features=X_checked, metric=metric)
+            elif recursive_options is not None:
+                graph_initializer = partial(
+                    _modern_recursive_initialization, features=X_checked, options=recursive_options,
+                    ratio=self.recursive_coarsening_ratio,
+                    weights=self.coarse_layout_weights if self.coarsen_on_layout_weights else "fuzzy_union",
+                )
             embedding, history = _fit_modern_embedding(
                 components, rng, initial_coordinates,
                 optimizer="momentum" if self.optimizer == "momentum" else "adam",
-                spectral_input=(X_checked, metric) if spectral else None,
+                graph_initializer=graph_initializer,
+                refinement_schedule=recursive_options is not None,
                 rescale=self.init_rescale, scale_factor=scale_factor,
                 checkpoint_epochs=checkpoint_epochs, negative_selection_range=selection_range,
                 exclude_graph_neighbors=bool(self.exclude_graph_neighbors), **layout_options,
@@ -1583,6 +1612,8 @@ class UMAP(BaseEstimator, TransformerMixin):
     def _embedding_init(self, n_rows, n_components, *, modern):
         if isinstance(self.init, str):
             if self.init == "random" or (n_rows == 1 and self.init == "auto"):
+                return None
+            if modern and self.init in ("recursive", "auto"):
                 return None
             if self.init == "spectral":
                 return None

@@ -1,5 +1,5 @@
 use pyo3::exceptions::{
-    PyNotImplementedError, PyRuntimeWarning, PyValueError, PyZeroDivisionError,
+    PyIndexError, PyNotImplementedError, PyRuntimeWarning, PyValueError, PyZeroDivisionError,
 };
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
@@ -43,12 +43,15 @@ use umap_core::sparse::{
     rank_sparse_feature_queries, unique_csr_rows,
 };
 use umap_core::transform::{
-    CooGraph, DenseEmbeddingTransformConfig, transform_dense_embedding_with_options,
+    CooGraph, DenseEmbeddingTransformConfig, DenseEmbeddingTransformError,
+    TransformInitializationError, transform_dense_embedding_with_options,
     transform_dense_graph_with_cutoff, transform_dense_graph_with_tie_ranking,
-    transform_embedding_from_graph, transform_ranked_neighbors_graph,
+    transform_embedding_from_graph, transform_embedding_from_partial_graph,
+    transform_ranked_neighbors_graph,
 };
 use umap_core::update::{
-    DenseUpdateConfig, DenseUpdateError, update_dense_embedding, update_embedding_from_ranked_graph,
+    DenseUpdateConfig, DenseUpdateError, fit_dense_update_graph, update_dense_embedding,
+    update_embedding_from_ranked_graph,
 };
 use umap_core::validation::{
     Trustworthiness, TrustworthinessError, TrustworthinessMetric, trustworthiness_from_dense,
@@ -643,6 +646,25 @@ fn _update_dense_embedding(
         Err(error) => return Err(PyValueError::new_err(error.to_string())),
     };
     Ok((csr_components(graph), shape, coordinates))
+}
+
+/// Rebuild the dense feature graph before the update layout is attempted.
+#[pyfunction]
+#[pyo3(signature = (data, shape, n_existing, k, metric, *, graph_options=None))]
+fn _fit_dense_update_graph(
+    py: Python<'_>,
+    data: Vec<f32>,
+    shape: (usize, usize),
+    n_existing: usize,
+    k: usize,
+    metric: &str,
+    graph_options: Option<(f64, f64)>,
+) -> PyResult<(CsrComponents, Vec<usize>)> {
+    let metric = parse_metric(metric)?;
+    let options = parse_graph_options(graph_options)?;
+    py.detach(|| fit_dense_update_graph(&data, shape, n_existing, k, metric, options))
+        .map(|(graph, ranks)| (csr_components(graph), ranks))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
 /// Rebuild the sparse feature graph and return the ranks used to initialize new rows.
@@ -1335,7 +1357,7 @@ fn ranked_query_graph(
     training, n_training_rows, queries, n_query_rows, n_features, fitted_embedding,
     *, k, metric, n_components, a, b, learning_rate, fit_epochs, repulsion_strength,
     negative_sample_rate, transform_seed, disconnection_distance=None, local_connectivity=1.0,
-    ranked_columns=None, rank_ties=None
+    ranked_columns=None, rank_ties=None, partial_fit=false, invalid_epochs=false
 ))]
 #[allow(clippy::too_many_arguments)]
 fn _transform_dense_embedding(
@@ -1360,6 +1382,8 @@ fn _transform_dense_embedding(
     local_connectivity: f64,
     ranked_columns: Option<Vec<i32>>,
     rank_ties: Option<Py<PyAny>>,
+    partial_fit: bool,
+    invalid_epochs: bool,
 ) -> PyResult<Vec<f32>> {
     let options = GraphOptions::new(local_connectivity, 1.0)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
@@ -1409,6 +1433,24 @@ fn _transform_dense_embedding(
         None
     };
     if let Some(graph) = ranked_graph {
+        let retained_coordinates = if partial_fit {
+            let coordinates = py
+                .detach(|| {
+                    transform_embedding_from_partial_graph(&graph, &fitted_embedding, &config)
+                })
+                .map_err(|error| match error {
+                    DenseEmbeddingTransformError::Initialization(
+                        TransformInitializationError::MissingFittedRow { .. },
+                    ) => PyIndexError::new_err(error.to_string()),
+                    _ => PyValueError::new_err(error.to_string()),
+                })?;
+            if invalid_epochs {
+                return Err(PyValueError::new_err("invalid transform epoch count"));
+            }
+            Some(coordinates)
+        } else {
+            None
+        };
         if !precomputed && fit_epochs.is_some_and(|epochs| epochs < 3) {
             let message = if graph.data.iter().any(|&weight| weight > 0.0) {
                 c"divide by zero encountered in scalar divide"
@@ -1416,6 +1458,9 @@ fn _transform_dense_embedding(
                 c"invalid value encountered in scalar divide"
             };
             PyErr::warn(py, py.get_type::<PyRuntimeWarning>().as_any(), message, 2)?;
+        }
+        if let Some(coordinates) = retained_coordinates {
+            return Ok(coordinates);
         }
         return py
             .detach(|| transform_embedding_from_graph(&graph, &fitted_embedding, &config))
@@ -1552,6 +1597,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_fit_dense_embedding, module)?)?;
     module.add_function(wrap_pyfunction!(_update_dense_embedding, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_sparse_update_graph, module)?)?;
+    module.add_function(wrap_pyfunction!(_fit_dense_update_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_update_ranked_embedding, module)?)?;
     module.add_function(wrap_pyfunction!(_density_radius_log_inputs, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_graph_embedding_with_rng, module)?)?;

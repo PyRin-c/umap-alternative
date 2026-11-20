@@ -8,7 +8,7 @@ use crate::initialization::{
     validate_finite, write_mean,
 };
 use crate::layout::{validate_parameters, validate_repulsion_strength};
-use crate::neighbors::{DistanceMetric, exhaustive_knn_with_metric};
+use crate::neighbors::{DistanceMetric, Neighbor, exhaustive_knn_with_metric};
 use crate::optimize::OptimizeError;
 use crate::rng::Mt19937;
 use crate::sampling::EdgeSamplingCursor;
@@ -193,6 +193,33 @@ pub fn update_embedding_from_ranked_graph(
     Ok(embedding)
 }
 
+/// Rebuild the uncut dense update graph and return the appended rows' ranked
+/// neighbor columns. Estimators can publish this graph before starting layout.
+pub fn fit_dense_update_graph(
+    data: &[f32],
+    shape: (usize, usize),
+    n_existing: usize,
+    k: usize,
+    metric: DistanceMetric,
+    options: Option<GraphOptions>,
+) -> Result<(CsrGraph, Vec<usize>), DenseUpdateError> {
+    if n_existing == 0 || n_existing >= shape.0 || shape.1 == 0 {
+        return Err(DenseUpdateError::InvalidDataShape {
+            n_existing,
+            n_rows: shape.0,
+            n_features: shape.1,
+        });
+    }
+    let (graph, neighbors) = rebuild_dense_update_graph(data, shape, k, metric, options)?;
+    let appended = neighbors
+        .into_iter()
+        .skip(n_existing)
+        .flatten()
+        .map(|neighbor| neighbor.index)
+        .collect();
+    Ok((graph, appended))
+}
+
 fn optimize_prepared_update(
     embedding: &mut DenseEmbedding,
     layout: &EmbeddingLayoutConfig<impl Copy + Into<f64>, impl Copy + Into<f64>>,
@@ -237,24 +264,35 @@ fn prepare_with_rng(
     }
     let width = config.n_components;
     let init = validate_fitted_layout(n_existing, n_rows, width, fitted)?;
-    let neighbors =
-        exhaustive_knn_with_metric(data, n_rows, n_features, config.n_neighbors, config.metric)
-            .map_err(|error| DenseUpdateError::Graph(error.into()))?;
-    let graph = if config.metric.uses_ranked_graph() {
-        build_graph_with_cutoff(
-            &neighbors,
-            config.n_neighbors,
-            f32::INFINITY,
-            config.graph_options.unwrap_or_default(),
-        )
-    } else {
-        build_fitted_graph(&neighbors, config.graph_options)
-    }
-    .map_err(|error| DenseUpdateError::Graph(error.into()))?;
+    let (graph, neighbors) = rebuild_dense_update_graph(
+        data,
+        (n_rows, n_features),
+        config.n_neighbors,
+        config.metric,
+        config.graph_options,
+    )?;
     let rows = neighbors[n_existing..]
         .iter()
         .map(|neighbors| neighbors.iter().map(|neighbor| neighbor.index));
     prepare_ranked_update(graph, fitted, width, init, rows, rng)
+}
+
+fn rebuild_dense_update_graph(
+    data: &[f32],
+    (n_rows, n_features): (usize, usize),
+    k: usize,
+    metric: DistanceMetric,
+    options: Option<GraphOptions>,
+) -> Result<(CsrGraph, Vec<Vec<Neighbor>>), DenseUpdateError> {
+    let neighbors = exhaustive_knn_with_metric(data, n_rows, n_features, k, metric)
+        .map_err(|error| DenseUpdateError::Graph(error.into()))?;
+    let graph = if metric.uses_ranked_graph() {
+        build_graph_with_cutoff(&neighbors, k, f32::INFINITY, options.unwrap_or_default())
+    } else {
+        build_fitted_graph(&neighbors, options)
+    }
+    .map_err(|error| DenseUpdateError::Graph(error.into()))?;
+    Ok((graph, neighbors))
 }
 
 struct ValidatedLayout {

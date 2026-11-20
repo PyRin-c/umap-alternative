@@ -190,6 +190,8 @@ pub enum TransformInitializationError {
         n_components: usize,
         values: usize,
     },
+    /// A membership needed a fitted row that has no coordinates yet.
+    MissingFittedRow { row: usize },
     /// The requested output length exceeds the addressable range.
     OutputShapeOverflow { n_rows: usize, n_components: usize },
     /// COO rows, columns, and weights must have equal lengths.
@@ -217,6 +219,12 @@ impl fmt::Display for TransformInitializationError {
                 formatter,
                 "fitted embedding requires a positive component count and shape {n_rows}x{n_components}, got {values} values"
             ),
+            Self::MissingFittedRow { row } => {
+                write!(
+                    formatter,
+                    "fitted embedding has no coordinates for row {row}"
+                )
+            }
             Self::OutputShapeOverflow {
                 n_rows,
                 n_components,
@@ -444,10 +452,34 @@ pub fn transform_embedding_from_graph(
     fitted_embedding: &[f32],
     config: &DenseEmbeddingTransformConfig,
 ) -> Result<Vec<f32>, DenseEmbeddingTransformError> {
+    transform_embedding_from_graph_impl(graph, fitted_embedding, config, false)
+}
+
+/// Transform against a graph rebuilt by an update that could not publish new
+/// coordinates. Initialization can only read the retained fitted rows.
+pub fn transform_embedding_from_partial_graph(
+    graph: &CooGraph,
+    fitted_embedding: &[f32],
+    config: &DenseEmbeddingTransformConfig,
+) -> Result<Vec<f32>, DenseEmbeddingTransformError> {
+    transform_embedding_from_graph_impl(graph, fitted_embedding, config, true)
+}
+
+fn transform_embedding_from_graph_impl(
+    graph: &CooGraph,
+    fitted_embedding: &[f32],
+    config: &DenseEmbeddingTransformConfig,
+    allow_partial: bool,
+) -> Result<Vec<f32>, DenseEmbeddingTransformError> {
     use DenseEmbeddingTransformError as Error;
-    let mut embedding =
-        initialize_transform_embedding_impl(graph, fitted_embedding, config.n_components, true)
-            .map_err(Error::Initialization)?;
+    let mut embedding = initialize_transform_embedding_impl(
+        graph,
+        fitted_embedding,
+        config.n_components,
+        true,
+        allow_partial,
+    )
+    .map_err(Error::Initialization)?;
     optimize_transform(&mut embedding, fitted_embedding, graph, config).map_err(Error::Optimize)?;
     Ok(embedding)
 }
@@ -513,14 +545,15 @@ fn optimize_transform(
             if current.iter().any(|value| value.is_nan()) {
                 continue;
             }
-            if let Some(other) = fitted_rows[*tail] {
+            if let Some(Some(other)) = fitted_rows.get(*tail) {
                 attractive_update_fixed_tail(current, other, a, b, alpha)?;
             }
+            // An incomplete fit still schedules samples over the full graph.
             for _ in 0..cursor.take_negative_samples(epoch)? {
                 let vertex = sampler
                     .sample_from(*head, graph.n_cols)
                     .expect("graph head has a negative sampling stream");
-                if let Some(other) = fitted_rows[vertex] {
+                if let Some(Some(other)) = fitted_rows.get(vertex) {
                     negative_update_fixed_tail(current, other, a, b, repulsion, alpha)?;
                 }
             }
@@ -551,7 +584,7 @@ pub fn initialize_transform_embedding(
     fitted_embedding: &[f32],
     n_components: usize,
 ) -> Result<Vec<f32>, TransformInitializationError> {
-    initialize_transform_embedding_impl(graph, fitted_embedding, n_components, false)
+    initialize_transform_embedding_impl(graph, fitted_embedding, n_components, false, false)
 }
 
 fn initialize_transform_embedding_impl(
@@ -559,10 +592,21 @@ fn initialize_transform_embedding_impl(
     fitted_embedding: &[f32],
     n_components: usize,
     coalesce_duplicates: bool,
+    allow_partial: bool,
 ) -> Result<Vec<f32>, TransformInitializationError> {
     use TransformInitializationError as Error;
 
-    if n_components == 0 || graph.n_cols.checked_mul(n_components) != Some(fitted_embedding.len()) {
+    let fits_graph = graph.n_cols.checked_mul(n_components) == Some(fitted_embedding.len());
+    let retained_prefix = allow_partial
+        && fitted_embedding
+            .len()
+            .checked_div(n_components)
+            .is_some_and(|rows| {
+                rows > 0
+                    && rows < graph.n_cols
+                    && fitted_embedding.len().is_multiple_of(n_components)
+            });
+    if n_components == 0 || (!fits_graph && !retained_prefix) {
         return Err(Error::InvalidFittedShape {
             n_rows: graph.n_cols,
             n_components,
@@ -586,6 +630,12 @@ fn initialize_transform_embedding_impl(
     let mut positions = (0..graph.data.len())
         .filter(|&position| graph.data[position] != 0.0)
         .peekable();
+    let fitted_row = |row| {
+        fitted_embedding
+            .chunks_exact(n_components)
+            .nth(row)
+            .ok_or(Error::MissingFittedRow { row })
+    };
 
     while let Some(&start) = positions.peek() {
         let row = graph.row[start];
@@ -636,8 +686,7 @@ fn initialize_transform_embedding_impl(
         let row_start = row * n_components;
         let coordinates = &mut embedding[row_start..row_start + n_components];
         if let Some(&(column, _)) = entries.iter().find(|&&(_, weight)| weight == 1.0) {
-            let start = column * n_components;
-            coordinates.copy_from_slice(&fitted_embedding[start..start + n_components]);
+            coordinates.copy_from_slice(fitted_row(column)?);
             continue;
         }
 
@@ -645,12 +694,9 @@ fn initialize_transform_embedding_impl(
         let scale = (sum_memberships(&entries[1..]) + entries[0].1).recip();
         coordinates.fill(0.0);
         for &(column, weight) in entries.iter().rev() {
-            let start = column * n_components;
+            let fitted = fitted_row(column)?;
             let normalized = weight * scale;
-            for (coordinate, &fitted) in coordinates
-                .iter_mut()
-                .zip(&fitted_embedding[start..start + n_components])
-            {
+            for (coordinate, &fitted) in coordinates.iter_mut().zip(fitted) {
                 *coordinate += normalized * fitted;
             }
         }

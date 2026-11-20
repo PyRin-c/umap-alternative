@@ -12,6 +12,7 @@ from scipy.sparse import coo_matrix, csc_matrix, csr_matrix, issparse, tril, tri
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial import Delaunay
 from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.utils import check_random_state
 from sklearn.utils.validation import check_array, check_is_fitted
 
 from . import _native
@@ -1247,6 +1248,8 @@ class UMAP(BaseEstimator, TransformerMixin):
         transform_error = getattr(self, "_supplied_transform_error", None)
         if transform_error is not None:
             raise NotImplementedError(transform_error)
+        if boolean_metric and self.transform_mode == "graph":
+            check_random_state(self.transform_seed)
         ranked_columns = None
         if metric == "precomputed":
             warnings.warn(_PRECOMPUTED_TRANSFORM_WARNING, UserWarning, stacklevel=2)
@@ -1319,7 +1322,15 @@ class UMAP(BaseEstimator, TransformerMixin):
     def _transform_embedding(self, training, queries, metric, ranked_columns):
         fitted = self.embedding_
         seed = self._embedding_transform_seed()
-        fit_epochs = None if self.n_epochs is None else _validate_epochs(self.n_epochs)
+        partial_fit = metric in _BOOLEAN_METRICS and fitted.shape[0] < training.shape[0]
+        invalid_epochs = False
+        try:
+            fit_epochs = None if self.n_epochs is None else _validate_epochs(self.n_epochs)
+        except ValueError:
+            if not partial_fit:
+                raise
+            # Membership initialization can fail before the invalid schedule.
+            fit_epochs, invalid_epochs = 0, True
         repulsion, negative_rate = self._sampling_options()
         n_components = fitted.shape[1]
         cutoff = getattr(self, "_transform_cutoff", None)
@@ -1345,6 +1356,8 @@ class UMAP(BaseEstimator, TransformerMixin):
             disconnection_distance=cutoff,
             ranked_columns=ranked_columns,
             rank_ties=_rank_tied_dense_distances if self.unique or metric in _TIE_RANKED_METRICS else None,
+            partial_fit=partial_fit,
+            invalid_epochs=invalid_epochs,
             **self._embedding_transform_options,
         )
         return np.asarray(coordinates, dtype=np.float32).reshape(queries.shape[0], n_components)
@@ -1365,6 +1378,9 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise NotImplementedError("update requires dense features with computed neighbors")
         if sparse:
             return self._update_sparse_features(X, training, metric, ensure_all_finite)
+        boolean_metric = metric in _BOOLEAN_METRICS
+        if boolean_metric and issparse(X):
+            raise ValueError("Sparse batches cannot be appended to a dense fit.")
         batch = check_array(
             X, dtype=np.float32, order="C", ensure_all_finite=ensure_all_finite
         )
@@ -1373,6 +1389,13 @@ class UMAP(BaseEstimator, TransformerMixin):
         data = combined.ravel().tolist()
         graph_options = self._graph_options()
         n_neighbors = self.n_neighbors_
+        if boolean_metric and not self.output_dens:
+            seed = self._embedding_transform_seed()
+            n_existing = training.shape[0]
+            components, ranks = _native._fit_dense_update_graph(
+                data, combined.shape, n_existing, n_neighbors, metric, graph_options=graph_options,
+            )
+            return self._update_ranked_features(combined, metric, n_existing, components, ranks, seed)
         if self._embedding_transform_options is None:
             if metric in _ANGULAR_METRICS:
                 components, _ = _native._fit_dense_graph_with_cutoff(
@@ -1438,7 +1461,8 @@ class UMAP(BaseEstimator, TransformerMixin):
         combined = _sparse_features(stacked, preserve_duplicates=True)
         ranking_input = combined
         exact_input = stacked
-        if metric in ("manhattan", "chebyshev") + _RATIO_METRICS and not combined.has_canonical_format:
+        if (metric in ("manhattan", "chebyshev") + _RATIO_METRICS + _SPARSE_BOOLEAN_METRICS
+                and not combined.has_canonical_format):
             ranking_input = _sparse_features(combined, preserve_duplicates=False)
             if metric == "manhattan":
                 # Copies of either representation take the held-out path.
@@ -1449,6 +1473,13 @@ class UMAP(BaseEstimator, TransformerMixin):
         components, appended_ranks = _native._fit_sparse_update_graph(
             _csr_buffers(ranking_input), n_existing, k, metric, graph_options=self._graph_options(),
         )
+        return self._update_ranked_features(
+            combined, metric, n_existing, components, appended_ranks, seed, exact_input=exact_input,
+        )
+
+    def _update_ranked_features(
+        self, combined, metric, n_existing, components, appended_ranks, seed, *, exact_input=None,
+    ):
         # The combined graph and training rows are visible before layout starts.
         self.graph_ = _csr_graph(components)
         self._graph_transform_fit = (combined, metric)
@@ -1473,7 +1504,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         )
         embedding = np.asarray(coordinates, dtype=np.float32).reshape(shape)
         self._store_fit(
-            combined.shape[1], (combined, metric), _csr_graph(components), k, embedding,
+            combined.shape[1], (combined, metric), _csr_graph(components), self.n_neighbors_, embedding,
             embedding_options=self._embedding_transform_options,
             transform_cutoff=self._transform_cutoff, exact_fit_input=exact_input,
             fit_inverse_rows=getattr(self, "_fit_inverse_rows", None),

@@ -1,0 +1,1085 @@
+{
+  "base_parameters": {
+    "a": 1.0,
+    "b": 1.0,
+    "compatibility_layout": true,
+    "init": "explicit_float32_array",
+    "metric": "euclidean",
+    "n_components": 2,
+    "n_jobs": 1,
+    "n_neighbors": 3,
+    "random_state": 42,
+    "transform_mode": "embedding"
+  },
+  "checkpoints_n_epochs": [
+    0,
+    2,
+    3
+  ],
+  "comparisons": {
+    "negative_sample_rate_1_vs_2_at_repulsion_strength_1": {
+      "first_different_n_epochs": 2,
+      "left": "repulsion_1_nrate_1",
+      "mismatch_positions": [
+        [
+          0,
+          0,
+          1062990075,
+          1062936755
+        ],
+        [
+          0,
+          1,
+          1074882416,
+          1074878085
+        ],
+        [
+          1,
+          0,
+          1077892468,
+          1077795540
+        ],
+        [
+          1,
+          1,
+          1089699774,
+          1089688955
+        ],
+        [
+          2,
+          0,
+          1083010498,
+          1083011894
+        ],
+        [
+          2,
+          1,
+          1061226052,
+          1061097301
+        ],
+        [
+          3,
+          0,
+          1088221392,
+          1088274275
+        ],
+        [
+          3,
+          1,
+          1091186564,
+          1091201130
+        ],
+        [
+          4,
+          0,
+          1091386441,
+          1091430183
+        ],
+        [
+          4,
+          1,
+          1087851705,
+          1087794632
+        ]
+      ],
+      "right": "repulsion_1_nrate_2"
+    },
+    "repulsion_strength_0_vs_1_at_negative_sample_rate_1": {
+      "first_different_n_epochs": 3,
+      "left": "repulsion_0_nrate_1",
+      "mismatch_positions": [
+        [
+          0,
+          0,
+          1070613121,
+          1070586157
+        ],
+        [
+          0,
+          1,
+          1075326794,
+          1075320729
+        ],
+        [
+          1,
+          0,
+          1081895019,
+          1081714386
+        ],
+        [
+          1,
+          1,
+          1089139046,
+          1089124099
+        ],
+        [
+          2,
+          0,
+          1081819071,
+          1081815929
+        ],
+        [
+          2,
+          1,
+          1068776602,
+          1068699451
+        ],
+        [
+          3,
+          0,
+          1088508083,
+          1088546250
+        ],
+        [
+          3,
+          1,
+          1089622181,
+          1089665140
+        ],
+        [
+          4,
+          0,
+          1089391253,
+          1089896877
+        ],
+        [
+          4,
+          1,
+          1089050407,
+          1088776606
+        ]
+      ],
+      "right": "repulsion_1_nrate_1"
+    }
+  },
+  "environment": {
+    "machine": "AMD64",
+    "packages": {
+      "llvmlite": "0.50.0",
+      "numba": "0.68.1",
+      "numpy": "2.5.5",
+      "pynndescent": "0.7.0",
+      "scikit-learn": "1.9.1",
+      "scipy": "1.18.1",
+      "umap-learn": "0.6.0"
+    },
+    "platform": "Windows",
+    "python": "CPython 3.13.12"
+  },
+  "input": {
+    "dtype": "float32",
+    "init_dtype": "float32",
+    "init_values": [
+      [
+        -3.0,
+        -2.0
+      ],
+      [
+        -1.0,
+        1.0
+      ],
+      [
+        2.0,
+        -3.0
+      ],
+      [
+        4.0,
+        2.0
+      ],
+      [
+        7.0,
+        0.0
+      ]
+    ],
+    "shape": [
+      5,
+      2
+    ],
+    "values": [
+      [
+        0.0,
+        0.0
+      ],
+      [
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0
+      ],
+      [
+        1.0,
+        1.0
+      ],
+      [
+        2.0,
+        0.5
+      ]
+    ]
+  },
+  "operation": "UMAP.fit_transform optimizer checkpoint comparison",
+  "scenarios": {
+    "repulsion_0_nrate_1": {
+      "checkpoints": [
+        {
+          "embedding": {
+            "bits_uint32": [
+              [
+                0,
+                1073741824
+              ],
+              [
+                1073741824,
+                1090519040
+              ],
+              [
+                1084227584,
+                0
+              ],
+              [
+                1088421888,
+                1092616192
+              ],
+              [
+                1092616192,
+                1086324736
+              ]
+            ],
+            "dtype": "float32",
+            "shape": [
+              5,
+              2
+            ]
+          },
+          "graph": {
+            "data_bits_uint32": [
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216
+            ],
+            "dtype": "float32",
+            "format": "csr",
+            "indices": [
+              1,
+              2,
+              0,
+              3,
+              4,
+              0,
+              3,
+              1,
+              2,
+              4,
+              1,
+              3
+            ],
+            "indptr": [
+              0,
+              2,
+              5,
+              7,
+              10,
+              12
+            ],
+            "shape": [
+              5,
+              5
+            ]
+          },
+          "n_epochs": 0,
+          "parameters": {
+            "a": 1.0,
+            "b": 1.0,
+            "compatibility_layout": true,
+            "init": "explicit_float32_array",
+            "metric": "euclidean",
+            "n_components": 2,
+            "n_epochs": 0,
+            "n_jobs": 1,
+            "n_neighbors": 3,
+            "negative_sample_rate": 1,
+            "random_state": 42,
+            "repulsion_strength": 0.0,
+            "transform_mode": "embedding"
+          },
+          "warnings_first_run": [],
+          "warnings_second_run": []
+        },
+        {
+          "embedding": {
+            "bits_uint32": [
+              [
+                1062990075,
+                1074882416
+              ],
+              [
+                1077892468,
+                1089699774
+              ],
+              [
+                1083010498,
+                1061226052
+              ],
+              [
+                1088221392,
+                1091186564
+              ],
+              [
+                1091386441,
+                1087851705
+              ]
+            ],
+            "dtype": "float32",
+            "shape": [
+              5,
+              2
+            ]
+          },
+          "graph": {
+            "data_bits_uint32": [
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216
+            ],
+            "dtype": "float32",
+            "format": "csr",
+            "indices": [
+              1,
+              2,
+              0,
+              3,
+              4,
+              0,
+              3,
+              1,
+              2,
+              4,
+              1,
+              3
+            ],
+            "indptr": [
+              0,
+              2,
+              5,
+              7,
+              10,
+              12
+            ],
+            "shape": [
+              5,
+              5
+            ]
+          },
+          "n_epochs": 2,
+          "parameters": {
+            "a": 1.0,
+            "b": 1.0,
+            "compatibility_layout": true,
+            "init": "explicit_float32_array",
+            "metric": "euclidean",
+            "n_components": 2,
+            "n_epochs": 2,
+            "n_jobs": 1,
+            "n_neighbors": 3,
+            "negative_sample_rate": 1,
+            "random_state": 42,
+            "repulsion_strength": 0.0,
+            "transform_mode": "embedding"
+          },
+          "warnings_first_run": [],
+          "warnings_second_run": []
+        },
+        {
+          "embedding": {
+            "bits_uint32": [
+              [
+                1070613121,
+                1075326794
+              ],
+              [
+                1081895019,
+                1089139046
+              ],
+              [
+                1081819071,
+                1068776602
+              ],
+              [
+                1088508083,
+                1089622181
+              ],
+              [
+                1089391253,
+                1089050407
+              ]
+            ],
+            "dtype": "float32",
+            "shape": [
+              5,
+              2
+            ]
+          },
+          "graph": {
+            "data_bits_uint32": [
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216
+            ],
+            "dtype": "float32",
+            "format": "csr",
+            "indices": [
+              1,
+              2,
+              0,
+              3,
+              4,
+              0,
+              3,
+              1,
+              2,
+              4,
+              1,
+              3
+            ],
+            "indptr": [
+              0,
+              2,
+              5,
+              7,
+              10,
+              12
+            ],
+            "shape": [
+              5,
+              5
+            ]
+          },
+          "n_epochs": 3,
+          "parameters": {
+            "a": 1.0,
+            "b": 1.0,
+            "compatibility_layout": true,
+            "init": "explicit_float32_array",
+            "metric": "euclidean",
+            "n_components": 2,
+            "n_epochs": 3,
+            "n_jobs": 1,
+            "n_neighbors": 3,
+            "negative_sample_rate": 1,
+            "random_state": 42,
+            "repulsion_strength": 0.0,
+            "transform_mode": "embedding"
+          },
+          "warnings_first_run": [],
+          "warnings_second_run": []
+        }
+      ],
+      "settings": {
+        "negative_sample_rate": 1,
+        "repulsion_strength": 0.0
+      }
+    },
+    "repulsion_1_nrate_1": {
+      "checkpoints": [
+        {
+          "embedding": {
+            "bits_uint32": [
+              [
+                0,
+                1073741824
+              ],
+              [
+                1073741824,
+                1090519040
+              ],
+              [
+                1084227584,
+                0
+              ],
+              [
+                1088421888,
+                1092616192
+              ],
+              [
+                1092616192,
+                1086324736
+              ]
+            ],
+            "dtype": "float32",
+            "shape": [
+              5,
+              2
+            ]
+          },
+          "graph": {
+            "data_bits_uint32": [
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216
+            ],
+            "dtype": "float32",
+            "format": "csr",
+            "indices": [
+              1,
+              2,
+              0,
+              3,
+              4,
+              0,
+              3,
+              1,
+              2,
+              4,
+              1,
+              3
+            ],
+            "indptr": [
+              0,
+              2,
+              5,
+              7,
+              10,
+              12
+            ],
+            "shape": [
+              5,
+              5
+            ]
+          },
+          "n_epochs": 0,
+          "parameters": {
+            "a": 1.0,
+            "b": 1.0,
+            "compatibility_layout": true,
+            "init": "explicit_float32_array",
+            "metric": "euclidean",
+            "n_components": 2,
+            "n_epochs": 0,
+            "n_jobs": 1,
+            "n_neighbors": 3,
+            "negative_sample_rate": 1,
+            "random_state": 42,
+            "repulsion_strength": 1.0,
+            "transform_mode": "embedding"
+          },
+          "warnings_first_run": [],
+          "warnings_second_run": []
+        },
+        {
+          "embedding": {
+            "bits_uint32": [
+              [
+                1062990075,
+                1074882416
+              ],
+              [
+                1077892468,
+                1089699774
+              ],
+              [
+                1083010498,
+                1061226052
+              ],
+              [
+                1088221392,
+                1091186564
+              ],
+              [
+                1091386441,
+                1087851705
+              ]
+            ],
+            "dtype": "float32",
+            "shape": [
+              5,
+              2
+            ]
+          },
+          "graph": {
+            "data_bits_uint32": [
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216
+            ],
+            "dtype": "float32",
+            "format": "csr",
+            "indices": [
+              1,
+              2,
+              0,
+              3,
+              4,
+              0,
+              3,
+              1,
+              2,
+              4,
+              1,
+              3
+            ],
+            "indptr": [
+              0,
+              2,
+              5,
+              7,
+              10,
+              12
+            ],
+            "shape": [
+              5,
+              5
+            ]
+          },
+          "n_epochs": 2,
+          "parameters": {
+            "a": 1.0,
+            "b": 1.0,
+            "compatibility_layout": true,
+            "init": "explicit_float32_array",
+            "metric": "euclidean",
+            "n_components": 2,
+            "n_epochs": 2,
+            "n_jobs": 1,
+            "n_neighbors": 3,
+            "negative_sample_rate": 1,
+            "random_state": 42,
+            "repulsion_strength": 1.0,
+            "transform_mode": "embedding"
+          },
+          "warnings_first_run": [],
+          "warnings_second_run": []
+        },
+        {
+          "embedding": {
+            "bits_uint32": [
+              [
+                1070586157,
+                1075320729
+              ],
+              [
+                1081714386,
+                1089124099
+              ],
+              [
+                1081815929,
+                1068699451
+              ],
+              [
+                1088546250,
+                1089665140
+              ],
+              [
+                1089896877,
+                1088776606
+              ]
+            ],
+            "dtype": "float32",
+            "shape": [
+              5,
+              2
+            ]
+          },
+          "graph": {
+            "data_bits_uint32": [
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216
+            ],
+            "dtype": "float32",
+            "format": "csr",
+            "indices": [
+              1,
+              2,
+              0,
+              3,
+              4,
+              0,
+              3,
+              1,
+              2,
+              4,
+              1,
+              3
+            ],
+            "indptr": [
+              0,
+              2,
+              5,
+              7,
+              10,
+              12
+            ],
+            "shape": [
+              5,
+              5
+            ]
+          },
+          "n_epochs": 3,
+          "parameters": {
+            "a": 1.0,
+            "b": 1.0,
+            "compatibility_layout": true,
+            "init": "explicit_float32_array",
+            "metric": "euclidean",
+            "n_components": 2,
+            "n_epochs": 3,
+            "n_jobs": 1,
+            "n_neighbors": 3,
+            "negative_sample_rate": 1,
+            "random_state": 42,
+            "repulsion_strength": 1.0,
+            "transform_mode": "embedding"
+          },
+          "warnings_first_run": [],
+          "warnings_second_run": []
+        }
+      ],
+      "settings": {
+        "negative_sample_rate": 1,
+        "repulsion_strength": 1.0
+      }
+    },
+    "repulsion_1_nrate_2": {
+      "checkpoints": [
+        {
+          "embedding": {
+            "bits_uint32": [
+              [
+                0,
+                1073741824
+              ],
+              [
+                1073741824,
+                1090519040
+              ],
+              [
+                1084227584,
+                0
+              ],
+              [
+                1088421888,
+                1092616192
+              ],
+              [
+                1092616192,
+                1086324736
+              ]
+            ],
+            "dtype": "float32",
+            "shape": [
+              5,
+              2
+            ]
+          },
+          "graph": {
+            "data_bits_uint32": [
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216
+            ],
+            "dtype": "float32",
+            "format": "csr",
+            "indices": [
+              1,
+              2,
+              0,
+              3,
+              4,
+              0,
+              3,
+              1,
+              2,
+              4,
+              1,
+              3
+            ],
+            "indptr": [
+              0,
+              2,
+              5,
+              7,
+              10,
+              12
+            ],
+            "shape": [
+              5,
+              5
+            ]
+          },
+          "n_epochs": 0,
+          "parameters": {
+            "a": 1.0,
+            "b": 1.0,
+            "compatibility_layout": true,
+            "init": "explicit_float32_array",
+            "metric": "euclidean",
+            "n_components": 2,
+            "n_epochs": 0,
+            "n_jobs": 1,
+            "n_neighbors": 3,
+            "negative_sample_rate": 2,
+            "random_state": 42,
+            "repulsion_strength": 1.0,
+            "transform_mode": "embedding"
+          },
+          "warnings_first_run": [],
+          "warnings_second_run": []
+        },
+        {
+          "embedding": {
+            "bits_uint32": [
+              [
+                1062936755,
+                1074878085
+              ],
+              [
+                1077795540,
+                1089688955
+              ],
+              [
+                1083011894,
+                1061097301
+              ],
+              [
+                1088274275,
+                1091201130
+              ],
+              [
+                1091430183,
+                1087794632
+              ]
+            ],
+            "dtype": "float32",
+            "shape": [
+              5,
+              2
+            ]
+          },
+          "graph": {
+            "data_bits_uint32": [
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216
+            ],
+            "dtype": "float32",
+            "format": "csr",
+            "indices": [
+              1,
+              2,
+              0,
+              3,
+              4,
+              0,
+              3,
+              1,
+              2,
+              4,
+              1,
+              3
+            ],
+            "indptr": [
+              0,
+              2,
+              5,
+              7,
+              10,
+              12
+            ],
+            "shape": [
+              5,
+              5
+            ]
+          },
+          "n_epochs": 2,
+          "parameters": {
+            "a": 1.0,
+            "b": 1.0,
+            "compatibility_layout": true,
+            "init": "explicit_float32_array",
+            "metric": "euclidean",
+            "n_components": 2,
+            "n_epochs": 2,
+            "n_jobs": 1,
+            "n_neighbors": 3,
+            "negative_sample_rate": 2,
+            "random_state": 42,
+            "repulsion_strength": 1.0,
+            "transform_mode": "embedding"
+          },
+          "warnings_first_run": [],
+          "warnings_second_run": []
+        },
+        {
+          "embedding": {
+            "bits_uint32": [
+              [
+                1070502732,
+                1075257114
+              ],
+              [
+                1081627281,
+                1089112510
+              ],
+              [
+                1081810473,
+                1068573771
+              ],
+              [
+                1088734666,
+                1089663136
+              ],
+              [
+                1091955671,
+                1086283871
+              ]
+            ],
+            "dtype": "float32",
+            "shape": [
+              5,
+              2
+            ]
+          },
+          "graph": {
+            "data_bits_uint32": [
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216,
+              1065353216
+            ],
+            "dtype": "float32",
+            "format": "csr",
+            "indices": [
+              1,
+              2,
+              0,
+              3,
+              4,
+              0,
+              3,
+              1,
+              2,
+              4,
+              1,
+              3
+            ],
+            "indptr": [
+              0,
+              2,
+              5,
+              7,
+              10,
+              12
+            ],
+            "shape": [
+              5,
+              5
+            ]
+          },
+          "n_epochs": 3,
+          "parameters": {
+            "a": 1.0,
+            "b": 1.0,
+            "compatibility_layout": true,
+            "init": "explicit_float32_array",
+            "metric": "euclidean",
+            "n_components": 2,
+            "n_epochs": 3,
+            "n_jobs": 1,
+            "n_neighbors": 3,
+            "negative_sample_rate": 2,
+            "random_state": 42,
+            "repulsion_strength": 1.0,
+            "transform_mode": "embedding"
+          },
+          "warnings_first_run": [],
+          "warnings_second_run": []
+        }
+      ],
+      "settings": {
+        "negative_sample_rate": 2,
+        "repulsion_strength": 1.0
+      }
+    }
+  }
+}

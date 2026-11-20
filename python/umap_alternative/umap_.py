@@ -3,7 +3,7 @@
 from operator import index
 
 import numpy as np
-from scipy.sparse import coo_matrix
+from scipy.sparse import coo_matrix, diags
 from sklearn.preprocessing import normalize
 
 from . import _native
@@ -151,8 +151,79 @@ def reset_local_connectivity(simplicial_set, reset_local_metric=False):
     return result
 
 
+def init_transform(indices, weights, embedding):
+    """Sum fitted coordinates using the supplied weights in rank order."""
+    indices, weights, embedding = map(np.asarray, (indices, weights, embedding))
+    if indices.ndim != 2 or indices.shape != weights.shape or embedding.ndim != 2:
+        raise ValueError("incompatible transform initialization shapes")
+    if indices.dtype.kind not in "iu":
+        raise TypeError("neighbor indices must be integers")
+    if np.float16 in (weights.dtype, embedding.dtype):
+        raise NotImplementedError("float16 ranked initialization is unsupported")
+    kinds = weights.dtype.kind, embedding.dtype.kind
+    if all(kind in "iub" for kind in kinds):
+        dtype = np.dtype(np.int64 if "i" in kinds else np.uint64)
+    else:
+        dtype = np.result_type(weights.dtype, embedding.dtype)
+        if dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
+            raise TypeError("weights and embedding must have real numeric dtypes")
+    coordinates = _native._initialize_ranked_transform(
+        (indices.ravel().tolist(), indices.shape),
+        weights.astype(dtype, copy=False).ravel().tolist(),
+        embedding.astype(dtype, copy=False).ravel().tolist(),
+        embedding.shape, f"{dtype.kind}{8 * dtype.itemsize}",
+    )
+    return np.asarray(coordinates, dtype=np.float32).reshape(indices.shape[0], embedding.shape[1])
+
+
+def init_graph_transform(graph, embedding):
+    """Initialize coordinates from a compressed sparse membership graph."""
+    offsets, columns, weights = graph.indptr, graph.indices, graph.data
+    n_rows, n_columns = graph.shape
+    embedding = np.asarray(embedding)
+    if offsets.size != n_rows + 1:
+        raise IndexError("compressed graph axes do not align with query rows")
+    if embedding.ndim != 2:
+        raise ValueError("embedding must have two dimensions")
+    if (
+        offsets[0] != 0 or offsets[-1] != weights.size or columns.size != weights.size
+        or np.any(offsets[1:] < offsets[:-1]) or np.any(columns < 0)
+        or np.any(columns >= (n_rows if graph.format == "csc" else n_columns))
+    ):
+        raise ValueError("invalid compressed graph storage")
+
+    product_type = np.result_type(weights.dtype, embedding.dtype)
+    if (
+        graph.format == "csr" and graph.has_canonical_format and weights.dtype in (np.float32, np.float64)
+        and product_type in (np.float32, np.float64)
+        and np.all((weights >= np.finfo(weights.dtype).tiny) & (weights <= 1.0))
+    ):
+        coordinates = _native._initialize_csr_transform(
+            (offsets.tolist(), columns.tolist(), weights.tolist()), n_columns,
+            (embedding.ravel().tolist(), embedding.shape),
+            (weights.dtype == np.float32, product_type == np.float32),
+        )
+        return np.asarray(coordinates, dtype=np.float32).reshape(n_rows, embedding.shape[1])
+
+    # The sparse product determines duplicate folding, dtype promotion and the
+    # NumPy warnings for zero or nonfinite row sums on these inputs.
+    coordinates = np.full((n_rows, embedding.shape[1]), np.nan, dtype=np.float32)
+    weighted = offsets[1:] != offsets[:-1]
+    unit_entries = np.flatnonzero(weights == 1.0)
+    unit_rows = np.searchsorted(offsets, unit_entries, side="right") - 1
+    direct_rows, first_unit = np.unique(unit_rows, return_index=True)
+    coordinates[direct_rows] = embedding[columns[unit_entries[first_unit]]]
+    weighted[direct_rows] = False
+    if weighted.any():
+        selected = graph[weighted]
+        factors = 1.0 / np.asarray(selected.sum(axis=1)).ravel()
+        coordinates[weighted] = (diags(factors, dtype=factors.dtype) @ selected) @ embedding
+    return coordinates
+
+
 __all__ = [
     "UMAP", "compute_membership_strengths", "find_ab_params", "fuzzy_simplicial_set",
-    "general_simplicial_set_intersection", "general_simplicial_set_union", "make_epochs_per_sample",
-    "nearest_neighbors", "reset_local_connectivity", "smooth_knn_dist",
+    "general_simplicial_set_intersection", "general_simplicial_set_union", "init_graph_transform",
+    "init_transform", "make_epochs_per_sample", "nearest_neighbors", "reset_local_connectivity",
+    "smooth_knn_dist",
 ]

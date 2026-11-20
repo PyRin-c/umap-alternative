@@ -57,25 +57,32 @@ pub(crate) fn pairwise_sum<T>(values: &[T]) -> T
 where
     T: Copy + From<i8> + Add<Output = T> + AddAssign,
 {
+    pairwise_sum_by(values, |&value| value)
+}
+
+pub(crate) fn pairwise_sum_by<S, T>(values: &[S], value: impl Fn(&S) -> T + Copy) -> T
+where
+    T: Copy + From<i8> + Add<Output = T> + AddAssign,
+{
     if values.len() < 8 {
-        return values.iter().copied().fold(T::from(0), Add::add);
+        return values.iter().map(value).fold(T::from(0), Add::add);
     }
     if values.len() > 128 {
         let (left, right) = values.split_at((values.len() / 2) & !7);
-        return pairwise_sum(left) + pairwise_sum(right);
+        return pairwise_sum_by(left, value) + pairwise_sum_by(right, value);
     }
     let (first, rest) = values
         .split_first_chunk::<8>()
         .expect("at least eight values");
-    let mut lanes = *first;
+    let mut lanes = std::array::from_fn(|index| value(&first[index]));
     let (blocks, tail) = rest.as_chunks::<8>();
     for block in blocks {
-        for (lane, &value) in lanes.iter_mut().zip(block) {
-            *lane += value;
+        for (lane, item) in lanes.iter_mut().zip(block) {
+            *lane += value(item);
         }
     }
     let [a, b, c, d, e, f, g, h] = lanes;
     tail.iter()
-        .copied()
+        .map(value)
         .fold(((a + b) + (c + d)) + ((e + f) + (g + h)), Add::add)
 }

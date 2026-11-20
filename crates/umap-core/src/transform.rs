@@ -8,9 +8,15 @@ use crate::layout::{
     validate_repulsion_strength,
 };
 use crate::neighbors::{DistanceMetric, KnnError, Neighbor, sort_closest_neighbors};
+use crate::numeric::pairwise_sum_by;
 use crate::optimize::OptimizeError;
 use crate::rng::{Mt19937, SerialNegativeSampler};
 use crate::sampling::EdgeSamplingCursor;
+
+mod initialization;
+pub use initialization::{
+    NeighborhoodInitializationError, initialize_csr_transform, initialize_ranked_transform,
+};
 
 /// A rectangular coordinate (COO) graph of directed fuzzy memberships.
 ///
@@ -691,7 +697,7 @@ fn initialize_transform_embedding_impl(
         }
 
         // The sparse row reduction adds the first membership after summing the tail.
-        let scale = (sum_memberships(&entries[1..]) + entries[0].1).recip();
+        let scale = (pairwise_sum_by(&entries[1..], |&(_, weight)| weight) + entries[0].1).recip();
         coordinates.fill(0.0);
         for &(column, weight) in entries.iter().rev() {
             let fitted = fitted_row(column)?;
@@ -702,33 +708,6 @@ fn initialize_transform_embedding_impl(
         }
     }
     Ok(embedding)
-}
-
-// The float32 tail reduction starts with eight lanes and splits large
-// blocks at a lane boundary. Keep the grouping to preserve the rounding.
-fn sum_memberships(entries: &[(usize, f32)]) -> f32 {
-    if entries.len() < 8 {
-        return entries.iter().map(|&(_, weight)| weight).sum();
-    }
-    if entries.len() > 128 {
-        let middle = (entries.len() / 2) & !7;
-        let (left, right) = entries.split_at(middle);
-        return sum_memberships(left) + sum_memberships(right);
-    }
-
-    let mut blocks = entries.chunks_exact(8);
-    let mut lanes = [0.0; 8];
-    for block in &mut blocks {
-        for (lane, &(_, weight)) in lanes.iter_mut().zip(block) {
-            *lane += weight;
-        }
-    }
-    let [a, b, c, d, e, f, g, h] = lanes;
-    let sum = ((a + b) + (c + d)) + ((e + f) + (g + h));
-    blocks
-        .remainder()
-        .iter()
-        .fold(sum, |total, &(_, weight)| total + weight)
 }
 
 /// Construct the fuzzy graph from held-out query rows to fitted training rows.

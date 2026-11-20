@@ -47,7 +47,8 @@ use umap_core::sparse::{
 };
 use umap_core::transform::{
     CooGraph, DenseEmbeddingTransformConfig, DenseEmbeddingTransformError,
-    TransformInitializationError, transform_dense_embedding_with_options,
+    NeighborhoodInitializationError, TransformInitializationError, initialize_csr_transform,
+    initialize_ranked_transform, transform_dense_embedding_with_options,
     transform_dense_graph_with_cutoff, transform_dense_graph_with_tie_ranking,
     transform_embedding_from_graph, transform_embedding_from_partial_graph,
     transform_ranked_neighbors_graph,
@@ -76,6 +77,79 @@ type RadiusInput = (Vec<f32>, usize, String);
 type DensityInput = ((f64, f64, f64), RadiusInput);
 type AlignedEmbeddingComponents = (Vec<Vec<f32>>, Option<RngState>);
 type ParametricEdgeComponents = (Vec<(usize, usize, usize)>, usize);
+
+fn neighborhood_init_error(error: NeighborhoodInitializationError) -> PyErr {
+    match error {
+        NeighborhoodInitializationError::Shape => PyValueError::new_err(error.to_string()),
+        NeighborhoodInitializationError::Index => PyIndexError::new_err(error.to_string()),
+    }
+}
+
+#[pyfunction]
+fn _initialize_csr_transform(
+    py: Python<'_>,
+    graph: MembershipBuffers,
+    graph_columns: usize,
+    embedding: (Vec<f64>, (usize, usize)),
+    precision: (bool, bool),
+) -> PyResult<Vec<f32>> {
+    let (offsets, columns, weights) = graph;
+    let (embedding, shape) = embedding;
+    py.detach(|| {
+        initialize_csr_transform(
+            (&offsets, &columns, &weights, graph_columns),
+            (&embedding, shape),
+            precision,
+        )
+    })
+    .map_err(neighborhood_init_error)
+}
+
+#[pyfunction]
+fn _initialize_ranked_transform(
+    py: Python<'_>,
+    ranks: (Vec<i64>, (usize, usize)),
+    weights: &Bound<'_, PyAny>,
+    embedding: &Bound<'_, PyAny>,
+    embedding_shape: (usize, usize),
+    dtype: &str,
+) -> PyResult<Vec<f32>> {
+    let (indices, rank_shape) = ranks;
+    macro_rules! interpolate {
+        ($dtype:ty, $add_product:expr) => {{
+            let weights = weights.extract::<Vec<$dtype>>()?;
+            let embedding = embedding.extract::<Vec<$dtype>>()?;
+            py.detach(|| {
+                initialize_ranked_transform(
+                    &indices,
+                    rank_shape,
+                    &weights,
+                    (&embedding, embedding_shape),
+                    $add_product,
+                )
+            })
+        }};
+    }
+    match dtype {
+        "f32" => interpolate!(f32, |sum, weight, coordinate| sum + weight * coordinate),
+        "f64" => interpolate!(
+            f64,
+            |sum, weight, coordinate| (f64::from(sum) + weight * coordinate) as f32
+        ),
+        "i64" => interpolate!(i64, |sum, weight: i64, coordinate| (f64::from(sum)
+            + weight.wrapping_mul(coordinate) as f64)
+            as f32),
+        "u64" => interpolate!(u64, |sum, weight: u64, coordinate| (f64::from(sum)
+            + weight.wrapping_mul(coordinate) as f64)
+            as f32),
+        _ => {
+            return Err(PyValueError::new_err(
+                "unsupported ranked initialization dtype",
+            ));
+        }
+    }
+    .map_err(neighborhood_init_error)
+}
 
 fn trustworthiness_error(error: TrustworthinessError) -> PyErr {
     match error {
@@ -1762,6 +1836,8 @@ fn _inverse_transform_dense_embedding(
 
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(_initialize_csr_transform, module)?)?;
+    module.add_function(wrap_pyfunction!(_initialize_ranked_transform, module)?)?;
     module.add_function(wrap_pyfunction!(_trustworthiness_ranked, module)?)?;
     module.add_function(wrap_pyfunction!(_trustworthiness_distances, module)?)?;
     module.add_function(wrap_pyfunction!(_trustworthiness_dense, module)?)?;

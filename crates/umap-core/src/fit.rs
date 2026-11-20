@@ -16,6 +16,7 @@ use crate::fuzzy_graph::{
     CsrGraph, GraphError, GraphOptions, categorical_intersection, continuous_intersection,
     fuzzy_simplicial_set, fuzzy_simplicial_set_with_options,
 };
+use crate::layout::{LayoutError, validate_csr_rows, validate_csr_shape};
 use crate::neighbors::{
     DistanceMetric, KnnError, Neighbor, PrecomputedKnnError, dense_knn_counting_cutoff,
     exhaustive_knn_with_metric, exhaustive_manhattan_target_knn, precomputed_knn,
@@ -195,6 +196,8 @@ pub enum DenseCategoricalGraphFitError {
     InvalidTargetWeight { target_weight: f64 },
     /// Dense neighbor search or fuzzy graph construction failed.
     DenseGraph(DenseGraphFitError),
+    /// A supplied feature graph is invalid.
+    InvalidFeatureGraph(LayoutError),
 }
 
 impl fmt::Display for DenseCategoricalGraphFitError {
@@ -210,6 +213,7 @@ impl fmt::Display for DenseCategoricalGraphFitError {
                 write!(formatter, "target weight {target_weight} must be in 0..=1")
             }
             Self::DenseGraph(error) => error.fmt(formatter),
+            Self::InvalidFeatureGraph(error) => error.fmt(formatter),
         }
     }
 }
@@ -218,6 +222,7 @@ impl std::error::Error for DenseCategoricalGraphFitError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::DenseGraph(error) => Some(error),
+            Self::InvalidFeatureGraph(error) => Some(error),
             _ => None,
         }
     }
@@ -327,6 +332,30 @@ pub fn fit_dense_categorical_graph_with_diagnostics(
     ))
 }
 
+/// Apply categorical supervision to an already built feature graph.
+/// A weight at or beyond one, or NaN, uses the full cross-class attenuation.
+pub fn apply_categorical_target(
+    graph: CsrGraph,
+    labels: &[i64],
+    target_weight: f64,
+) -> Result<CsrGraph, DenseCategoricalGraphFitError> {
+    validate_csr_shape(&graph)
+        .and_then(|()| validate_csr_rows(&graph))
+        .map_err(DenseCategoricalGraphFitError::InvalidFeatureGraph)?;
+    if labels.len() != graph.n_rows {
+        return Err(DenseCategoricalGraphFitError::LabelCount {
+            n_rows: graph.n_rows,
+            labels: labels.len(),
+        });
+    }
+    let weight = if target_weight < 1.0 {
+        target_weight
+    } else {
+        1.0
+    };
+    Ok(categorical_intersection(graph, labels, weight))
+}
+
 fn count_isolated_rows(graph: &CsrGraph) -> usize {
     graph
         .indptr
@@ -364,6 +393,8 @@ pub enum DenseContinuousGraphFitError {
     FeatureGraph(DenseGraphFitError),
     /// Target neighbor search or graph construction failed.
     TargetGraph(DenseGraphFitError),
+    /// A supplied feature graph is invalid.
+    InvalidFeatureGraph(LayoutError),
 }
 
 impl fmt::Display for DenseContinuousGraphFitError {
@@ -377,6 +408,7 @@ impl fmt::Display for DenseContinuousGraphFitError {
             }
             Self::FeatureGraph(error) => write!(formatter, "feature graph: {error}"),
             Self::TargetGraph(error) => write!(formatter, "target graph: {error}"),
+            Self::InvalidFeatureGraph(error) => error.fmt(formatter),
         }
     }
 }
@@ -386,6 +418,7 @@ impl std::error::Error for DenseContinuousGraphFitError {
         match self {
             Self::InvalidTargetWeight { .. } | Self::UnsupportedTargetMetric { .. } => None,
             Self::FeatureGraph(error) | Self::TargetGraph(error) => Some(error),
+            Self::InvalidFeatureGraph(error) => Some(error),
         }
     }
 }
@@ -421,6 +454,84 @@ pub fn fit_dense_continuous_graph(
     let graph = fit_dense_graph_with_options(data, n_rows, n_features, k, metric, options)
         .map_err(DenseContinuousGraphFitError::FeatureGraph)?;
     let isolated = count_isolated_rows(&graph);
+    Ok((
+        compose_continuous_target(graph, target, isolated)?,
+        isolated,
+    ))
+}
+
+/// Apply row-major ranked target distances to an existing feature graph.
+/// The target distance calculation can use a different input precision.
+pub fn apply_continuous_target(
+    graph: CsrGraph,
+    columns: &[usize],
+    distances: &[f32],
+    k: usize,
+    weight: f64,
+) -> Result<CsrGraph, DenseContinuousGraphFitError> {
+    if !weight.is_finite() {
+        return Err(DenseContinuousGraphFitError::InvalidTargetWeight {
+            target_weight: weight,
+        });
+    }
+    validate_csr_shape(&graph)
+        .and_then(|()| validate_csr_rows(&graph))
+        .map_err(DenseContinuousGraphFitError::InvalidFeatureGraph)?;
+    let n_rows = graph.n_rows;
+    let target_graph = |error: GraphError| DenseContinuousGraphFitError::TargetGraph(error.into());
+    if !(1..=n_rows).contains(&k) {
+        return Err(target_graph(GraphError::InvalidK { k, n_rows }));
+    }
+    if n_rows.checked_mul(k) != Some(columns.len()) || columns.len() != distances.len() {
+        return Err(DenseContinuousGraphFitError::TargetGraph(
+            KnnError::InvalidShape {
+                n_rows,
+                n_features: k,
+                values: distances.len(),
+            }
+            .into(),
+        ));
+    }
+    let mut neighbors = Vec::with_capacity(n_rows);
+    for (row, (columns, distances)) in columns
+        .chunks_exact(k)
+        .zip(distances.chunks_exact(k))
+        .enumerate()
+    {
+        let mut ranks = Vec::with_capacity(k);
+        for (position, (&index, &distance)) in columns.iter().zip(distances).enumerate() {
+            if index >= n_rows {
+                return Err(target_graph(GraphError::InvalidNeighborIndex {
+                    row,
+                    position,
+                    index,
+                    n_rows,
+                }));
+            }
+            if !distance.is_finite() || distance < 0.0 {
+                return Err(target_graph(GraphError::InvalidDistance {
+                    row,
+                    position,
+                    index,
+                    distance,
+                }));
+            }
+            ranks.push(Neighbor { index, distance });
+        }
+        neighbors.push(ranks);
+    }
+    if count_isolated_rows(&graph) == n_rows {
+        return Ok(graph);
+    }
+    Ok(continuous_intersection(&graph, &neighbors, weight))
+}
+
+fn compose_continuous_target(
+    graph: CsrGraph,
+    target: &DenseContinuousTarget<'_>,
+    isolated: usize,
+) -> Result<CsrGraph, DenseContinuousGraphFitError> {
+    let n_rows = graph.n_rows;
     let neighbors = if target.metric == DistanceMetric::Manhattan {
         exhaustive_manhattan_target_knn(
             target.values,
@@ -452,12 +563,9 @@ pub fn fit_dense_continuous_graph(
         }
     }
     if isolated == n_rows {
-        return Ok((graph, isolated));
+        return Ok(graph);
     }
-    Ok((
-        continuous_intersection(&graph, &neighbors, target.weight),
-        isolated,
-    ))
+    Ok(continuous_intersection(&graph, &neighbors, target.weight))
 }
 
 /// Fit a fuzzy graph from a precomputed row-major square distance matrix.

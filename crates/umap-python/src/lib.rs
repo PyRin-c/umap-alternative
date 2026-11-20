@@ -17,10 +17,11 @@ use umap_core::embedding::{
     fit_dense_embedding_seeded_with_graph_options, fit_graph_embedding_with_rng,
 };
 use umap_core::fit::{
-    DenseContinuousTarget, fit_dense_categorical_graph_with_diagnostics,
-    fit_dense_continuous_graph, fit_dense_graph_with_cutoff, fit_dense_graph_with_options,
-    fit_precomputed_graph_with_cutoff, fit_precomputed_graph_with_options,
-    fit_sparse_precomputed_ranked_graph, fit_supplied_neighbors_graph,
+    DenseContinuousTarget, apply_categorical_target, apply_continuous_target,
+    fit_dense_categorical_graph_with_diagnostics, fit_dense_continuous_graph,
+    fit_dense_graph_with_cutoff, fit_dense_graph_with_options, fit_precomputed_graph_with_cutoff,
+    fit_precomputed_graph_with_options, fit_sparse_precomputed_ranked_graph,
+    fit_supplied_neighbors_graph,
 };
 use umap_core::fuzzy_graph::{
     CsrGraph, FuzzySetOperation, GraphOptions, KnnDistances, MembershipOperation, MembershipRows,
@@ -1372,6 +1373,53 @@ fn _fit_dense_categorical_graph(
 
 type ContinuousTargetInput = (Vec<f32>, usize, usize, String, f64);
 
+fn continuous_target(input: &ContinuousTargetInput) -> PyResult<DenseContinuousTarget<'_>> {
+    let (values, width, count, metric, weight) = input;
+    Ok(DenseContinuousTarget {
+        values,
+        n_features: *width,
+        n_neighbors: *count,
+        metric: parse_metric(metric)?,
+        weight: *weight,
+    })
+}
+
+fn csr_graph((shape, indptr, indices, data): CsrComponents) -> CsrGraph {
+    CsrGraph {
+        n_rows: shape.0,
+        n_cols: shape.1,
+        indptr,
+        indices,
+        data,
+    }
+}
+
+#[pyfunction]
+fn _apply_categorical_target(
+    py: Python<'_>,
+    graph: CsrComponents,
+    labels: Vec<i64>,
+    target_weight: f64,
+) -> PyResult<CsrComponents> {
+    py.detach(|| apply_categorical_target(csr_graph(graph), &labels, target_weight))
+        .map(csr_components)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+fn _apply_continuous_target(
+    py: Python<'_>,
+    graph: CsrComponents,
+    columns: Vec<usize>,
+    distances: Vec<f32>,
+    k: usize,
+    weight: f64,
+) -> PyResult<CsrComponents> {
+    py.detach(|| apply_continuous_target(csr_graph(graph), &columns, &distances, k, weight))
+        .map(csr_components)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// Fit a fuzzy graph from dense features and scalar or vector targets.
 #[pyfunction]
 #[pyo3(signature = (data, n_rows, n_features, k, metric, target, *, graph_options=None))]
@@ -1388,14 +1436,7 @@ fn _fit_dense_continuous_graph(
 ) -> PyResult<(CsrComponents, usize)> {
     let metric = parse_metric(metric)?;
     let options = parse_graph_options(graph_options)?;
-    let (values, target_width, target_k, target_metric, target_weight) = target;
-    let target = DenseContinuousTarget {
-        values: &values,
-        n_features: target_width,
-        n_neighbors: target_k,
-        metric: parse_metric(&target_metric)?,
-        weight: target_weight,
-    };
+    let target = continuous_target(&target)?;
     py.detach(|| fit_dense_continuous_graph(&data, n_rows, n_features, k, metric, options, &target))
         .map(|(graph, isolated)| (csr_components(graph), isolated))
         .map_err(|error| PyValueError::new_err(error.to_string()))
@@ -1991,6 +2032,8 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_recursive_hub_order, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_categorical_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_continuous_graph, module)?)?;
+    module.add_function(wrap_pyfunction!(_apply_categorical_target, module)?)?;
+    module.add_function(wrap_pyfunction!(_apply_continuous_target, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_precomputed_graph, module)?)?;
     module.add_function(wrap_pyfunction!(
         _fit_precomputed_graph_with_cutoff,

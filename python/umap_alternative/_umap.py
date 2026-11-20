@@ -12,6 +12,7 @@ from scipy.sparse import coo_matrix, csc_matrix, csr_matrix, issparse, tril, tri
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial import Delaunay
 from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.metrics import pairwise_distances_chunked
 from sklearn.utils import check_random_state
 from sklearn.utils.validation import check_array, check_is_fitted
 
@@ -126,6 +127,12 @@ def _csr_graph(components):
         shape=tuple(shape),
         dtype=np.float32,
     )
+
+
+def _warn_disconnected(count, n_rows, cutoff, removed):
+    if count:
+        warning = _DISCONNECTION_WARNING if count * 10 > n_rows else _FEW_DISCONNECTIONS_WARNING
+        warnings.warn(warning.format(count=count, cutoff=cutoff, removed=removed), UserWarning, stacklevel=3)
 
 
 _EPOCHS_ERROR = "n_epochs must be a nonnegative integer or a list of nonnegative integers"
@@ -740,8 +747,14 @@ class UMAP(BaseEstimator, TransformerMixin):
         metric = self._validate_metric(sparse=sparse)
         boolean_metric = metric in _BOOLEAN_METRICS
         packed_metric = metric in _PACKED_METRICS
+        packed_supervised = packed_metric and y is not None
         if packed_metric:
             X_checked = check_array(X, dtype=np.uint8, order="C", copy=True)
+        if packed_supervised:
+            if hasattr(self, "_graph_transform_fit"):
+                self._graph_transform_fit = (X_checked, metric)
+            if self.target_n_neighbors != -1 and self.target_n_neighbors < 2:
+                raise ValueError("target_n_neighbors must be -1 or greater than 1")
         if boolean_metric or packed_metric:
             warnings.warn(
                 f"gradient function is not yet implemented for {metric} distance metric; "
@@ -955,13 +968,18 @@ class UMAP(BaseEstimator, TransformerMixin):
             if precomputed:
                 transform_fit = (X_checked.copy(), metric)
         elif packed_metric:
-            if y is not None:
-                raise NotImplementedError("supervised fitting with packed byte distances is not implemented")
             transform_cutoff = cutoff
             components, removed = _native._fit_packed_graph(
                 X_checked.tobytes(), X_checked.shape, n_neighbors, metric, cutoff,
                 graph_options=graph_options,
             )
+            if packed_supervised:
+                # Target validation follows publication of the feature graph.
+                self.graph_ = _csr_graph(components)
+                self.n_neighbors_ = n_neighbors
+                self._transform_cutoff = cutoff
+                _warn_disconnected(np.count_nonzero(np.diff(self.graph_.indptr) == 0), n_rows, cutoff, removed)
+                components = self._apply_packed_supervision(components, y, n_rows, n_neighbors)
         elif (angular or ranked_non_angular or cutoff < np.inf) and not (precomputed or sparse) and y is None:
             transform_cutoff = cutoff
             components, removed = _native._fit_dense_graph_with_cutoff(
@@ -1037,7 +1055,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         empty_continuous_graph = (
             graph.nnz == 0 and y is not None and self.target_metric != "categorical"
         )
-        if (supplied is not None and embedding_mode) or (
+        if packed_supervised or (supplied is not None and embedding_mode) or (
             y is not None and (embedding_mode or empty_continuous_graph)
             and not hasattr(self, "_graph_transform_fit")
         ):
@@ -1050,17 +1068,11 @@ class UMAP(BaseEstimator, TransformerMixin):
         else:
             # Report disconnections in the feature graph before target attenuation.
             isolated = feature_isolated
-        if isolated:
-            warning = (
-                _DISCONNECTION_WARNING if isolated * 10 > n_rows else _FEW_DISCONNECTIONS_WARNING
-            )
-            warnings.warn(
-                warning.format(count=isolated, cutoff=cutoff, removed=removed),
-                UserWarning,
-                stacklevel=2,
-            )
+        if not packed_supervised:
+            _warn_disconnected(isolated, n_rows, cutoff, removed)
         if graph.nnz == 0 and (embedding_mode or empty_continuous_graph):
-            if (boolean_metric or packed_metric or (sparse_feature_layout and metric == "euclidean")) and not hasattr(
+            if (boolean_metric or (packed_metric and not packed_supervised)
+                    or (sparse_feature_layout and metric == "euclidean")) and not hasattr(
                 self, "_graph_transform_fit"
             ):
                 # A cold fit can publish the empty graph before layout fails.
@@ -1906,21 +1918,59 @@ class UMAP(BaseEstimator, TransformerMixin):
             getattr(self, "densmap", False) or getattr(self, "output_dens", False)
         ):
             raise NotImplementedError("density fitting with continuous targets is not implemented")
+        target = self._continuous_target(y, n_neighbors, _METRIC_ALIASES[metric])
+        return _native._fit_dense_continuous_graph(*dense_args, target, graph_options=graph_options)
+
+    def _apply_packed_supervision(self, graph, y, n_rows, n_neighbors):
+        if len(y) != n_rows:
+            raise ValueError(f"Length of x = {n_rows}, length of y = {len(y)}, while it must be equal.")
+        metric = self.target_metric
+        if metric == "categorical":
+            return _native._apply_categorical_target(graph, self._categorical_labels(y), self.target_weight)
+        if callable(metric):
+            raise NotImplementedError("Callable target metrics are unavailable with packed features.")
+        native_metric = _METRIC_ALIASES.get(metric, metric)
+        if native_metric not in (
+            "euclidean", "manhattan", "chebyshev", "hamming", "jaccard",
+            "cosine", "correlation", "precomputed",
+        ):
+            if metric in _BOOLEAN_METRICS or metric in _METRIC_ALIASES:
+                raise NotImplementedError(f"target_metric={metric!r} is unavailable with packed features")
+            raise KeyError(metric)
+
+        labels = check_array(y, dtype="numeric", ensure_2d=False)
+        if labels.ndim == 1:
+            labels = labels[:, None]
+        if native_metric == "precomputed" and labels.shape[0] != labels.shape[1]:
+            raise KeyError(metric)
+        k = self._target_neighbor_count(n_neighbors)
+        if k > n_rows:
+            raise ValueError("target_n_neighbors exceeds the number of fitted rows")
+        indices, distances = [], []
+        # Target distances retain the label dtype until after ranking. Packed
+        # feature bytes have already been consumed by the native feature fit.
+        for block in pairwise_distances_chunked(labels, metric=native_metric):
+            order = np.argsort(block, axis=1, kind="stable")[:, :k]
+            indices.extend(order.ravel().tolist())
+            distances.extend(np.take_along_axis(block, order, axis=1).astype(np.float32).ravel().tolist())
+        return _native._apply_continuous_target(graph, indices, distances, k, self.target_weight)
+
+    def _continuous_target(self, y, n_neighbors, metric):
         labels = check_array(y, dtype=np.float32, ensure_2d=False)
         if labels.ndim == 1:
             labels = labels[:, None]
+        return (
+            labels.ravel().tolist(), labels.shape[1], self._target_neighbor_count(n_neighbors),
+            metric, self.target_weight,
+        )
+
+    def _target_neighbor_count(self, n_neighbors):
         target_neighbors = getattr(self, "target_n_neighbors", -1)
         if not isinstance(target_neighbors, numbers.Integral) or (
             target_neighbors != -1 and target_neighbors < 2
         ):
             raise ValueError("target_n_neighbors must be -1 or an integer greater than 1")
-        if target_neighbors == -1:
-            target_neighbors = n_neighbors
-        target = (
-            labels.ravel().tolist(), labels.shape[1], target_neighbors,
-            _METRIC_ALIASES[metric], self.target_weight,
-        )
-        return _native._fit_dense_continuous_graph(*dense_args, target, graph_options=graph_options)
+        return n_neighbors if target_neighbors == -1 else target_neighbors
 
     def _categorical_labels(self, y):
         labels = check_array(y, dtype="numeric", ensure_2d=False)

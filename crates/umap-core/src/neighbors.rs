@@ -4,6 +4,7 @@
 //! by later UMAP stages.  It does not build a graph or perform any layout
 //! optimization.
 
+use std::cmp::Ordering;
 use std::fmt;
 
 use crate::fuzzy_graph::GraphError;
@@ -189,12 +190,10 @@ pub fn exhaustive_knn_with_metric(
         return Err(KnnError::NonFiniteValue { index, value });
     }
 
-    let mut result = Vec::with_capacity(n_rows);
-    for query_index in 0..n_rows {
+    Ok(collect_neighbors(n_rows, k, |query_index, candidates| {
         let query_start = query_index * n_features;
         let query = &data[query_start..query_start + n_features];
 
-        let mut candidates = Vec::with_capacity(n_rows);
         for candidate_index in 0..n_rows {
             let candidate_start = candidate_index * n_features;
             let candidate = &data[candidate_start..candidate_start + n_features];
@@ -203,17 +202,7 @@ pub fn exhaustive_knn_with_metric(
                 distance: metric.distance(query, candidate),
             });
         }
-
-        candidates.sort_unstable_by(|left, right| {
-            left.distance
-                .total_cmp(&right.distance)
-                .then_with(|| left.index.cmp(&right.index))
-        });
-        candidates.truncate(k);
-        result.push(candidates);
-    }
-
-    Ok(result)
+    }))
 }
 
 /// Find the `k` nearest rows for every row of a precomputed distance matrix.
@@ -287,27 +276,48 @@ pub fn precomputed_knn(
         }
     }
 
-    let mut result = Vec::with_capacity(n_rows);
-    for query_index in 0..n_rows {
+    Ok(collect_neighbors(n_rows, k, |query_index, candidates| {
         let row_start = query_index * n_rows;
         let row = &distances[row_start..row_start + n_rows];
-        let mut candidates = row
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, distance)| Neighbor { index, distance })
-            .collect::<Vec<_>>();
+        candidates.extend(
+            row.iter()
+                .copied()
+                .enumerate()
+                .map(|(index, distance)| Neighbor { index, distance }),
+        );
+    }))
+}
 
-        candidates.sort_unstable_by(|left, right| {
-            left.distance
-                .total_cmp(&right.distance)
-                .then_with(|| left.index.cmp(&right.index))
-        });
-        candidates.truncate(k);
-        result.push(candidates);
+fn collect_neighbors(
+    n_rows: usize,
+    k: usize,
+    mut fill_candidates: impl FnMut(usize, &mut Vec<Neighbor>),
+) -> Vec<Vec<Neighbor>> {
+    let mut result = Vec::with_capacity(n_rows);
+    if k == n_rows {
+        for query_index in 0..n_rows {
+            let mut candidates = Vec::with_capacity(n_rows);
+            fill_candidates(query_index, &mut candidates);
+            candidates.sort_unstable_by(compare_neighbors);
+            result.push(candidates);
+        }
+    } else {
+        let mut candidates = Vec::with_capacity(n_rows);
+        for query_index in 0..n_rows {
+            candidates.clear();
+            fill_candidates(query_index, &mut candidates);
+            let (closest, _, _) = candidates.select_nth_unstable_by(k, compare_neighbors);
+            closest.sort_unstable_by(compare_neighbors);
+            result.push(closest.to_vec());
+        }
     }
+    result
+}
 
-    Ok(result)
+fn compare_neighbors(left: &Neighbor, right: &Neighbor) -> Ordering {
+    left.distance
+        .total_cmp(&right.distance)
+        .then_with(|| left.index.cmp(&right.index))
 }
 
 impl DistanceMetric {

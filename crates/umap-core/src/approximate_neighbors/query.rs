@@ -21,6 +21,7 @@ pub struct DenseApproximateQueryIndex<'a> {
     edge_floor: f64,
     rng: [i64; 3],
     tree: Option<Tree>,
+    prepared_positions: Option<Vec<usize>>,
 }
 
 impl<'a> DenseApproximateQueryIndex<'a> {
@@ -41,40 +42,7 @@ impl<'a> DenseApproximateQueryIndex<'a> {
         squared_distances: Option<&[f32]>,
     ) -> Result<Self, ApproximateSearchError> {
         let data = DenseRows::training(training, n_rows, n_features)?;
-        if training_width == 0
-            || n_rows.checked_mul(training_width) != Some(indices.len())
-            || squared_distances.is_some_and(|distances| distances.len() != indices.len())
-        {
-            return Err(ApproximateSearchError::RankShape);
-        }
-        let mut edges = vec![Vec::new(); n_rows];
-        let mut edge_floor = f32::INFINITY;
-        for (row, neighbors) in indices.chunks_exact(training_width).enumerate() {
-            for (offset, &index) in neighbors.iter().enumerate() {
-                if index == -1 || index == row as i32 {
-                    continue;
-                }
-                let position = row * training_width + offset;
-                if index < 0 || index as usize >= n_rows {
-                    return Err(ApproximateSearchError::InvalidSeed { position, index });
-                }
-                let column = index as usize;
-                let distance = squared_distances.map_or_else(
-                    || approximate_squared_euclidean(data.row(row), data.row(column)),
-                    |distances| distances[position],
-                );
-                if !distance.is_finite() || distance < 0.0 {
-                    return Err(ApproximateSearchError::InvalidEdgeDistance { position });
-                }
-                edge_floor = edge_floor.min(distance);
-                edges[row].push(column);
-                edges[column].push(row);
-            }
-        }
-        for row in &mut edges {
-            row.sort_unstable();
-            row.dedup();
-        }
+        let (edges, edge_floor) = build_edges(data, indices, training_width, squared_distances)?;
 
         // With no search trees the entry stream comes from the caller's
         // second signed three-word draw, advanced ten times before the batch.
@@ -84,18 +52,34 @@ impl<'a> DenseApproximateQueryIndex<'a> {
         for _ in 0..10 {
             sample_absolute_vertex(&mut rng, n_rows);
         }
-        Ok(Self {
+        let mut index = Self {
             data,
             edges,
             training_width,
-            edge_floor: if edge_floor.is_finite() {
-                f64::from(edge_floor)
-            } else {
-                0.0
-            },
+            edge_floor,
             rng,
             tree: None,
-        })
+            prepared_positions: None,
+        };
+        index.order_edges();
+        Ok(index)
+    }
+
+    /// Replace the walk's links with live training offers.
+    ///
+    /// The live offer width controls the layout of these rows. It leaves the
+    /// entry draw limit from the exported training graph in place. Self links,
+    /// vacancies and optional squared distances follow [Self::from_training_graph].
+    pub fn with_live_training_offers(
+        mut self,
+        indices: &[i32],
+        offer_width: usize,
+        squared_distances: Option<&[f32]>,
+    ) -> Result<Self, ApproximateSearchError> {
+        (self.edges, self.edge_floor) =
+            build_edges(self.data, indices, offer_width, squared_distances)?;
+        self.order_edges();
+        Ok(self)
     }
 
     /// Prepare one Euclidean projection tree with a caller-selected seed.
@@ -112,6 +96,9 @@ impl<'a> DenseApproximateQueryIndex<'a> {
             leaf_size.get(),
             &mut rng,
         ));
+        if self.prepared_positions.take().is_some() {
+            self.order_edges();
+        }
         self
     }
 
@@ -123,22 +110,38 @@ impl<'a> DenseApproximateQueryIndex<'a> {
     ///
     /// Equal distances follow the left branch. A degenerate split becomes
     /// a leaf. Supply the words for the desired tree, since training and
-    /// prepared-query pivots can differ.
+    /// prepared-query pivots can differ. The split direction sets the
+    /// prepared graph order: visit left leaves first, with original row
+    /// order within each leaf.
     pub fn with_projection_words(
         mut self,
         words: &[[u64; 2]],
         leaf_size: NonZeroUsize,
         max_depth: u8,
     ) -> Result<Self, ApproximateSearchError> {
-        self.tree = Some(build_word_tree(
+        let mut tree = build_word_tree(
             self.data,
             (0..self.data.n_rows).collect(),
             leaf_size.get(),
             max_depth,
             words,
             0,
-        )?);
+        )?;
+        let mut positions = vec![0; self.data.n_rows];
+        let mut next_position = 0;
+        pack_leaves(&mut tree, &mut positions, &mut next_position);
+        self.tree = Some(tree);
+        self.prepared_positions = Some(positions);
+        self.order_edges();
         Ok(self)
+    }
+
+    fn order_edges(&mut self) {
+        let positions = self.prepared_positions.as_deref();
+        for row in &mut self.edges {
+            row.sort_unstable_by_key(|&index| positions.map_or(index, |map| map[index]));
+            row.dedup();
+        }
     }
 
     /// Search the supplied graph using a squared-distance priority queue.
@@ -187,6 +190,11 @@ impl<'a> DenseApproximateQueryIndex<'a> {
         let mut result_heap = vec![missing; width];
         let mut frontier = BinaryHeap::new();
         let mut vacant_candidates = Vec::new();
+        let positions = self.prepared_positions.as_deref();
+        let priority = |point: Neighbor| {
+            let position = positions.map_or(point.index, |map| map[point.index]);
+            Reverse((point.distance.to_bits(), position, point.index))
+        };
         let search_bound = |distance: f32| {
             if distance.is_infinite() {
                 distance
@@ -220,7 +228,7 @@ impl<'a> DenseApproximateQueryIndex<'a> {
                             sift_down(&mut result_heap, point);
                         }
                         if leaf.len() != self.data.n_rows {
-                            frontier.push(Reverse((point.distance.to_bits(), point.index)));
+                            frontier.push(priority(point));
                         }
                     }
                 }
@@ -229,12 +237,12 @@ impl<'a> DenseApproximateQueryIndex<'a> {
                     let index = sample_absolute_vertex(&mut rng, self.data.n_rows);
                     if let Some(point) = visit(index)? {
                         sift_down(&mut result_heap, point);
-                        frontier.push(Reverse((point.distance.to_bits(), point.index)));
+                        frontier.push(priority(point));
                     }
                 }
             }
             let mut bound = search_bound(result_heap[0].distance);
-            while let Some(Reverse((distance, index))) = frontier.pop() {
+            while let Some(Reverse((distance, _, index))) = frontier.pop() {
                 if f32::from_bits(distance) >= bound {
                     break;
                 }
@@ -256,10 +264,13 @@ impl<'a> DenseApproximateQueryIndex<'a> {
                         if point.distance < bound {
                             sift_down(&mut result_heap, point);
                             bound = result_heap[0].distance;
-                            frontier.push(Reverse((point.distance.to_bits(), point.index)));
+                            frontier.push(priority(point));
                         }
                     }
-                    if bound.is_infinite() && !vacant_candidates.is_empty() {
+                    // Prepared entry ends this pass even if its nearest row
+                    // had no unseen links. Random entry can try another row.
+                    if bound.is_infinite() && (positions.is_some() || !vacant_candidates.is_empty())
+                    {
                         break;
                     }
                     continue;
@@ -272,7 +283,7 @@ impl<'a> DenseApproximateQueryIndex<'a> {
                             sift_down(&mut result_heap, point);
                             bound = search_bound(result_heap[0].distance);
                         }
-                        frontier.push(Reverse((point.distance.to_bits(), point.index)));
+                        frontier.push(priority(point));
                     }
                 }
             }
@@ -291,6 +302,69 @@ impl<'a> DenseApproximateQueryIndex<'a> {
             }
         }
         Ok(ranks)
+    }
+}
+
+fn build_edges(
+    data: DenseRows<'_>,
+    indices: &[i32],
+    width: usize,
+    squared_distances: Option<&[f32]>,
+) -> Result<(Vec<Vec<usize>>, f64), ApproximateSearchError> {
+    let n_rows = data.n_rows;
+    if width == 0
+        || n_rows.checked_mul(width) != Some(indices.len())
+        || squared_distances.is_some_and(|distances| distances.len() != indices.len())
+    {
+        return Err(ApproximateSearchError::RankShape);
+    }
+    let mut edges = vec![Vec::new(); n_rows];
+    let mut edge_floor = f32::INFINITY;
+    for (row, neighbors) in indices.chunks_exact(width).enumerate() {
+        for (offset, &index) in neighbors.iter().enumerate() {
+            if index == -1 || index == row as i32 {
+                continue;
+            }
+            let position = row * width + offset;
+            if index < 0 || index as usize >= n_rows {
+                return Err(ApproximateSearchError::InvalidSeed { position, index });
+            }
+            let column = index as usize;
+            let distance = squared_distances.map_or_else(
+                || approximate_squared_euclidean(data.row(row), data.row(column)),
+                |distances| distances[position],
+            );
+            if !distance.is_finite() || distance < 0.0 {
+                return Err(ApproximateSearchError::InvalidEdgeDistance { position });
+            }
+            edge_floor = edge_floor.min(distance);
+            edges[row].push(column);
+            edges[column].push(row);
+        }
+    }
+    Ok((
+        edges,
+        if edge_floor.is_finite() {
+            f64::from(edge_floor)
+        } else {
+            0.0
+        },
+    ))
+}
+
+fn pack_leaves(tree: &mut Tree, positions: &mut [usize], next: &mut usize) {
+    match tree {
+        Tree::Leaf(rows) => {
+            rows.sort_unstable();
+            for &row in rows.iter() {
+                positions[row] = *next;
+                *next += 1;
+            }
+        }
+        Tree::Split { left, right, .. } | Tree::Balanced { left, right } => {
+            pack_leaves(left, positions, next);
+            pack_leaves(right, positions, next);
+        }
     }
 }
 

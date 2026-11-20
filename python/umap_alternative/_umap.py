@@ -1372,7 +1372,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         combined = _sparse_features(stacked, preserve_duplicates=True)
         ranking_input = combined
         exact_input = stacked
-        if metric in ("manhattan", "chebyshev") and not combined.has_canonical_format:
+        if metric in ("manhattan", "chebyshev") + _RATIO_METRICS and not combined.has_canonical_format:
             ranking_input = _sparse_features(combined, preserve_duplicates=False)
             if metric == "manhattan":
                 # Copies of either representation take the held-out path.

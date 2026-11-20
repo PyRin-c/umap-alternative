@@ -21,8 +21,9 @@ SciPy's pairwise distance implementation changes 46 Canberra and 228
 Bray–Curtis CSR weights on shared coordinates. The same comparison on
 held-out queries changes 9 Canberra and 21 Bray–Curtis weights.
 
-The regression fixture tests dense and CSR fits and forward transforms,
-dense inverse optimization and updates, positive epochs, repeated zero
+The 32 configurations use random initialization and the compatibility layout.
+The regression fixture tests dense and CSR fits, forward transforms and
+updates, dense inverse optimization, positive epochs, repeated zero
 rows, opposing rows, and inclusive cutoffs of 1, 0.5 and 0. Rust uses the
 fitted feature metrics for inverse gradients. Canberra differentiates the
 per-coordinate ratio in float32. The Bray–Curtis gradient uses
@@ -38,8 +39,8 @@ For the nonnegative wide Bray–Curtis held-out graph, one ordered weight
 differs by one float32 ULP between Windows and Ubuntu WSL. The fixture
 stores those held-out weights separately for each host so both
 regressions can compare exact bits. Sparse duplicate-column precision,
-larger approximate graphs, and the wider public metric surface remain
-open.
+disconnected spectral initialization, and larger approximate graphs remain
+open for these metrics.
 
 ## Reproduction
 

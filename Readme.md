@@ -75,7 +75,7 @@ Euclidean、Manhattan、Chebyshev、cosine の互換レイアウトでは、CSR�
 
 `unique=True` は重複をまとめてグラフを学習し、埋め込みと密度半径を元の入力行に戻します。疎行の代表行、逆対応、件数は `umap_alternative.utils.csr_unique` で取得できます。[重複行学習の参照記録](reference/unique_reference.md)
 
-特徴量の距離には `canberra` と `braycurtis` も指定できます。密・CSR の互換レイアウト学習と変換、密な逆変換と更新を公開版と比較しています。[距離の比較記録](reference/ratio_metrics_reference.md)
+特徴量の距離には `canberra` と `braycurtis` も指定できます。密・CSR の互換レイアウト学習・変換・更新と、密な逆変換を公開版と比較しています。[距離の比較記録](reference/ratio_metrics_reference.md)
 
 ## 独立実装と数値互換性
 

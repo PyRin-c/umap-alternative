@@ -72,13 +72,14 @@ def capture():
                     case["embedding"] = encode(output)
                 if transform:
                     case["transform"] = encode(model.transform(convert(q)))
-                if key == "base" and not sparse and "embedding" in case:
-                    model.set_params(n_epochs=48)
-                    points = model.embedding_[[1, 3]]
-                    case["inverse_points"] = encode(points)
-                    case["inverse"] = encode(model.inverse_transform(points))
+                if key == "base" and "embedding" in case:
+                    if not sparse:
+                        model.set_params(n_epochs=48)
+                        points = model.embedding_[[1, 3]]
+                        case["inverse_points"] = encode(points)
+                        case["inverse"] = encode(model.inverse_transform(points))
                     model.set_params(n_epochs=2)
-                    model.update(q)
+                    model.update(convert(q))
                     case["updated_graph"] = encode(model.graph_)
                     case["updated_embedding"] = encode(model.embedding_)
                 cases.append(case)

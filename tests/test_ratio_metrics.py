@@ -65,6 +65,7 @@ def test_public_ratio_metrics(case, method):
         points = np.asarray(case["inverse_points"], dtype=np.uint32).view(np.float32)
         model.set_params(n_epochs=48)
         np.testing.assert_array_equal(model.inverse_transform(points).view(np.uint32), case["inverse"])
+    if "updated_graph" in case:
         model.set_params(n_epochs=2)
         assert model.update(q) is None
         _assert_graph(model.graph_, case["updated_graph"])

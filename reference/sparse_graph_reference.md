@@ -174,10 +174,8 @@ checkpoint coordinates, bit for bit. The fixture has 56 fitted-input probes. Of 
 return the fitted coordinates, including 22 that return the same object.
 The other 24 take the public held-out path.
 
-Public UMAP produced held-out coordinates for dense and sparse
-representations of the same query. Those transforms remain unsupported
-for sparse-trained models here. Both implementations raise `ValueError`
-for inverse transform with sparse features. Sparse density embeddings and
+Both implementations raise `ValueError` for inverse transform with sparse
+features. Sparse density embeddings and
 non-Euclidean sparse embeddings remain outside this path. The public base
 input fits densMAP and produces embeddings with Manhattan, Chebyshev, and
 cosine metrics. Public CSR-array training raised `TypingError` in the
@@ -194,6 +192,54 @@ host with the locked reference environment. Use `windows` or `linux` for
 uv run --project reference --locked python -I reference/generate_sparse_euclidean_embedding_fixture.py \
   --output reference/fixtures/umap-learn-0.6.0-sparse-euclidean-embedding-x86_64.json \
   --spectral-output reference/fixtures/umap-learn-0.6.0-sparse-euclidean-spectral-<host>-x86_64.json --check
+```
+
+## Held-out sparse Euclidean transform
+
+After a sparse Euclidean fit, dense, CSR, CSC, and COO queries normalize to
+CSR. The estimator compares the validated storage with the fitted snapshot
+before merging duplicates. Exact matches return the fitted graph or
+embedding. Float64 embedding queries return float64 coordinates. Compressed
+and COO duplicates follow the same dtype conversion order as fitting.
+The fixture includes empty rows, a zero-row input error, unsorted storage,
+and cancellation among repeated float64 coordinates.
+
+Rust merges the stored feature coordinates and selects the nearest ranks.
+It keeps one distance row of scratch space and passes only one column index
+and distance per selected rank to graph construction. The NumPy tie callback
+sees a distance row only when the selected order or boundary involves a tie.
+Query memberships use all selected distances before applying the inclusive
+cutoff. Each cut rank retains a zero COO entry at (0, 0). The fixture uses
+both the exact distance 0.5 and the next larger float32 cutoff. The cutoff
+comes from the fit and survives changes to the constructor parameter.
+
+The shared serial optimizer keeps fitted coordinates fixed. Transform
+budgets resulting from fit epoch settings 0 through 5 return initialization.
+Settings 0 through 2 emit the public divide warning, with an invalid
+division warning if the query graph has zero weight. The fixture checks the
+default budget and positive budgets with endpoint seeds 0 and 4294967295.
+An entirely cut query has NaN coordinates. A query that selects
+an isolated fitted point with unit membership also propagates NaNs.
+
+For a narrower query, public results matched training restricted to the
+leading query-width columns with dense metric rounding. The native merge
+shares the dense float32 product calculation for that case. The
+`residuals.wider_query` record preserves a public 3-to-4-column reproduction
+whose graph differed from both zero padding and dropping the extra column.
+This implementation raises `ValueError` for that width. The
+`residuals.graph_only_ties` record preserves a legacy graph-only fit with
+four fitted weight differences on a 17-row tie-heavy input. Its held-out COO
+order and weights match exactly. Approximate sparse search remains outside
+the verified scope.
+
+The locked fixture regenerates byte for byte on Windows and Ubuntu WSL
+x86-64 with CPython 3.13.12. The 84 transform calls check 403 COO entries,
+400 coordinates, 14 fitted-input returns, and four validation errors.
+The graph-only tie case also checks 12 held-out COO entries. [Generator](generate_sparse_euclidean_transform_fixture.py) · [Fixture](fixtures/umap-learn-0.6.0-sparse-euclidean-transform-x86_64.json)
+
+```sh
+uv run --project reference --locked python -I reference/generate_sparse_euclidean_transform_fixture.py \
+  --output reference/fixtures/umap-learn-0.6.0-sparse-euclidean-transform-x86_64.json --check
 ```
 
 ## Reproducibility

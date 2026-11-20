@@ -474,13 +474,14 @@ fn euclidean_distance(left: &[f32], right: &[f32]) -> f32 {
 
 pub(crate) fn euclidean_distance_wide(left: &[f32], right: &[f32]) -> f64 {
     debug_assert_eq!(left.len(), right.len());
-    let squared_sum = left
-        .iter()
-        .zip(right)
-        .fold(0.0_f64, |sum, (&left_value, &right_value)| {
-            let difference = left_value - right_value;
-            sum + f64::from(difference * difference)
-        });
+    euclidean_distance_pairs(left.iter().copied().zip(right.iter().copied()))
+}
+
+pub(crate) fn euclidean_distance_pairs(values: impl Iterator<Item = (f32, f32)>) -> f64 {
+    let squared_sum = values.fold(0.0_f64, |sum, (left_value, right_value)| {
+        let difference = left_value - right_value;
+        sum + f64::from(difference * difference)
+    });
     squared_sum.sqrt()
 }
 

@@ -31,7 +31,10 @@ use umap_core::neighbors::DistanceMetric;
 use umap_core::parametric::prepare_parametric_edges;
 use umap_core::rng::Mt19937;
 use umap_core::sampling::{ModernSampledLayout, ModernSamplingConfig};
-use umap_core::sparse::{fit_sparse_euclidean_graph_with_cutoff, fit_sparse_graph_with_options};
+use umap_core::sparse::{
+    CsrFeatures, fit_sparse_euclidean_graph_with_cutoff, fit_sparse_graph_with_options,
+    rank_sparse_euclidean_queries,
+};
 use umap_core::transform::{
     CooGraph, DenseEmbeddingTransformConfig, transform_dense_embedding_with_options,
     transform_dense_graph_with_cutoff, transform_dense_graph_with_tie_ranking,
@@ -810,8 +813,8 @@ fn _transform_dense_graph(
         row,
         col,
         data,
-    } = if metric == "precomputed" {
-        precomputed_query_graph(
+    } = if metric == "precomputed" || ranked_columns.is_some() {
+        ranked_query_graph(
             py,
             ranked_columns.as_deref(),
             &queries,
@@ -866,18 +869,7 @@ fn feature_query_graph(
                 cutoff,
                 options,
                 |distances, width| {
-                    let ranked = Python::attach(|py| {
-                        rank_ties
-                            .call1(py, (distances.to_vec(), width))?
-                            .extract::<Vec<usize>>(py)
-                    });
-                    match ranked {
-                        Ok(columns) => columns,
-                        Err(error) => {
-                            callback_error = Some(error);
-                            Vec::new()
-                        }
-                    }
+                    python_rank_ties(rank_ties, distances, width, &mut callback_error)
                 },
             )
         } else {
@@ -900,7 +892,69 @@ fn feature_query_graph(
     })
 }
 
-fn precomputed_query_graph(
+fn python_rank_ties(
+    rank_ties: &Py<PyAny>,
+    distances: &[f32],
+    k: usize,
+    callback_error: &mut Option<PyErr>,
+) -> Vec<usize> {
+    let ranked = Python::attach(|py| {
+        rank_ties
+            .call1(py, (distances.to_vec(), k))?
+            .extract::<Vec<usize>>(py)
+    });
+    match ranked {
+        Ok(columns) => columns,
+        Err(error) => {
+            *callback_error = Some(error);
+            Vec::new()
+        }
+    }
+}
+
+fn csr_features((shape, indptr, indices, data): &CsrComponents) -> CsrFeatures<'_> {
+    CsrFeatures {
+        shape: *shape,
+        indptr,
+        indices,
+        data,
+    }
+}
+
+/// Return only the selected query columns and distances from canonical CSR.
+#[pyfunction]
+fn _rank_sparse_euclidean_queries(
+    py: Python<'_>,
+    training: CsrComponents,
+    queries: CsrComponents,
+    k: usize,
+    rank_ties: Py<PyAny>,
+) -> PyResult<(Vec<i32>, Vec<f32>)> {
+    py.detach(|| {
+        let mut callback_error = None;
+        let result = rank_sparse_euclidean_queries(
+            csr_features(&training),
+            csr_features(&queries),
+            k,
+            |distances, width| python_rank_ties(&rank_ties, distances, width, &mut callback_error),
+        );
+        if let Some(error) = callback_error {
+            return Err(error);
+        }
+        let ranks = result.map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let mut columns = Vec::with_capacity(ranks.len());
+        let mut distances = Vec::with_capacity(ranks.len());
+        for rank in ranks {
+            columns.push(i32::try_from(rank.index).map_err(|_| {
+                PyValueError::new_err("sparse query column does not fit in a signed 32-bit index")
+            })?);
+            distances.push(rank.distance);
+        }
+        Ok((columns, distances))
+    })
+}
+
+fn ranked_query_graph(
     py: Python<'_>,
     columns: Option<&[i32]>,
     distances: &[f32],
@@ -909,8 +963,7 @@ fn precomputed_query_graph(
     cutoff: f32,
     options: GraphOptions,
 ) -> PyResult<CooGraph> {
-    let columns =
-        columns.ok_or_else(|| PyValueError::new_err("expected ranked precomputed columns"))?;
+    let columns = columns.ok_or_else(|| PyValueError::new_err("expected ranked query columns"))?;
     py.detach(|| {
         transform_ranked_neighbors_graph(
             columns, distances, shape.0, shape.1, k, k, cutoff, options,
@@ -971,8 +1024,8 @@ fn _transform_dense_embedding(
         transform_seed,
         disconnection_distance,
     };
-    let ranked_graph = if precomputed {
-        let graph = precomputed_query_graph(
+    let ranked_graph = if precomputed || ranked_columns.is_some() {
+        let graph = ranked_query_graph(
             py,
             ranked_columns.as_deref(),
             &queries,
@@ -994,7 +1047,12 @@ fn _transform_dense_embedding(
             options,
             Some(rank_ties),
         )?;
-        if fit_epochs.is_some_and(|epochs| epochs < 3) {
+        Some(graph)
+    } else {
+        None
+    };
+    if let Some(graph) = ranked_graph {
+        if !precomputed && fit_epochs.is_some_and(|epochs| epochs < 3) {
             let message = if graph.data.iter().any(|&weight| weight > 0.0) {
                 c"divide by zero encountered in scalar divide"
             } else {
@@ -1002,11 +1060,6 @@ fn _transform_dense_embedding(
             };
             PyErr::warn(py, py.get_type::<PyRuntimeWarning>().as_any(), message, 2)?;
         }
-        Some(graph)
-    } else {
-        None
-    };
-    if let Some(graph) = ranked_graph {
         return py
             .detach(|| transform_embedding_from_graph(&graph, &fitted_embedding, &config))
             .map_err(|error| PyValueError::new_err(error.to_string()));
@@ -1119,6 +1172,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     module.add_function(wrap_pyfunction!(_fit_supplied_neighbors_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_transform_dense_graph, module)?)?;
+    module.add_function(wrap_pyfunction!(_rank_sparse_euclidean_queries, module)?)?;
     module.add_function(wrap_pyfunction!(_transform_dense_embedding, module)?)?;
     module.add_function(wrap_pyfunction!(
         _inverse_transform_dense_embedding,

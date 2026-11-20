@@ -5,7 +5,31 @@ use std::fmt;
 
 use crate::fit::{build_fitted_graph, build_graph_with_cutoff};
 use crate::fuzzy_graph::{CsrGraph, GraphError, GraphOptions};
-use crate::neighbors::{DistanceMetric, Neighbor, collect_neighbors};
+use crate::neighbors::{DistanceMetric, Neighbor, collect_neighbors, euclidean_distance_pairs};
+use crate::transform::{DenseGraphTransformError, QueryTieRanking};
+
+/// Borrowed CSR buffers with their declared shape.
+#[derive(Clone, Copy, Debug)]
+pub struct CsrFeatures<'a> {
+    /// Row offsets, including the terminal offset.
+    pub indptr: &'a [usize],
+    /// Column index for each stored feature.
+    pub indices: &'a [usize],
+    /// Finite stored feature values.
+    pub data: &'a [f32],
+    /// Matrix shape as (rows, features).
+    pub shape: (usize, usize),
+}
+
+impl<'a> CsrFeatures<'a> {
+    fn row(self, row: usize) -> CsrRow<'a> {
+        let entries = self.indptr[row]..self.indptr[row + 1];
+        CsrRow {
+            columns: &self.indices[entries.clone()],
+            values: &self.data[entries],
+        }
+    }
+}
 
 /// Distance metrics for exhaustive sparse feature search.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -167,6 +191,37 @@ impl std::error::Error for SparseGraphFitError {
     }
 }
 
+/// Invalid CSR input or distance ranking in a held-out sparse search.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SparseQueryRankError {
+    /// The fitted feature matrix or requested count is invalid.
+    Training(SparseKnnError),
+    /// The query feature matrix is invalid.
+    Queries(SparseKnnError),
+    /// The CSR query matrix is wider than the training matrix.
+    FeatureCount { training: usize, queries: usize },
+    /// A selected distance or tie-break rank is invalid.
+    Ranking(DenseGraphTransformError),
+}
+
+impl fmt::Display for SparseQueryRankError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Training(error) => write!(formatter, "invalid CSR training input: {error}"),
+            Self::Queries(error) => write!(formatter, "invalid CSR query input: {error}"),
+            Self::FeatureCount { training, queries } => {
+                write!(
+                    formatter,
+                    "expected at most {training} CSR features, got {queries}"
+                )
+            }
+            Self::Ranking(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for SparseQueryRankError {}
+
 /// Find the `k` nearest rows for every row of a sorted CSR feature matrix.
 ///
 /// `indptr` contains `n_rows + 1` nondecreasing offsets, starting at zero and
@@ -229,6 +284,47 @@ fn csr_knn_counting_cutoff(
         }
         metric => metric,
     };
+    let input = CsrFeatures {
+        indptr,
+        indices,
+        data,
+        shape: (n_rows, n_features),
+    };
+    validate_csr_features(input, Some(k), metric == SparseDistanceMetric::Cosine)?;
+    let normalized_data =
+        (metric == SparseDistanceMetric::Cosine).then(|| normalize_sparse_rows(indptr, data));
+    let input = CsrFeatures {
+        data: normalized_data.as_deref().unwrap_or(data),
+        ..input
+    };
+    let mut removed = 0;
+    let neighbors = collect_neighbors(n_rows, k, |query_index, candidates| {
+        let query = input.row(query_index);
+        for index in 0..n_rows {
+            let distance = match metric {
+                SparseDistanceMetric::Dense(metric) => {
+                    sparse_distance(query, input.row(index), metric)
+                }
+                SparseDistanceMetric::Cosine if query_index == index => 0.0,
+                SparseDistanceMetric::Cosine => sparse_cosine_distance(query, input.row(index)),
+            };
+            removed += usize::from(distance >= cutoff);
+            candidates.push(Neighbor { index, distance });
+        }
+    });
+    Ok((neighbors, removed))
+}
+
+fn validate_csr_features(
+    CsrFeatures {
+        indptr,
+        indices,
+        data,
+        shape: (n_rows, n_features),
+    }: CsrFeatures<'_>,
+    k: Option<usize>,
+    allow_duplicates: bool,
+) -> Result<(), SparseKnnError> {
     if n_rows.checked_add(1) != Some(indptr.len()) || indices.len() != data.len() {
         return Err(SparseKnnError::InvalidShape {
             n_rows,
@@ -249,7 +345,9 @@ fn csr_knn_counting_cutoff(
         });
     }
 
-    if !(1..=n_rows).contains(&k) {
+    if let Some(k) = k
+        && !(1..=n_rows).contains(&k)
+    {
         return Err(SparseKnnError::InvalidK { k, n_rows });
     }
 
@@ -276,7 +374,7 @@ fn csr_knn_counting_cutoff(
             }
             if position > start
                 && (indices[position - 1] > column
-                    || (indices[position - 1] == column && metric != SparseDistanceMetric::Cosine))
+                    || (indices[position - 1] == column && !allow_duplicates))
             {
                 return Err(SparseKnnError::UnorderedColumnIndices {
                     row,
@@ -292,32 +390,63 @@ fn csr_knn_counting_cutoff(
         }
     }
 
-    let normalized_data =
-        (metric == SparseDistanceMetric::Cosine).then(|| normalize_sparse_rows(indptr, data));
-    let data = normalized_data.as_deref().unwrap_or(data);
-    let row_at = |row| {
-        let entries = indptr[row]..indptr[row + 1];
-        CsrRow {
-            columns: &indices[entries.clone()],
-            values: &data[entries],
-        }
-    };
-    let mut removed = 0;
-    let neighbors = collect_neighbors(n_rows, k, |query_index, candidates| {
-        let query = row_at(query_index);
-        for index in 0..n_rows {
-            let distance = match metric {
-                SparseDistanceMetric::Dense(metric) => {
-                    sparse_distance(query, row_at(index), metric)
-                }
-                SparseDistanceMetric::Cosine if query_index == index => 0.0,
-                SparseDistanceMetric::Cosine => sparse_cosine_distance(query, row_at(index)),
+    Ok(())
+}
+
+/// Select compact row-major Euclidean ranks from canonical sparse features.
+///
+/// A narrower query uses the leading training columns and the dense metric's
+/// float32 product rounding. The callback receives one distance row in
+/// training-column order when selected ranks tie.
+pub fn rank_sparse_euclidean_queries(
+    training: CsrFeatures<'_>,
+    queries: CsrFeatures<'_>,
+    k: usize,
+    mut rank_ties: impl FnMut(&[f32], usize) -> Vec<usize>,
+) -> Result<Vec<Neighbor>, SparseQueryRankError> {
+    use SparseQueryRankError as Error;
+    if queries.shape.1 > training.shape.1 {
+        return Err(Error::FeatureCount {
+            training: training.shape.1,
+            queries: queries.shape.1,
+        });
+    }
+    validate_csr_features(training, Some(k), false).map_err(Error::Training)?;
+    validate_csr_features(queries, None, false).map_err(Error::Queries)?;
+    let mut ranks = Vec::new();
+    let mut candidates = Vec::with_capacity(training.shape.0);
+    let mut tie_ranking = QueryTieRanking::default();
+    let narrower = queries.shape.1 < training.shape.1;
+    for query in 0..queries.shape.0 {
+        let row = queries.row(query);
+        candidates.clear();
+        candidates.extend((0..training.shape.0).map(|index| {
+            let candidate = training.row(index);
+            let distance = if narrower {
+                euclidean_distance_pairs(merged_features(row, candidate.prefix(queries.shape.1)))
+                    as f32
+            } else {
+                sparse_distance(row, candidate, DistanceMetric::Euclidean)
             };
-            removed += usize::from(distance >= cutoff);
-            candidates.push(Neighbor { index, distance });
+            Neighbor { index, distance }
+        }));
+        tie_ranking
+            .select(query, &mut candidates, k, &mut rank_ties)
+            .map_err(Error::Ranking)?;
+        for &neighbor in &candidates[..k] {
+            if !neighbor.distance.is_finite() {
+                return Err(Error::Ranking(
+                    DenseGraphTransformError::NonFiniteDistance {
+                        query,
+                        training: neighbor.index,
+                        distance: neighbor.distance,
+                    },
+                ));
+            }
+            ranks.push(neighbor);
         }
-    });
-    Ok((neighbors, removed))
+    }
+    Ok(ranks)
 }
 
 /// Fit a square fuzzy graph from a sorted CSR feature matrix.
@@ -391,6 +520,16 @@ struct CsrRow<'a> {
     values: &'a [f32],
 }
 
+impl CsrRow<'_> {
+    fn prefix(self, width: usize) -> Self {
+        let end = self.columns.partition_point(|&column| column < width);
+        Self {
+            columns: &self.columns[..end],
+            values: &self.values[..end],
+        }
+    }
+}
+
 fn normalize_sparse_rows(indptr: &[usize], data: &[f32]) -> Vec<f32> {
     let mut normalized = data.to_vec();
     for offsets in indptr.windows(2) {
@@ -436,9 +575,12 @@ fn sparse_cosine_distance(left: CsrRow<'_>, right: CsrRow<'_>) -> f32 {
     (1.0 - dot).clamp(0.0, 2.0)
 }
 
-fn sparse_distance(left: CsrRow<'_>, right: CsrRow<'_>, metric: DistanceMetric) -> f32 {
+fn merged_features<'a>(
+    left: CsrRow<'a>,
+    right: CsrRow<'a>,
+) -> impl Iterator<Item = (f32, f32)> + 'a {
     let (mut left_position, mut right_position) = (0, 0);
-    let differences = std::iter::from_fn(move || {
+    std::iter::from_fn(move || {
         // Validated feature indices are always less than usize::MAX.
         let left_column = left
             .columns
@@ -452,26 +594,29 @@ fn sparse_distance(left: CsrRow<'_>, right: CsrRow<'_>, metric: DistanceMetric) 
             .unwrap_or(usize::MAX);
         Some(match left_column.cmp(&right_column) {
             Ordering::Less => {
-                let difference = f64::from(left.values[left_position]);
+                let value = left.values[left_position];
                 left_position += 1;
-                difference
+                (value, 0.0)
             }
             Ordering::Greater => {
-                let difference = -f64::from(right.values[right_position]);
+                let value = right.values[right_position];
                 right_position += 1;
-                difference
+                (0.0, value)
             }
             Ordering::Equal if left_column == usize::MAX => return None,
             Ordering::Equal => {
-                let difference =
-                    f64::from(left.values[left_position]) - f64::from(right.values[right_position]);
+                let values = (left.values[left_position], right.values[right_position]);
                 left_position += 1;
                 right_position += 1;
-                difference
+                values
             }
         })
-    });
+    })
+}
 
+fn sparse_distance(left: CsrRow<'_>, right: CsrRow<'_>, metric: DistanceMetric) -> f32 {
+    let differences = merged_features(left, right)
+        .map(|(left_value, right_value)| f64::from(left_value) - f64::from(right_value));
     match metric {
         DistanceMetric::Euclidean => {
             let squared_sum =

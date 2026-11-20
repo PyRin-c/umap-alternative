@@ -414,6 +414,10 @@ def _sparse_feature_embedding_output(embedding, X):
     return embedding.astype(dtype, copy=False)
 
 
+def _csr_buffers(X):
+    return X.shape, X.indptr.tolist(), X.indices.tolist(), X.data.tolist()
+
+
 def _sparse_features(X, *, preserve_duplicates):
     if X.format not in ("csr", "csc", "coo"):
         raise TypeError("sparse graph fitting requires SciPy CSR, CSC, or COO input")
@@ -461,7 +465,8 @@ class UMAP(BaseEstimator, TransformerMixin):
     Dense graph and embedding fits also accept cosine and correlation. For these two metrics
     the ranked neighbors may omit self, and the default distance cutoff is 2.
     A singleton graph fit has no ``graph_``.
-    Graph ``transform`` accepts dense features or precomputed distances.
+    Graph ``transform`` accepts dense features, sparse Euclidean features
+    after a sparse Euclidean fit, or precomputed distances.
     It returns a float32 SciPy COO matrix with query rows and training columns
     for held-out data, and returns ``graph_`` itself for the fitted data.
 
@@ -509,8 +514,9 @@ class UMAP(BaseEstimator, TransformerMixin):
     Dense held-out features transform to ``float32`` coordinates with the
     training layout fixed. ``transform_seed`` (default 42) is an integer in
     ``[0, 2**32 - 1]``, independent of ``random_state``. The normalized fitted
-    input returns ``embedding_`` itself. Sparse Euclidean features also
-    support this shortcut, with a float64 copy for float64 queries.
+    input returns ``embedding_`` itself. A sparse Euclidean fit accepts
+    dense, CSR, CSC, and COO queries. Float64 queries return float64
+    coordinates for this path.
     A singleton has a zero embedding and no graph. Seeded modern Adam and
     momentum layouts accept random or explicit initialization.
     For a fitted dense Euclidean embedding, ``inverse_transform`` reconstructs
@@ -611,6 +617,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise ValueError("n_neighbors must be greater than 1")
 
         precomputed = metric == "precomputed"
+        sparse_euclidean = sparse and metric == "euclidean"
         sparse_embedding = sparse and not precomputed and embedding_mode
         angular = not sparse and metric in _ANGULAR_METRICS
         if sparse and not precomputed:
@@ -640,13 +647,13 @@ class UMAP(BaseEstimator, TransformerMixin):
             )
         n_rows, n_features = X_checked.shape
         transform_fit = (X_checked, metric)
-        if sparse_embedding:
+        fitted_input = None
+        if sparse_euclidean:
             # The identity check compares sorted, validated CSR storage,
             # including any duplicates left by format and dtype conversion.
             checked = _check_sparse_input(X, input_name="sparse features")
             fitted_input = csr_matrix(checked, copy=True)
             fitted_input.sort_indices()
-            transform_fit = (fitted_input, metric)
         if precomputed:
             if not sparse and n_rows != n_features:
                 raise ValueError("precomputed distances must be a square matrix")
@@ -720,7 +727,9 @@ class UMAP(BaseEstimator, TransformerMixin):
                 if embedding_mode
                 else None
             )
-            return self._store_fit(n_features, transform_fit, None, None, embedding)
+            return self._store_fit(
+                n_features, transform_fit, None, None, embedding, exact_fit_input=fitted_input,
+            )
 
         if n_neighbors > n_rows - 1:
             warnings.warn(_TRUNCATION_WARNING, UserWarning, stacklevel=2)
@@ -775,7 +784,7 @@ class UMAP(BaseEstimator, TransformerMixin):
                     X_checked.ravel().tolist(), n_rows, n_neighbors,
                     graph_options=(graph_options or (1.0, 1.0)) if embedding_mode else graph_options,
                 )
-        elif sparse_embedding:
+        elif sparse_euclidean and (embedding_mode or cutoff < np.inf):
             components, removed = _native._fit_sparse_euclidean_graph_with_cutoff(
                 X_checked.indptr.tolist(),
                 X_checked.indices.tolist(),
@@ -785,6 +794,8 @@ class UMAP(BaseEstimator, TransformerMixin):
                 cutoff,
                 graph_options=graph_options,
             )
+            if cutoff < np.inf:
+                transform_cutoff = cutoff
         elif cutoff < np.inf:
             raise NotImplementedError(
                 "disconnection_distance with computed neighbors requires unsupervised dense features"
@@ -879,6 +890,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             transform_error=transform_error,
             transform_cutoff=transform_cutoff,
             supervised=y is not None,
+            exact_fit_input=fitted_input,
         )
 
     def fit_transform(self, X, y=None, **fit_params):
@@ -912,29 +924,31 @@ class UMAP(BaseEstimator, TransformerMixin):
         n_training_rows, n_features = training.shape
         if n_training_rows == 1:
             raise ValueError("Transform unavailable when model was fit with only a single data sample.")
-        if metric != "precomputed" and issparse(training):
-            fitted_input = getattr(self, "_exact_fit_input", None)
-            if fitted_input is not None:
-                if issparse(X):
-                    queries = csr_matrix(_check_sparse_input(X, input_name="sparse features"))
-                else:
-                    queries = csr_matrix(check_array(X, dtype=np.float32, order="C"))
-                if _same_transform_input(queries, fitted_input):
-                    if self.transform_mode == "graph":
-                        return self.graph_
-                    return _sparse_feature_embedding_output(self.embedding_, X)
+        sparse_features = metric != "precomputed" and issparse(training)
+        if sparse_features and metric != "euclidean":
             raise NotImplementedError("transform after fitting sparse features is not implemented")
         sparse = issparse(X)
         if sparse:
-            if metric != "precomputed":
+            if sparse_features:
+                queries = csr_matrix(_check_sparse_input(X, input_name="sparse features"))
+            elif metric == "precomputed":
+                queries = _check_sparse_input(X, input_name="precomputed distances")
+            else:
                 raise TypeError("sparse input is not supported; pass a dense array")
-            queries = _check_sparse_input(X, input_name="precomputed distances")
         else:
             queries = check_array(X, dtype=np.float32, order="C")
+            if sparse_features:
+                queries = csr_matrix(queries)
         n_query_rows, n_query_features = queries.shape
         fitted_input = getattr(self, "_exact_fit_input", training)
+        if fitted_input is None and sparse_features:
+            fitted_input = training
         if _same_transform_input(queries, fitted_input):
-            return self.embedding_ if self.transform_mode == "embedding" else self.graph_
+            if self.transform_mode == "graph":
+                return self.graph_
+            if sparse_features:
+                return _sparse_feature_embedding_output(self.embedding_, X)
+            return self.embedding_
         if getattr(self, "densmap", False):
             raise NotImplementedError("Transforming data into an existing embedding not supported for densMAP.")
         transform_error = getattr(self, "_supplied_transform_error", None)
@@ -954,16 +968,32 @@ class UMAP(BaseEstimator, TransformerMixin):
             if queries.min() < 0.0:
                 raise AssertionError
             ranked_columns = order.ravel().tolist()
+        elif sparse_features:
+            if n_query_features > n_features:
+                raise ValueError(
+                    f"X has {n_query_features} features, but UMAP was fit with {n_features}."
+                )
+            # Earlier fits may have kept the raw CSR identity snapshot here.
+            if not training.has_canonical_format:
+                training = _sparse_features(training, preserve_duplicates=False)
+            ranked_columns, distances = _native._rank_sparse_euclidean_queries(
+                _csr_buffers(training),
+                _csr_buffers(_sparse_features(queries, preserve_duplicates=False)),
+                self.n_neighbors_,
+                _rank_tied_dense_distances,
+            )
+            queries = np.asarray(distances, dtype=np.float32).reshape(n_query_rows, self.n_neighbors_)
         elif n_query_features != n_features:
             raise ValueError(
                 f"X has {n_query_features} features, but UMAP is expecting "
                 f"{n_features} features as input."
             )
         if self.transform_mode == "embedding":
-            return self._transform_embedding(training, queries, metric, ranked_columns)
+            coordinates = self._transform_embedding(training, queries, metric, ranked_columns)
+            return _sparse_feature_embedding_output(coordinates, X) if sparse_features else coordinates
 
         shape, row, col, data = _native._transform_dense_graph(
-            [] if metric == "precomputed" else training.ravel().tolist(),
+            [] if ranked_columns is not None else training.ravel().tolist(),
             n_training_rows,
             queries.ravel().tolist(),
             n_query_rows,
@@ -995,7 +1025,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             has_weight = cutoff is None or np.any(queries < cutoff)
             np.float32(has_weight) / np.float32(0)
         coordinates = _native._transform_dense_embedding(
-            [] if metric == "precomputed" else training.ravel().tolist(),
+            [] if ranked_columns is not None else training.ravel().tolist(),
             training.shape[0],
             queries.ravel().tolist(),
             queries.shape[0],
@@ -1206,6 +1236,7 @@ class UMAP(BaseEstimator, TransformerMixin):
     def _store_fit(
         self, n_features, transform_fit, graph, n_neighbors, embedding, *,
         embedding_options=None, transform_error=None, transform_cutoff=None, supervised=False,
+        exact_fit_input=None,
     ):
         if graph is not None:
             self.graph_ = graph
@@ -1219,12 +1250,10 @@ class UMAP(BaseEstimator, TransformerMixin):
             del self.embedding_
         self.n_features_in_ = n_features
         self._graph_transform_fit = transform_fit
-        self._exact_fit_input = None
-        if transform_fit is not None:
+        self._exact_fit_input = exact_fit_input
+        if exact_fit_input is None and transform_fit is not None:
             training, metric = transform_fit
-            if metric == "precomputed" or not issparse(training) or (
-                metric == "euclidean" and embedding is not None
-            ):
+            if metric == "precomputed" or not issparse(training):
                 self._exact_fit_input = training
         self._supplied_transform_error = transform_error
         self._supervised_fit = supervised

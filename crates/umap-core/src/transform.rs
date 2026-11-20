@@ -804,8 +804,7 @@ pub fn transform_dense_graph_with_tie_ranking(
     options: GraphOptions,
     mut rank_ties: impl FnMut(&[f32], usize) -> Vec<usize>,
 ) -> Result<CooGraph, DenseGraphTransformError> {
-    let mut distances = Vec::new();
-    let mut seen = Vec::new();
+    let mut tie_ranking = QueryTieRanking::default();
     transform_dense_graph_with_selector(
         training,
         n_training_rows,
@@ -816,60 +815,76 @@ pub fn transform_dense_graph_with_tie_ranking(
         metric,
         cutoff,
         options,
-        |query, candidates| {
-            let selected = sort_closest_neighbors(candidates, k);
-            let boundary = selected[k - 1].distance;
-            let tied = selected
-                .windows(2)
-                .any(|pair| pair[0].distance == pair[1].distance)
-                || (k < candidates.len() && boundary == candidates[k].distance);
-            if !tied {
-                return Ok(());
-            }
-            let strictly_closer =
-                candidates[..k].partition_point(|neighbor| neighbor.distance < boundary);
+        |query, candidates| tie_ranking.select(query, candidates, k, &mut rank_ties),
+    )
+}
 
-            distances.resize(n_training_rows, 0.0);
-            for candidate in candidates.iter() {
-                distances[candidate.index] = candidate.distance;
+#[derive(Default)]
+pub(crate) struct QueryTieRanking {
+    distances: Vec<f32>,
+    seen: Vec<bool>,
+}
+
+impl QueryTieRanking {
+    pub(crate) fn select(
+        &mut self,
+        query: usize,
+        candidates: &mut [Neighbor],
+        k: usize,
+        rank_ties: impl FnOnce(&[f32], usize) -> Vec<usize>,
+    ) -> Result<(), DenseGraphTransformError> {
+        let selected = sort_closest_neighbors(candidates, k);
+        let boundary = selected[k - 1].distance;
+        let tied = selected
+            .windows(2)
+            .any(|pair| pair[0].distance == pair[1].distance)
+            || (k < candidates.len() && boundary == candidates[k].distance);
+        if !tied {
+            return Ok(());
+        }
+        let strictly_closer =
+            candidates[..k].partition_point(|neighbor| neighbor.distance < boundary);
+        let n_training_rows = candidates.len();
+        self.distances.resize(n_training_rows, 0.0);
+        for candidate in candidates.iter() {
+            self.distances[candidate.index] = candidate.distance;
+        }
+        let columns = rank_ties(&self.distances, k);
+        if columns.len() != k {
+            return Err(DenseGraphTransformError::InvalidRank {
+                query,
+                column: n_training_rows,
+            });
+        }
+        self.seen.resize(n_training_rows, false);
+        self.seen.fill(false);
+        let mut previous = f32::NEG_INFINITY;
+        for (rank, (candidate, column)) in candidates.iter_mut().zip(columns).enumerate() {
+            if column >= n_training_rows
+                || self.seen[column]
+                || self.distances[column] < previous
+                || self.distances[column] > boundary
+                || (rank < strictly_closer && self.distances[column] == boundary)
+            {
+                return Err(DenseGraphTransformError::InvalidRank { query, column });
             }
-            let columns = rank_ties(&distances, k);
-            if columns.len() != k {
-                return Err(DenseGraphTransformError::InvalidRank {
+            let distance = self.distances[column];
+            if !distance.is_finite() {
+                return Err(DenseGraphTransformError::NonFiniteDistance {
                     query,
-                    column: n_training_rows,
+                    training: column,
+                    distance,
                 });
             }
-            seen.resize(n_training_rows, false);
-            seen.fill(false);
-            let mut previous = f32::NEG_INFINITY;
-            for (rank, (candidate, column)) in candidates.iter_mut().zip(columns).enumerate() {
-                if column >= n_training_rows
-                    || seen[column]
-                    || distances[column] < previous
-                    || distances[column] > boundary
-                    || (rank < strictly_closer && distances[column] == boundary)
-                {
-                    return Err(DenseGraphTransformError::InvalidRank { query, column });
-                }
-                let distance = distances[column];
-                if !distance.is_finite() {
-                    return Err(DenseGraphTransformError::NonFiniteDistance {
-                        query,
-                        training: column,
-                        distance,
-                    });
-                }
-                seen[column] = true;
-                previous = distance;
-                *candidate = Neighbor {
-                    index: column,
-                    distance,
-                };
-            }
-            Ok(())
-        },
-    )
+            self.seen[column] = true;
+            previous = distance;
+            *candidate = Neighbor {
+                index: column,
+                distance,
+            };
+        }
+        Ok(())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -57,7 +57,7 @@ Wheel は `target/wheels/` に生成されます。Python パッケージ名は 
 
 Adam と momentum による正のエポック数の学習は未実装です。固定シードの検証条件と適用範囲は [スペクトル初期化を使った学習の参照記録](reference/spectral_fit_reference.md) と [ランダム初期化と初期座標を指定した学習の参照記録](reference/seeded_fit_reference.md) を参照してください。
 
-Euclidean の互換レイアウトでは、CSR、CSC、COO の特徴量を学習できます。有限の切断距離で孤立した行の座標は `NaN` になります。疎な特徴量で学習したモデルの新規データ変換は未実装です。[疎な Euclidean 埋め込みの比較記録](reference/sparse_graph_reference.md#sparse-euclidean-compatibility-layout)
+Euclidean の互換レイアウトでは、CSR、CSC、COO の特徴量を学習できます。有限の切断距離で孤立した行の座標は `NaN` になります。疎な Euclidean 特徴量で学習したモデルは、密な入力と CSR、CSC、COO の入力を変換できます。グラフモードは近傍順の COO グラフを、埋め込みモードは座標を返します。[疎な Euclidean 変換の比較記録](reference/sparse_graph_reference.md#held-out-sparse-euclidean-transform)
 
 `UMAP(transform_mode="graph").fit(X)` と `fit_transform(X)` は、Euclidean、Manhattan、Chebyshev、cosine の教師なし学習で SciPy の CSR、CSC、COO 形式の疎な特徴量を受け取ります。入力を変更せずに CSR に変換し、`float32` の CSR グラフを作ります。Cosine は圧縮形式の行に格納された重複要素を保持して距離を計算します。距離ゼロの同順位により自分自身が近傍から外れる場合は `ValueError` になります。形式ごとの検証結果は [疎グラフの参照記録](reference/sparse_graph_reference.md) を参照してください。
 

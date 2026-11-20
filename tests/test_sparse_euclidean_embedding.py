@@ -90,14 +90,10 @@ def test_sparse_feature_fitted_input_compares_csr_storage(name):
     model = UMAP(**REFERENCE["options"]).fit(from_record(training))
     for query, expected in REFERENCE["identity"][name].items():
         X = from_record(REFERENCE["identity_queries"][query])
-        if expected["same_coordinates"]:
-            result = model.transform(X)
-            assert (result is model.embedding_) == expected["same_object"]
-            assert result.dtype.name == expected["dtype"]
-            np.testing.assert_array_equal(result, model.embedding_)
-        else:
-            with pytest.raises(NotImplementedError, match="after fitting sparse features"):
-                model.transform(X)
+        result = model.transform(X)
+        assert (result is model.embedding_) == expected["same_object"]
+        assert result.dtype.name == expected["dtype"]
+        assert np.array_equal(result, model.embedding_, equal_nan=True) == expected["same_coordinates"]
 
 
 def test_wide_csr_embedding_and_fitted_input_transform_stay_sparse(monkeypatch):

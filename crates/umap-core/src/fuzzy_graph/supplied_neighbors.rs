@@ -165,8 +165,28 @@ pub fn fit_supplied_neighbors_graph(
         Cow::Borrowed(distances)
     };
 
+    Ok(build_ranked_graph(
+        indices.iter().map(|&index| index as usize),
+        &distances,
+        n_rows,
+        width,
+        k,
+        options,
+    ))
+}
+
+// The caller validates the aligned flat buffers. Infinite distances mark
+// missing entries, and position zero is omitted from the scale search.
+pub(crate) fn build_ranked_graph(
+    indices: impl Iterator<Item = usize>,
+    distances: &[f32],
+    n_rows: usize,
+    width: usize,
+    k: usize,
+    options: GraphOptions,
+) -> CsrGraph {
     let target = (k as f64).log2();
-    let batch_floor = with_finite_distances(&distances, |finite| {
+    let batch_floor = with_finite_distances(distances, |finite| {
         if finite.is_empty() {
             0.0
         } else {
@@ -176,11 +196,8 @@ pub fn fit_supplied_neighbors_graph(
     let mut directed = Vec::with_capacity(n_rows);
     let mut positive = Vec::with_capacity(width);
     let mut offsets = Vec::with_capacity(width - 1);
-    for (row, (indices, distances)) in indices
-        .chunks_exact(width)
-        .zip(distances.chunks_exact(width))
-        .enumerate()
-    {
+    let mut indices = indices;
+    for (row, distances) in distances.chunks_exact(width).enumerate() {
         positive.clear();
         positive.extend(
             distances
@@ -206,10 +223,11 @@ pub fn fit_supplied_neighbors_graph(
         let sigma = search_scale(&offsets, target, false).max(floor);
 
         let mut memberships = indices
-            .iter()
+            .by_ref()
+            .take(width)
             .zip(distances)
-            .filter(|&(&index, &distance)| distance.is_finite() && index as usize != row)
-            .map(|(&index, &distance)| (index as usize, membership(distance, rho, sigma)))
+            .filter(|&(index, &distance)| distance.is_finite() && index != row)
+            .map(|(index, &distance)| (index, membership(distance, rho, sigma)))
             .collect::<Vec<_>>();
         // Stable ordering keeps duplicate summation in the original column order.
         memberships.sort_by_key(|&(index, _)| index);
@@ -226,11 +244,11 @@ pub fn fit_supplied_neighbors_graph(
 
     let mix = options.set_op_mix_ratio as f32;
     let intersection_mix = (1.0 - options.set_op_mix_ratio) as f32;
-    Ok(symmetrize(&directed, false, |forward, reverse| {
+    symmetrize(&directed, false, |forward, reverse| {
         let union = fuzzy_union(forward, reverse);
         let intersection = forward * reverse;
         mix * union + intersection_mix * intersection
-    }))
+    })
 }
 
 fn with_finite_distances(distances: &[f32], calculate: impl FnOnce(&[f32]) -> f32) -> f32 {

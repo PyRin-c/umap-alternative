@@ -570,7 +570,9 @@ pub fn transform_dense_graph_with_options(
         n_features,
         k,
         metric,
-        f32::INFINITY,
+        metric
+            .default_disconnection_distance()
+            .unwrap_or(f32::INFINITY),
         options,
     )
 }

@@ -12,13 +12,14 @@
 
 use std::fmt;
 
+use crate::fuzzy_graph::supplied_neighbors::build_ranked_graph;
 use crate::fuzzy_graph::{
     CsrGraph, GraphError, GraphOptions, categorical_intersection, fuzzy_simplicial_set,
     fuzzy_simplicial_set_with_options,
 };
 use crate::neighbors::{
-    DistanceMetric, KnnError, Neighbor, PrecomputedKnnError, exhaustive_knn_with_metric,
-    precomputed_knn,
+    DistanceMetric, KnnError, Neighbor, PrecomputedKnnError, dense_knn_counting_cutoff,
+    exhaustive_knn_with_metric, precomputed_knn,
 };
 
 pub use crate::fuzzy_graph::supplied_neighbors::{
@@ -83,7 +84,8 @@ impl From<PrecomputedKnnError> for DenseGraphFitError {
 ///
 /// `data` must contain exactly `n_rows * n_features` finite `f32` values. The
 /// requested `k` is passed unchanged to exhaustive search and therefore must
-/// be in `1..=n_rows`; this graph-only path does not add or remove neighbors.
+/// be in `1..=n_rows`. For cosine and correlation, the graph omits distances
+/// of two or more and accepts ranked rows that omit self at a tie.
 /// The selected `metric` determines the distances used for neighbor ranking.
 /// The returned graph is canonical CSR with strictly ascending columns in
 /// every row and no diagonal entries.
@@ -103,9 +105,10 @@ pub fn fit_dense_graph(
 
 /// Fit a dense fuzzy graph with explicit graph settings when provided.
 ///
-/// The neighbors follow [`fit_dense_graph`]. Passing `Some(options)` uses
-/// [`fuzzy_simplicial_set_with_options`]. Passing `None` uses the original
-/// graph fit.
+/// The neighbors follow [`fit_dense_graph`]. Cosine and correlation use the
+/// given options or [`GraphOptions::default`]. For the other metrics, passing
+/// `Some(options)` uses [`fuzzy_simplicial_set_with_options`] and passing
+/// `None` uses [`fuzzy_simplicial_set`].
 pub fn fit_dense_graph_with_options(
     data: &[f32],
     n_rows: usize,
@@ -114,8 +117,63 @@ pub fn fit_dense_graph_with_options(
     metric: DistanceMetric,
     options: Option<GraphOptions>,
 ) -> Result<CsrGraph, DenseGraphFitError> {
+    if let Some(cutoff) = metric.default_disconnection_distance() {
+        return fit_dense_graph_with_cutoff(
+            data,
+            n_rows,
+            n_features,
+            k,
+            metric,
+            cutoff,
+            options.unwrap_or_default(),
+        )
+        .map(|(graph, _)| graph);
+    }
     let neighbors = exhaustive_knn_with_metric(data, n_rows, n_features, k, metric)?;
     Ok(build_fitted_graph(&neighbors, options)?)
+}
+
+/// Fit from ranked dense neighbors with an inclusive distance cutoff.
+///
+/// Returns canonical CSR and the number of excluded entries across all ordered
+/// row pairs. Cut neighbors remain empty slots for the scale target. Rounded
+/// angular distances can precede the diagonal, and an equal-distance cutoff
+/// can exclude the diagonal from the ranked list. The diagonal never emits
+/// a membership.
+pub fn fit_dense_graph_with_cutoff(
+    data: &[f32],
+    n_rows: usize,
+    n_features: usize,
+    k: usize,
+    metric: DistanceMetric,
+    cutoff: f32,
+    options: GraphOptions,
+) -> Result<(CsrGraph, usize), DenseGraphFitError> {
+    let (neighbors, removed) =
+        dense_knn_counting_cutoff(data, n_rows, n_features, k, metric, cutoff)?;
+    let mut distances = Vec::with_capacity(n_rows * k);
+    for (row, neighbors) in neighbors.iter().enumerate() {
+        for (position, &Neighbor { index, distance }) in neighbors.iter().enumerate() {
+            if distance >= cutoff {
+                distances.push(f32::INFINITY);
+            } else if distance.is_finite() {
+                distances.push(distance);
+            } else {
+                return Err(GraphError::InvalidDistance {
+                    row,
+                    position,
+                    index,
+                    distance,
+                }
+                .into());
+            }
+        }
+    }
+    let indices = neighbors.iter().flatten().map(|neighbor| neighbor.index);
+    Ok((
+        build_ranked_graph(indices, &distances, n_rows, k, k, options),
+        removed,
+    ))
 }
 
 /// Errors returned while fitting a dense categorical fuzzy graph.

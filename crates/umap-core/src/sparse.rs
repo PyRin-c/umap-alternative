@@ -18,7 +18,10 @@ pub enum SparseDistanceMetric {
 
 impl From<DistanceMetric> for SparseDistanceMetric {
     fn from(metric: DistanceMetric) -> Self {
-        Self::Dense(metric)
+        match metric {
+            DistanceMetric::Cosine => Self::Cosine,
+            _ => Self::Dense(metric),
+        }
     }
 }
 
@@ -64,6 +67,8 @@ pub enum SparseKnnError {
     InvalidK { k: usize, n_rows: usize },
     /// A stored feature value must be finite.
     NonFiniteValue { position: usize, value: f32 },
+    /// Correlation requires mean-centering the implicit coordinates.
+    UnsupportedCorrelation,
 }
 
 impl fmt::Display for SparseKnnError {
@@ -123,6 +128,9 @@ impl fmt::Display for SparseKnnError {
                     formatter,
                     "CSR value at entry {position} is not finite: {value}"
                 )
+            }
+            Self::UnsupportedCorrelation => {
+                formatter.write_str("correlation is unsupported for CSR features")
             }
         }
     }
@@ -193,7 +201,13 @@ pub fn exhaustive_csr_knn(
     k: usize,
     metric: impl Into<SparseDistanceMetric>,
 ) -> Result<Vec<Vec<Neighbor>>, SparseKnnError> {
-    let metric = metric.into();
+    let metric = match metric.into() {
+        SparseDistanceMetric::Dense(DistanceMetric::Cosine) => SparseDistanceMetric::Cosine,
+        SparseDistanceMetric::Dense(DistanceMetric::Correlation) => {
+            return Err(SparseKnnError::UnsupportedCorrelation);
+        }
+        metric => metric,
+    };
     if n_rows.checked_add(1) != Some(indptr.len()) || indices.len() != data.len() {
         return Err(SparseKnnError::InvalidShape {
             n_rows,
@@ -419,6 +433,9 @@ fn sparse_distance(left: CsrRow<'_>, right: CsrRow<'_>, metric: DistanceMetric) 
         }
         DistanceMetric::Chebyshev => {
             differences.fold(0.0_f64, |maximum, difference| maximum.max(difference.abs())) as f32
+        }
+        DistanceMetric::Cosine | DistanceMetric::Correlation => {
+            unreachable!("CSR metric was dispatched before merging coordinates")
         }
     }
 }

@@ -10,8 +10,8 @@ use umap_core::embedding::{
     fit_dense_embedding_seeded_with_graph_options, fit_graph_embedding_with_rng,
 };
 use umap_core::fit::{
-    fit_dense_categorical_graph_with_options, fit_dense_graph_with_options,
-    fit_precomputed_graph_with_options, fit_supplied_neighbors_graph,
+    fit_dense_categorical_graph_with_options, fit_dense_graph_with_cutoff,
+    fit_dense_graph_with_options, fit_precomputed_graph_with_options, fit_supplied_neighbors_graph,
 };
 use umap_core::fuzzy_graph::{CsrGraph, GraphOptions};
 use umap_core::inverse::{
@@ -20,7 +20,7 @@ use umap_core::inverse::{
 };
 use umap_core::neighbors::DistanceMetric;
 use umap_core::rng::Mt19937;
-use umap_core::sparse::{SparseDistanceMetric, fit_sparse_graph_with_options};
+use umap_core::sparse::fit_sparse_graph_with_options;
 use umap_core::transform::{
     CooGraph, DenseEmbeddingTransformConfig, transform_dense_embedding_with_options,
     transform_dense_graph_with_cutoff,
@@ -73,16 +73,16 @@ fn csr_components(graph: CsrGraph) -> CsrComponents {
 
 /// Parse the metric names supported by the feature graph compatibility paths.
 ///
-/// The aliases match the names commonly used for these three distance
-/// functions by the Python-facing UMAP API: L1/city-block, L2, and the
-/// infinity norm. Metric names are case-insensitive at this boundary.
+/// Metric names and aliases are case-insensitive at this boundary.
 fn parse_metric(metric: &str) -> PyResult<DistanceMetric> {
     match metric.to_ascii_lowercase().as_str() {
         "euclidean" | "l2" => Ok(DistanceMetric::Euclidean),
         "manhattan" | "l1" | "cityblock" | "taxicab" => Ok(DistanceMetric::Manhattan),
         "chebyshev" | "linfty" | "linfinity" | "max" => Ok(DistanceMetric::Chebyshev),
+        "cosine" => Ok(DistanceMetric::Cosine),
+        "correlation" => Ok(DistanceMetric::Correlation),
         _ => Err(PyValueError::new_err(format!(
-            "unsupported metric {metric:?}; expected Euclidean, Manhattan, or Chebyshev"
+            "unsupported metric {metric:?}"
         ))),
     }
 }
@@ -120,6 +120,27 @@ fn _fit_dense_graph(
     .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+/// Fit a dense fuzzy graph and count entries excluded by the cutoff.
+#[pyfunction]
+#[pyo3(signature = (data, n_rows, n_features, k, metric, cutoff, *, graph_options=None))]
+#[allow(clippy::too_many_arguments)]
+fn _fit_dense_graph_with_cutoff(
+    py: Python<'_>,
+    data: Vec<f32>,
+    n_rows: usize,
+    n_features: usize,
+    k: usize,
+    metric: &str,
+    cutoff: f32,
+    graph_options: Option<(f64, f64)>,
+) -> PyResult<(CsrComponents, usize)> {
+    let metric = parse_metric(metric)?;
+    let options = parse_graph_options(graph_options)?.unwrap_or_default();
+    py.detach(|| fit_dense_graph_with_cutoff(&data, n_rows, n_features, k, metric, cutoff, options))
+        .map(|(graph, removed)| (csr_components(graph), removed))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// Fit a fuzzy graph from sorted CSR features and return its CSR data.
 #[pyfunction]
 #[pyo3(signature = (indptr, indices, data, shape, k, metric, *, graph_options=None))]
@@ -134,11 +155,7 @@ fn _fit_sparse_graph(
     metric: &str,
     graph_options: Option<(f64, f64)>,
 ) -> PyResult<CsrComponents> {
-    let metric = if metric.eq_ignore_ascii_case("cosine") {
-        SparseDistanceMetric::Cosine
-    } else {
-        parse_metric(metric)?.into()
-    };
+    let metric = parse_metric(metric)?;
     let (n_rows, n_features) = shape;
     let options = parse_graph_options(graph_options)?;
     py.detach(|| {
@@ -407,7 +424,9 @@ fn _transform_dense_graph(
         n_features,
         k,
         metric,
-        disconnection_distance.unwrap_or(f32::INFINITY),
+        disconnection_distance
+            .or_else(|| metric.default_disconnection_distance())
+            .unwrap_or(f32::INFINITY),
         options,
     )
     .map_err(|error| PyValueError::new_err(error.to_string()))?;
@@ -543,6 +562,7 @@ fn _inverse_transform_dense_embedding(
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", umap_core::VERSION)?;
     module.add_function(wrap_pyfunction!(_fit_dense_graph, module)?)?;
+    module.add_function(wrap_pyfunction!(_fit_dense_graph_with_cutoff, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_sparse_graph, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_embedding, module)?)?;
     module.add_function(wrap_pyfunction!(_update_dense_embedding, module)?)?;

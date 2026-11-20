@@ -51,6 +51,8 @@ Wheel は `target/wheels/` に生成されます。Python パッケージ名は 
 
 変換は Euclidean、Manhattan、Chebyshev と既存の別名に対応します。変換時の `local_connectivity` から1を引き、下限を0として外部入力のグラフに適用します。距離が等しい近傍は学習行の添字順で並べます。ビット単位の一致は記録済みの Euclidean fixture で検証しています。変換の対応範囲と公開 API の境界ケースは [変換の参照記録](reference/transform_reference.md) を参照してください。
 
+密な `cosine` と `correlation` は、グラフモードの学習と新しい入力の変換で利用できます。既定では距離が2以上の辺を除外します。Windows と Ubuntu でのビット比較と適用範囲は [密な角距離の参照記録](reference/dense_angular_reference.md) を参照してください。
+
 ## 独立実装と数値互換性
 
 実装側は公開論文と自前の仕様を参照し、設計判断の根拠を記録します。上流の実装コード・コメント・テストは閲覧や転用の対象から外します。クリーンルームで実装を担当する場合は、上流ソースの断片を含む過去の調査履歴も共有対象から外します。[UMAP 原論文](https://arxiv.org/abs/1802.03426)

@@ -20,6 +20,8 @@ fn metric_top_k_matches_full_sort() {
         DistanceMetric::Euclidean,
         DistanceMetric::Manhattan,
         DistanceMetric::Chebyshev,
+        DistanceMetric::Cosine,
+        DistanceMetric::Correlation,
     ] {
         assert_top_k(
             |query, candidate| {
@@ -40,6 +42,29 @@ fn metric_top_k_matches_full_sort() {
                         let dx = f64::from(x) - f64::from(other_x);
                         let dy = f64::from(y) - f64::from(other_y);
                         dx.abs().max(dy.abs()) as f32
+                    }
+                    DistanceMetric::Cosine if query == candidate => 0.0,
+                    DistanceMetric::Cosine => {
+                        let left = f64::from(x * x) + f64::from(y * y);
+                        let right = f64::from(other_x * other_x) + f64::from(other_y * other_y);
+                        if left == 0.0 || right == 0.0 {
+                            return f32::from(u8::from(left != right));
+                        }
+                        let dot = f64::from(x * other_x) + f64::from(y * other_y);
+                        if dot.is_finite() {
+                            (1.0 - dot / (left * right).sqrt()) as f32
+                        } else {
+                            f32::NAN
+                        }
+                    }
+                    DistanceMetric::Correlation => {
+                        if x == y || other_x == other_y {
+                            f32::from(u8::from((x == y) != (other_x == other_y)))
+                        } else if (x > y) == (other_x > other_y) {
+                            0.0
+                        } else {
+                            2.0
+                        }
                     }
                 }
             },

@@ -31,6 +31,7 @@ _METRIC_ALIASES = {
     "linfinity": "chebyshev",
     "max": "chebyshev",
 }
+_ANGULAR_METRICS = ("cosine", "correlation")
 
 _TRUNCATION_WARNING = (
     "n_neighbors is larger than the dataset size; truncating to X.shape[0] - 1"
@@ -247,6 +248,8 @@ class UMAP(BaseEstimator, TransformerMixin):
     Manhattan, and Chebyshev. Sparse features also accept cosine. Sparse
     storage is normalized on a copy, preserving repeated CSR entries for cosine.
     Zero-distance ties that exclude a row's self neighbor raise ``ValueError``.
+    Dense graph fits also accept cosine and correlation. For these two metrics
+    the ranked neighbors may omit self, and the default distance cutoff is 2.
     A singleton graph fit has no ``graph_``.
     Graph ``transform`` requires dense features for both training and queries.
     It returns a float32 SciPy COO matrix with query rows and training columns
@@ -359,6 +362,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise ValueError("n_neighbors must be greater than 1")
 
         precomputed = metric == "precomputed"
+        angular = not sparse and metric in _ANGULAR_METRICS
         embedding_mode = self.transform_mode == "embedding"
         if sparse:
             if precomputed:
@@ -367,8 +371,8 @@ class UMAP(BaseEstimator, TransformerMixin):
                 raise TypeError("sparse input is not supported in embedding mode")
             if y is not None:
                 raise TypeError("sparse input is not supported for supervised fitting")
-        if embedding_mode and precomputed:
-            raise NotImplementedError("metric='precomputed' requires transform_mode='graph'")
+        if embedding_mode and (precomputed or angular):
+            raise NotImplementedError(f"metric={metric!r} requires transform_mode='graph'")
         if embedding_mode and y is not None:
             raise NotImplementedError("supervised embedding fit is not implemented")
         if precomputed and y is not None:
@@ -406,9 +410,13 @@ class UMAP(BaseEstimator, TransformerMixin):
             self._graph_transform_fit = transform_fit
         cutoff = self.disconnection_distance
         if cutoff is None:
-            cutoff = np.inf
+            cutoff = 2.0 if angular else np.inf
         elif not isinstance(cutoff, (int, float)):
             raise ValueError("disconnection_distance must either be None or a numeric.")
+        if angular and y is not None and self.disconnection_distance is not None:
+            raise NotImplementedError(
+                "disconnection_distance with computed neighbors requires unsupervised dense features"
+            )
         supplied = self._supplied_neighbors(n_rows, n_neighbors)
         if getattr(self, "output_dens", False) and embedding_mode and (
             metric != "euclidean" or supplied is not None or np.isfinite(cutoff)
@@ -435,7 +443,7 @@ class UMAP(BaseEstimator, TransformerMixin):
 
         embedding = None
         transform_error = None
-        transform_cutoff = None
+        transform_cutoff = cutoff if angular else None
         removed = 0
         graph_from_neighbors = supplied is not None or cutoff < np.inf
         if supplied is not None:
@@ -451,7 +459,12 @@ class UMAP(BaseEstimator, TransformerMixin):
             removed = np.count_nonzero(cut)
             components = _fit_neighbor_arrays(indices, distances, requested_neighbors, graph_options)
             transform_fit = (X_checked.copy() if precomputed else X_checked, metric)
-        elif cutoff < np.inf:
+        elif angular and y is None:
+            components, removed = _native._fit_dense_graph_with_cutoff(
+                X_checked.ravel().tolist(), n_rows, n_features, n_neighbors, metric, cutoff,
+                graph_options=graph_options,
+            )
+        elif not angular and cutoff < np.inf:
             if sparse or precomputed or y is not None:
                 raise NotImplementedError(
                     "disconnection_distance with computed neighbors requires unsupervised dense features"
@@ -961,7 +974,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         if self.metric == "precomputed":
             return self.metric
         name = self.metric.lower()
-        if sparse and name == "cosine":
+        if name == "cosine" or (name == "correlation" and not sparse):
             return name
         if name not in _METRIC_ALIASES:
             raise ValueError("metric is neither callable nor a recognised string")

@@ -27,6 +27,10 @@ pub enum DistanceMetric {
     Manhattan,
     /// Chebyshev (L-infinity) distance.
     Chebyshev,
+    /// One minus cosine similarity.
+    Cosine,
+    /// One minus the cosine similarity of mean-centered rows.
+    Correlation,
 }
 
 /// Input validation failures for [`exhaustive_knn`] and
@@ -157,10 +161,14 @@ pub fn exhaustive_knn(
 /// Manhattan
 /// distances sum the absolute `f64` coordinate differences, and Chebyshev
 /// distances select the largest absolute `f64` coordinate difference; both are
-/// rounded to `f32` for the returned neighbor record. Ties are ordered
+/// rounded to `f32` for the returned neighbor record. Cosine accumulates
+/// float32 coordinate products in float64. Correlation centers the rows and
+/// computes products and sums in float64. Both use distance zero when both
+/// norms are zero and distance one when only one norm is zero. Rounding can
+/// give a small negative distance between nearly parallel rows. Ties are ordered
 /// deterministically by ascending candidate row index after [`f32::total_cmp`]
-/// distance ordering. Matrix values must be finite; reject non-finite values
-/// rather than returning an undefined distance.
+/// distance ordering. Matrix values must be finite. Cosine products can
+/// overflow at large magnitudes, yielding NaN for some candidate distances.
 pub fn exhaustive_knn_with_metric(
     data: &[f32],
     n_rows: usize,
@@ -168,6 +176,18 @@ pub fn exhaustive_knn_with_metric(
     k: usize,
     metric: DistanceMetric,
 ) -> Result<Vec<Vec<Neighbor>>, KnnError> {
+    dense_knn_counting_cutoff(data, n_rows, n_features, k, metric, f32::INFINITY)
+        .map(|(neighbors, _)| neighbors)
+}
+
+pub(crate) fn dense_knn_counting_cutoff(
+    data: &[f32],
+    n_rows: usize,
+    n_features: usize,
+    k: usize,
+    metric: DistanceMetric,
+    cutoff: f32,
+) -> Result<(Vec<Vec<Neighbor>>, usize), KnnError> {
     let expected_values = n_rows.checked_mul(n_features);
     if expected_values != Some(data.len()) {
         return Err(KnnError::InvalidShape {
@@ -190,19 +210,28 @@ pub fn exhaustive_knn_with_metric(
         return Err(KnnError::NonFiniteValue { index, value });
     }
 
-    Ok(collect_neighbors(n_rows, k, |query_index, candidates| {
+    let mut removed = 0;
+    let angular = metric.is_angular();
+    let neighbors = collect_neighbors(n_rows, k, |query_index, candidates| {
         let query_start = query_index * n_features;
         let query = &data[query_start..query_start + n_features];
 
         for candidate_index in 0..n_rows {
             let candidate_start = candidate_index * n_features;
             let candidate = &data[candidate_start..candidate_start + n_features];
+            let distance = if angular && candidate_index == query_index {
+                0.0
+            } else {
+                metric.distance(query, candidate)
+            };
+            removed += usize::from(distance >= cutoff);
             candidates.push(Neighbor {
                 index: candidate_index,
-                distance: metric.distance(query, candidate),
+                distance,
             });
         }
-    }))
+    });
+    Ok((neighbors, removed))
 }
 
 /// Find the `k` nearest rows for every row of a precomputed distance matrix.
@@ -330,11 +359,68 @@ fn compare_neighbors(left: &Neighbor, right: &Neighbor) -> Ordering {
 }
 
 impl DistanceMetric {
+    pub(crate) fn is_angular(self) -> bool {
+        matches!(self, Self::Cosine | Self::Correlation)
+    }
+
+    /// Return the finite default cutoff for cosine and correlation graphs.
+    pub fn default_disconnection_distance(self) -> Option<f32> {
+        self.is_angular().then_some(2.0)
+    }
+
     pub(crate) fn distance(self, left: &[f32], right: &[f32]) -> f32 {
         match self {
             Self::Euclidean => euclidean_distance(left, right),
             Self::Manhattan => manhattan_distance(left, right),
             Self::Chebyshev => chebyshev_distance(left, right),
+            Self::Cosine => cosine_distance(left, right),
+            Self::Correlation => correlation_distance(left, right),
+        }
+    }
+}
+
+fn cosine_distance(left: &[f32], right: &[f32]) -> f32 {
+    let mut dot = 0.0_f64;
+    let mut left_squared = 0.0_f64;
+    let mut right_squared = 0.0_f64;
+    for (&x, &y) in left.iter().zip(right) {
+        dot += f64::from(x * y);
+        left_squared += f64::from(x * x);
+        right_squared += f64::from(y * y);
+    }
+    angular_distance(dot, left_squared, right_squared)
+}
+
+fn correlation_distance(left: &[f32], right: &[f32]) -> f32 {
+    if left.is_empty() {
+        return 0.0;
+    }
+    let left_mean = left.iter().map(|&x| f64::from(x)).sum::<f64>() / left.len() as f64;
+    let right_mean = right.iter().map(|&y| f64::from(y)).sum::<f64>() / right.len() as f64;
+    let mut dot = 0.0_f64;
+    let mut left_squared = 0.0_f64;
+    let mut right_squared = 0.0_f64;
+    for (&x, &y) in left.iter().zip(right) {
+        let x = f64::from(x) - left_mean;
+        let y = f64::from(y) - right_mean;
+        dot += x * y;
+        left_squared += x * x;
+        right_squared += y * y;
+    }
+    angular_distance(dot, left_squared, right_squared)
+}
+
+fn angular_distance(dot: f64, left_squared: f64, right_squared: f64) -> f32 {
+    match (left_squared == 0.0, right_squared == 0.0) {
+        (true, true) => 0.0,
+        (true, false) | (false, true) => 1.0,
+        (false, false) => {
+            let distance = (1.0 - dot / (left_squared * right_squared).sqrt()) as f32;
+            if distance.is_nan() {
+                f32::NAN
+            } else {
+                distance
+            }
         }
     }
 }
@@ -431,6 +517,30 @@ mod tests {
         let neighbors = exhaustive_knn(&data, 2, 2, 2).expect("valid matrix");
         assert_eq!(neighbors[0][1].distance.to_bits(), 0x3e68_2827);
         assert_eq!(neighbors[1][1].distance.to_bits(), 0x3e68_2827);
+    }
+
+    #[test]
+    fn cosine_uses_f32_products_and_norm_degeneracy() {
+        let cosine = DistanceMetric::Cosine;
+        assert_eq!(cosine.distance(&[0.1; 3], &[1.0; 3]).to_bits(), 0x32af_ffff);
+        assert_eq!(cosine.distance(&[0.0; 3], &[-0.0; 3]), 0.0);
+        assert_eq!(cosine.distance(&[0.0; 3], &[1.0; 3]), 1.0);
+        assert_eq!(cosine.distance(&[1.0, 0.0, -1.0], &[-1.0, 0.0, 1.0]), 2.0);
+    }
+
+    #[test]
+    fn correlation_centers_each_row_and_handles_constant_rows() {
+        let correlation = DistanceMetric::Correlation;
+        assert_eq!(correlation.distance(&[1.0; 3], &[-2.0; 3]), 0.0);
+        assert_eq!(correlation.distance(&[1.0; 3], &[1.0, 0.0, -1.0]), 1.0);
+        assert_eq!(
+            correlation.distance(&[1.0, 0.0, -1.0], &[3.0, 2.0, 1.0]),
+            0.0
+        );
+        assert_eq!(
+            correlation.distance(&[1.0, 0.0, -1.0], &[1.0, 2.0, 3.0]),
+            2.0
+        );
     }
 
     #[test]

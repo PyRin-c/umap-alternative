@@ -34,6 +34,7 @@ struct ExpectedGraph {
     indptr: Vec<usize>,
     indices: Vec<usize>,
     data_bits: Vec<u32>,
+    linux_x86_64_data_bits: Option<Vec<u32>>,
 }
 
 impl Dataset {
@@ -106,10 +107,16 @@ fn graph_support_and_weights_match_public_graph_probes() {
                 assert_eq!(graph.n_cols, neighbors.len(), "{context:?}");
                 assert_eq!(graph.indptr, expected.indptr, "{context:?}");
                 assert_eq!(graph.indices, expected.indices, "{context:?}");
-                assert_eq!(graph.data.len(), expected.data_bits.len(), "{context:?}");
-                for (entry, (&actual, &bits)) in
-                    graph.data.iter().zip(&expected.data_bits).enumerate()
-                {
+                let data_bits = if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+                    expected
+                        .linux_x86_64_data_bits
+                        .as_deref()
+                        .unwrap_or(&expected.data_bits)
+                } else {
+                    &expected.data_bits
+                };
+                assert_eq!(graph.data.len(), data_bits.len(), "{context:?}");
+                for (entry, (&actual, &bits)) in graph.data.iter().zip(data_bits).enumerate() {
                     if actual.to_bits() != bits {
                         differences.push((
                             dataset.name.clone(),

@@ -2,6 +2,7 @@
 
 pub mod fuzzy_graph;
 pub mod neighbors;
+pub mod rng;
 
 /// Version of the Rust implementation.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

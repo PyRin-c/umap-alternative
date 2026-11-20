@@ -54,8 +54,11 @@ impl DenseEmbeddingInit {
 /// does not infer them from a UMAP spread/minimum-distance policy.  The dense
 /// input is interpreted using `n_neighbors`, `metric`, and the caller's
 /// `n_rows`/`n_features` arguments to [`fit_dense_embedding`].
+/// Use `DenseEmbeddingConfig<f64>` to supply the curve parameters and initial
+/// learning rate at full attraction precision. The default `f32` type remains
+/// available for callers with single-precision settings.
 #[derive(Clone, Debug, PartialEq)]
-pub struct DenseEmbeddingConfig {
+pub struct DenseEmbeddingConfig<T = f32> {
     /// Number of neighbors retained for each input row.
     pub n_neighbors: usize,
     /// Distance metric used by exhaustive dense neighbor search.
@@ -63,11 +66,11 @@ pub struct DenseEmbeddingConfig {
     /// Number of output coordinates per row.
     pub n_components: usize,
     /// Positive curve coefficient used by the layout objective.
-    pub a: f32,
+    pub a: T,
     /// Positive curve exponent used by the layout objective.
-    pub b: f32,
+    pub b: T,
     /// Initial optimizer learning rate.
-    pub learning_rate: f32,
+    pub learning_rate: T,
     /// Number of optimizer epochs.
     pub n_epochs: usize,
     /// Non-negative scale for negative-example updates.
@@ -163,7 +166,7 @@ pub fn fit_dense_embedding<F>(
     data: &[f32],
     n_rows: usize,
     n_features: usize,
-    config: &DenseEmbeddingConfig,
+    config: &DenseEmbeddingConfig<impl Copy + Into<f64>>,
     negative_sampler: F,
 ) -> Result<DenseEmbedding, DenseEmbeddingFitError>
 where

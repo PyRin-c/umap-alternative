@@ -88,6 +88,11 @@ impl From<SamplingError> for OptimizeError {
 /// negative samples per positive sample and is used to derive each edge's
 /// negative interval.
 ///
+/// The attractive curve and the learning-rate decay use `f64`, including
+/// when the caller supplies `f32` values. Each non-self negative sample
+/// converts the curve and the epoch's learning rate to `f32` for validation
+/// and use by the negative-example kernel.
+///
 /// The published unit-edge checkpoints establish the timing at the boundary
 /// needed here: rate one has no negative draw at `n_epochs = 2` and its first
 /// draw at `n_epochs = 3`; rate two has one draw at `n_epochs = 2`.  Those
@@ -106,9 +111,9 @@ pub fn optimize_csr<F>(
     embedding: &mut [f32],
     n_components: usize,
     graph: &CsrGraph,
-    a: f32,
-    b: f32,
-    learning_rate: f32,
+    a: impl Into<f64>,
+    b: impl Into<f64>,
+    learning_rate: impl Into<f64>,
     repulsion_strength: f32,
     negative_sample_rate: f64,
     n_epochs: usize,
@@ -117,6 +122,7 @@ pub fn optimize_csr<F>(
 where
     F: FnMut(usize) -> usize,
 {
+    let (a, b, learning_rate) = (a.into(), b.into(), learning_rate.into());
     validate_csr_inputs(embedding, n_components, graph, a, b, learning_rate)?;
     validate_repulsion_strength(repulsion_strength)?;
     // Constructing a harmless unit-interval cursor validates the rate even
@@ -195,10 +201,10 @@ where
                         n_components,
                         row,
                         vertex,
-                        a,
-                        b,
+                        a as f32,
+                        b as f32,
                         repulsion_strength,
-                        alpha,
+                        alpha as f32,
                     )?;
                 }
             }
@@ -206,7 +212,7 @@ where
 
         // Keep alpha fixed for every edge in this epoch, then decay it for
         // the next epoch.  n_epochs == 0 never enters this loop.
-        alpha = (f64::from(learning_rate) * (1.0 - (epoch_as_f64 / n_epochs as f64))) as f32;
+        alpha = learning_rate * (1.0 - epoch_as_f64 / n_epochs as f64);
     }
 
     Ok(())
@@ -273,9 +279,9 @@ mod tests {
             &mut embedding,
             1,
             &graph,
-            1.0,
-            1.0,
-            0.1,
+            1.0_f32,
+            1.0_f32,
+            0.1_f32,
             1.0,
             1.0,
             2,

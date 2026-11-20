@@ -1,5 +1,8 @@
 # Native approximate queries over a fixed training graph
 
+The follow-up reproduces the wide zero-epsilon case and measures prepared
+tree queries. [Prepared approximate query reference](prepared_approximate_query_reference.md)
+
 The baseline is `36fe8c6`. This experiment isolates held-out queries from
 projection pivots by supplying the same directed training rows to the public
 NNDescent constructor and to Rust's `DenseApproximateQueryIndex`. The wheel

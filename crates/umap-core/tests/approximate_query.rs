@@ -1,4 +1,5 @@
 use std::hint::black_box;
+use std::num::NonZeroUsize;
 use std::time::Instant;
 
 use serde::Deserialize;
@@ -59,6 +60,52 @@ fn squared_epsilon_crossing_can_reach_a_second_hop_in_either_direction() {
         assert_eq!(expanded.indices, [9]);
         assert_eq!(expanded.distances, [0.0]);
     }
+}
+
+#[test]
+fn a_single_leaf_offers_all_rows_even_above_the_training_width() {
+    let data: Vec<f32> = (0..25).map(|row| (row * row) as f32).collect();
+    let search =
+        DenseApproximateQueryIndex::from_training_graph(&data, 25, 1, &[-1; 125], 5, 42, None)
+            .unwrap()
+            .with_projection_tree(42, NonZeroUsize::new(25).unwrap());
+    for epsilon in [0.0, f64::from_bits(1), 0.12] {
+        let actual = search.query(&[82.5, 82.5], 2, 6, epsilon).unwrap();
+        assert_eq!(actual.indices, [9, 10, 8, 7, 11, 6, 9, 10, 8, 7, 11, 6]);
+        assert_eq!(
+            actual.distances,
+            [1.5, 17.5, 18.5, 33.5, 38.5, 46.5].repeat(2)
+        );
+    }
+}
+
+#[test]
+fn zero_epsilon_can_leave_vacancies_after_the_first_neighbor_group() {
+    let mut data = [1000.0; 25];
+    data[6] = 10.0;
+    data[18] = 34.0;
+    data[24] = 36.0;
+    data[23] = 32.0;
+    for (value, index) in [0, 1, 2, 3].into_iter().enumerate() {
+        data[index] = 100.0 + value as f32;
+    }
+    let mut graph = [-1; 125];
+    for index in [0, 1, 2, 3] {
+        graph[index * 5] = 6;
+    }
+    let search =
+        DenseApproximateQueryIndex::from_training_graph(&data, 25, 1, &graph, 5, 42, None).unwrap();
+    assert_eq!(
+        search.query(&[0.0], 1, 13, 0.0).unwrap().indices,
+        [6, 23, 18, 24, 0, 1, -1, -1, -1, -1, -1, -1, -1]
+    );
+    assert_eq!(
+        search
+            .query(&[0.0], 1, 13, f64::from_bits(1))
+            .unwrap()
+            .indices,
+        [6, 23, 18, 24, 0, 1, 2, 3, -1, -1, -1, -1, -1]
+    );
 }
 
 #[derive(Deserialize)]
@@ -124,6 +171,186 @@ struct Coo {
     rows: Vec<usize>,
     columns: Vec<usize>,
     bits: Vec<u32>,
+}
+
+#[derive(Deserialize)]
+struct PreparedObservations {
+    cases: Vec<PreparedCase>,
+}
+
+#[derive(Deserialize)]
+struct PreparedCase {
+    name: String,
+    n: usize,
+    d: usize,
+    cap: usize,
+    seed: u32,
+    train_bits: Vec<u32>,
+    query_bits: Vec<u32>,
+    edge_bits: Option<Vec<u32>>,
+    graph: Vec<i32>,
+    no_tree: Vec<Sweep>,
+    prepared: Option<Vec<Sweep>>,
+    underflow: Option<Vec<Sweep>>,
+    leaf: Option<NonZeroUsize>,
+    native_seed: Option<u32>,
+    prepared_ns: Option<u64>,
+    no_tree_ns: Option<u64>,
+}
+
+#[test]
+#[ignore = "requires the capture from reference/probe_prepared_approximate_query.py"]
+fn compare_prepared_tree_with_public_wheel() {
+    let path = std::env::var_os("PREPARED_QUERY_OBSERVATIONS").unwrap();
+    let observations: PreparedObservations =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    for case in observations.cases {
+        let decode = |bits: Vec<u32>| bits.into_iter().map(f32::from_bits).collect::<Vec<_>>();
+        let data = decode(case.train_bits);
+        let queries = decode(case.query_bits);
+        let edge_weights = case.edge_bits.map(decode);
+        let n_queries = queries.len() / case.d;
+        let build = || {
+            DenseApproximateQueryIndex::from_training_graph(
+                &data,
+                case.n,
+                case.d,
+                &case.graph,
+                case.cap,
+                case.seed,
+                edge_weights.as_deref(),
+            )
+            .unwrap()
+        };
+        let no_tree = build();
+        let mut no_tree_slots = 0;
+        let mut no_tree_matches = 0;
+        for sweep in &case.no_tree {
+            let actual = no_tree
+                .query(&queries, n_queries, sweep.width, sweep.epsilon)
+                .unwrap();
+            no_tree_slots += actual.indices.len();
+            no_tree_matches += actual
+                .indices
+                .iter()
+                .zip(&actual.distances)
+                .zip(sweep.ranks.indices.iter().zip(&sweep.ranks.bits))
+                .filter(|((idx, dist), (expected, bits))| {
+                    idx == expected && dist.to_bits() == **bits
+                })
+                .count();
+        }
+        println!(
+            "{} no tree exact {no_tree_matches}/{no_tree_slots}",
+            case.name
+        );
+        assert_eq!(no_tree_matches, no_tree_slots, "{}", case.name);
+        if let Some(prepared) = case.prepared {
+            let index = build().with_projection_tree(case.native_seed.unwrap(), case.leaf.unwrap());
+            let mut ordered = 0;
+            let mut baseline = 0;
+            let mut slots = 0;
+            let mut shared = 0;
+            let mut shared_bits = 0;
+            let mut finite = 0;
+            let mut first_hits = 0;
+            let mut wheel_changed = 0;
+            let mut estimator_slots = 0;
+            let mut estimator_matches = 0;
+            for (sweep, plain) in prepared.into_iter().zip(case.no_tree) {
+                let width = sweep.width;
+                let actual = index
+                    .query(&queries, n_queries, width, sweep.epsilon)
+                    .unwrap();
+                slots += actual.indices.len();
+                for row in 0..n_queries {
+                    let start = row * width;
+                    let end = start + width;
+                    let native = &actual.indices[start..end];
+                    let want = &sweep.ranks.indices[start..end];
+                    let no_tree = &plain.ranks.indices[start..end];
+                    let matches = native.iter().zip(want).filter(|(a, b)| a == b).count();
+                    ordered += matches;
+                    if width == 5 && sweep.epsilon == 0.12 {
+                        estimator_matches += matches;
+                        estimator_slots += width;
+                    }
+                    if case.name == "one_split" && width == 1 && sweep.epsilon == 0.0 {
+                        assert_eq!(native, want, "query row {row}");
+                    }
+                    if case.name == "one_split" && width == 5 && sweep.epsilon == 0.0 && row == 4 {
+                        println!(
+                            "  one-split first Gaussian query native {native:?} wheel {want:?}"
+                        );
+                    }
+                    baseline += no_tree.iter().zip(want).filter(|(a, b)| a == b).count();
+                    wheel_changed += usize::from(want != no_tree);
+                    first_hits += usize::from(native[0] == want[0]);
+                    for (offset, &candidate) in want.iter().enumerate().filter(|(_, id)| **id >= 0)
+                    {
+                        finite += 1;
+                        if let Some(rank) = native.iter().position(|&id| id == candidate) {
+                            shared += 1;
+                            shared_bits += usize::from(
+                                actual.distances[start + rank].to_bits()
+                                    == sweep.ranks.bits[start + offset],
+                            );
+                        }
+                    }
+                }
+            }
+            println!(
+                "  prepared ordered {ordered}/{slots}, no-tree baseline {baseline}/{slots}, support {shared}/{finite}, shared bits {shared_bits}/{shared}, first {first_hits}, wheel changed {wheel_changed} rows"
+            );
+            println!(
+                "  prepared width-five epsilon-0.12 ordered {estimator_matches}/{estimator_slots}"
+            );
+            assert_eq!(shared_bits, shared, "{}", case.name);
+            if case.name.ends_with("_one_leaf") {
+                assert_eq!(ordered, slots, "{}", case.name);
+            }
+            if let Some(underflow) = case.underflow {
+                let filled = |ids: &[i32]| ids.iter().filter(|&&id| id >= 0).count();
+                for sweep in underflow {
+                    let actual = index
+                        .query(&queries, n_queries, sweep.width, sweep.epsilon)
+                        .unwrap();
+                    assert_eq!(
+                        filled(&actual.indices),
+                        filled(&sweep.ranks.indices),
+                        "{}",
+                        case.name
+                    );
+                    println!(
+                        "  prepared epsilon {:e} width {} finite native {} wheel {}",
+                        sweep.epsilon,
+                        sweep.width,
+                        filled(&actual.indices),
+                        filled(&sweep.ranks.indices)
+                    );
+                }
+            }
+            let timing = |search: &DenseApproximateQueryIndex<'_>| {
+                let query = || black_box(search.query(&queries, n_queries, 5, 0.12).unwrap());
+                query();
+                let mut samples = [0; 41];
+                for sample in &mut samples {
+                    let start = Instant::now();
+                    query();
+                    *sample = start.elapsed().as_nanos();
+                }
+                samples.sort_unstable();
+                samples[20]
+            };
+            println!(
+                "  median ns no-tree Rust {} wheel {}, prepared Rust {} wheel {}",
+                timing(&no_tree),
+                case.no_tree_ns.unwrap(),
+                timing(&index),
+                case.prepared_ns.unwrap()
+            );
+        }
+    }
 }
 
 #[test]
@@ -216,12 +443,7 @@ fn compare_fixed_training_graph_with_public_wheel() {
             assert_eq!(shared_bits, shared, "{}", case.name);
         }
         if let Some(wheel_ns) = case.wheel_median_ns {
-            assert_eq!(
-                ordered - zero_wide_matches,
-                slots - zero_wide_slots,
-                "{}",
-                case.name
-            );
+            assert_eq!(ordered, slots, "{}", case.name);
             assert_eq!(shared_bits, shared, "{}", case.name);
             let actual = search.query(&queries, n_queries, case.cap, 0.12).unwrap();
             let nearest = case.exact_nearest.unwrap();

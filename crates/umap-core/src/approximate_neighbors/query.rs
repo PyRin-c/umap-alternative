@@ -1,21 +1,26 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::num::NonZeroUsize;
 
-use super::{ApproximateSearchError, DenseRows, RankedNeighbors, approximate_squared_euclidean};
-use crate::neighbors::Neighbor;
+use super::{
+    ApproximateSearchError, DenseRows, RankedNeighbors, Tree, approximate_squared_euclidean,
+};
+use crate::neighbors::{DistanceMetric, Neighbor};
 use crate::rng::{Mt19937, draw_negative_seed, sample_absolute_vertex};
 
-/// Tree-free approximate Euclidean queries over a supplied training graph.
+/// Approximate Euclidean queries over a supplied training graph.
 ///
 /// The index uses an unpruned symmetric union of the supplied directed links.
-/// It isolates random entry points and the graph walk from projection-tree
-/// construction. The caller may pass the output to the ranked query handoff.
+/// Entry points are random by default. A caller may also prepare one native
+/// projection tree to seed the same walk. The output fits the ranked query
+/// handoff.
 pub struct DenseApproximateQueryIndex<'a> {
     data: DenseRows<'a>,
     edges: Vec<Vec<usize>>,
     training_width: usize,
     edge_floor: f64,
     rng: [i64; 3],
+    tree: Option<Tree>,
 }
 
 impl<'a> DenseApproximateQueryIndex<'a> {
@@ -89,7 +94,25 @@ impl<'a> DenseApproximateQueryIndex<'a> {
                 0.0
             },
             rng,
+            tree: None,
         })
+    }
+
+    /// Prepare one Euclidean projection tree with a caller-selected seed.
+    ///
+    /// The native tree is built independently of the supplied training links.
+    /// Its pivots use the Rust projection builder's random stream. Queries
+    /// offer the selected leaf's rows to the result heap and frontier.
+    pub fn with_projection_tree(mut self, seed: u32, leaf_size: NonZeroUsize) -> Self {
+        let mut rng = Mt19937::new(seed);
+        self.tree = Some(Tree::build(
+            self.data,
+            DistanceMetric::Euclidean,
+            (0..self.data.n_rows).collect(),
+            leaf_size.get(),
+            &mut rng,
+        ));
+        self
     }
 
     /// Search the supplied graph using a squared-distance priority queue.
@@ -101,7 +124,8 @@ impl<'a> DenseApproximateQueryIndex<'a> {
     ///
     /// A frontier point must beat the current cutoff strictly. Epsilon
     /// expands the worst retained squared distance by a fraction of its gap
-    /// from the smallest squared non-self training edge.
+    /// from the smallest squared non-self training edge. The cutoff rounds
+    /// to the same precision as the squared priorities.
     pub fn query(
         &self,
         queries: &[f32],
@@ -116,6 +140,13 @@ impl<'a> DenseApproximateQueryIndex<'a> {
         if width == 0 {
             return Err(ApproximateSearchError::RankShape);
         }
+        // A prepared search treats epsilon values that round to zero at
+        // priority precision as zero, including in the underfilled walk.
+        let epsilon = if self.tree.is_some() && epsilon as f32 == 0.0 {
+            0.0
+        } else {
+            epsilon
+        };
 
         let mut ranks = RankedNeighbors::with_capacity(n_query_rows, width)?;
         if n_query_rows == 0 {
@@ -129,14 +160,13 @@ impl<'a> DenseApproximateQueryIndex<'a> {
         };
         let mut result_heap = vec![missing; width];
         let mut frontier = BinaryHeap::new();
+        let mut vacant_candidates = Vec::new();
         let search_bound = |distance: f32| {
-            let distance = f64::from(distance);
-            // Preserve the unbounded search radius when no full result exists,
-            // including when epsilon is zero.
             if distance.is_infinite() {
                 distance
             } else {
-                distance + epsilon * (distance - self.edge_floor)
+                let distance = f64::from(distance);
+                (distance + epsilon * (distance - self.edge_floor)) as f32
             }
         };
         for (row, query) in queries.data.chunks_exact(queries.n_features).enumerate() {
@@ -156,21 +186,61 @@ impl<'a> DenseApproximateQueryIndex<'a> {
                 }
                 Ok(Some(Neighbor { index, distance }))
             };
-            for _ in 0..width.min(self.training_width) {
-                let index = sample_absolute_vertex(&mut rng, self.data.n_rows);
-                if let Some(point) = visit(index)? {
-                    sift_down(&mut result_heap, point);
-                    frontier.push(Reverse((point.distance.to_bits(), point.index)));
+            if let Some(tree) = &self.tree {
+                let leaf = tree.leaf(self.data, DistanceMetric::Euclidean, query);
+                for &index in leaf {
+                    if let Some(point) = visit(index)? {
+                        if point.distance < result_heap[0].distance {
+                            sift_down(&mut result_heap, point);
+                        }
+                        if leaf.len() != self.data.n_rows {
+                            frontier.push(Reverse((point.distance.to_bits(), point.index)));
+                        }
+                    }
+                }
+            } else {
+                for _ in 0..width.min(self.training_width) {
+                    let index = sample_absolute_vertex(&mut rng, self.data.n_rows);
+                    if let Some(point) = visit(index)? {
+                        sift_down(&mut result_heap, point);
+                        frontier.push(Reverse((point.distance.to_bits(), point.index)));
+                    }
                 }
             }
             let mut bound = search_bound(result_heap[0].distance);
             while let Some(Reverse((distance, index))) = frontier.pop() {
-                if f64::from(f32::from_bits(distance)) >= bound {
+                if f32::from_bits(distance) >= bound {
                     break;
+                }
+                if epsilon == 0.0 && bound.is_infinite() {
+                    vacant_candidates.clear();
+                    for &candidate in &self.edges[index] {
+                        if let Some(point) = visit(candidate)? {
+                            vacant_candidates.push(point);
+                        }
+                    }
+                    // The zero-epsilon, underfilled walk offers the first two
+                    // candidates of each complete group of four, and every
+                    // tail candidate. Once full, normal offers resume.
+                    let grouped = vacant_candidates.len() / 4 * 4;
+                    for (position, &point) in vacant_candidates.iter().enumerate() {
+                        if bound.is_infinite() && position < grouped && position % 4 >= 2 {
+                            continue;
+                        }
+                        if point.distance < bound {
+                            sift_down(&mut result_heap, point);
+                            bound = result_heap[0].distance;
+                            frontier.push(Reverse((point.distance.to_bits(), point.index)));
+                        }
+                    }
+                    if bound.is_infinite() && !vacant_candidates.is_empty() {
+                        break;
+                    }
+                    continue;
                 }
                 for &candidate in &self.edges[index] {
                     if let Some(point) = visit(candidate)?
-                        && f64::from(point.distance) < bound
+                        && point.distance < bound
                     {
                         if point.distance < result_heap[0].distance {
                             sift_down(&mut result_heap, point);

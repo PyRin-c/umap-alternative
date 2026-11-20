@@ -23,11 +23,10 @@ jobs:
       - run: uv run --no-sync cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: uv run --no-sync cargo test --workspace --locked
       - run: uv run --no-sync pytest
-      - run: uv run --no-sync maturin build --release --locked --interpreter python
+      - run: uv run --no-sync maturin build --release --locked --interpreter python --out target/wheel-verification
       - name: Verify the installed wheel and license
         shell: pwsh
         run: |
-          $wheel = Get-Item target/wheels/*.whl
           $check = @'
           from importlib.metadata import distribution
           from umap_alternative import __version__
@@ -42,7 +41,25 @@ jobs:
               for entry in package.files
           )
           '@
-          $check | uv --no-cache run --no-project --isolated --python (Get-Content .python-version) --with $wheel.FullName python -I -
+          $wheels = @(Get-ChildItem -Path target/wheel-verification -Filter *.whl -File)
+          if ($wheels.Count -ne 1) {
+            throw "Expected exactly one wheel in target/wheel-verification, found $($wheels.Count)."
+          }
+          $python = (Get-Content .python-version -Raw).Trim()
+          $arguments = @(
+            '--no-cache'
+            'run'
+            '--no-project'
+            '--isolated'
+            '--python'
+            $python
+            "--with=$($wheels[0].FullName)"
+            '--'
+            'python'
+            '-I'
+            '-'
+          )
+          $check | & uv @arguments
 
   reference:
     strategy:

@@ -17,6 +17,10 @@ dependencies = [
     "scikit-learn>=1.6",
 ]
 
+[project.urls]
+Repository = "https://github.com/PyRin-c/umap-alternative"
+Releases = "https://github.com/PyRin-c/umap-alternative/releases"
+
 [dependency-groups]
 dev = ["maturin==1.16.0", "pytest"]
 

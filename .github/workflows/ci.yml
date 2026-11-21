@@ -1,6 +1,14 @@
 name: CI
 
-on: [push, pull_request]
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_call:
+    inputs:
+      release_assets:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -34,23 +42,16 @@ jobs:
               -lumap_capi -o "target/release/$test"
             "target/release/$test"
           done
-      - name: Verify the C ABI on Windows
+      - name: Package and verify the Windows C ABI
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
-          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if (-not $vs) { throw 'Visual Studio with the C++ toolchain was not found.' }
-          Import-Module (Join-Path $vs 'Common7/Tools/Microsoft.VisualStudio.DevShell.dll')
-          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
-          foreach ($test in 'c_smoke', 'c_inverse_smoke') {
-            & cl.exe /nologo /std:c11 /W4 /WX /Icrates/umap-capi/include `
-              "crates/umap-capi/tests/$test.c" "/Fotarget/release/$test.obj" `
-              "/Fetarget/release/$test.exe" target/release/umap_capi.dll.lib
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            & "./target/release/$test.exe"
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+        run: ./scripts/package-windows-cabi.ps1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: inputs.release_assets && runner.os == 'Windows'
+        with:
+          name: release-cabi-win-x64
+          path: target/cabi-release/*.zip
+          if-no-files-found: error
 
   python-wheel:
     strategy:
@@ -58,6 +59,11 @@ jobs:
       matrix:
         os: [windows-2025, ubuntu-24.04]
         python: ['3.10', '3.11', '3.12', '3.13.12', '3.14', '3.15']
+        include:
+          - os: windows-2025
+            compatibility: pypi
+          - os: ubuntu-24.04
+            compatibility: manylinux_2_34
     runs-on: ${{ matrix.os }}
     env:
       UV_PYTHON: ${{ matrix.python }}
@@ -71,7 +77,7 @@ jobs:
           version: '0.13.9'
       - run: uv python install ${{ matrix.python }}
       - run: uv sync --locked --no-install-project
-      - run: uv run --no-sync maturin build --release --locked --compatibility pypi --interpreter python --out target/wheel-verification
+      - run: uv run --no-sync maturin build --release --locked --compatibility ${{ matrix.compatibility }} --interpreter python --out target/wheel-verification
       - name: Install and verify the wheel
         shell: pwsh
         run: |
@@ -98,6 +104,12 @@ jobs:
           $check | uv run --no-sync python -I -
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           uv run --no-sync python -I -m pytest -q tests/test_native.py tests/test_python_support.py
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: inputs.release_assets
+        with:
+          name: release-wheel-${{ matrix.os }}-${{ matrix.python }}
+          path: target/wheel-verification/*.whl
+          if-no-files-found: error
 
   reference:
     strategy:

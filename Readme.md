@@ -4,6 +4,30 @@ UMAP を Rust で独立実装するリポジトリです。固定した環境で
 
 `crates/umap-core` が Rust 本体の置き場で、`crates/umap-python` が Python 拡張です。Python Wheel は `UMAP(transform_mode="graph")` のグラフ構築と変換、および固定シードを使った密な入力の埋め込みを提供します。`crates/umap-capi` の C ABI は、密な入力のグラフ構築と固定シードによる埋め込みに加え、学習済みデータに対する新しい入力の埋め込み変換と有向 COO グラフを提供します。数値のビット単位の一致は、記録済みの fixture で検証しています。
 
+## 配布物
+
+初回のプレビュー版は [GitHub Releases](https://github.com/PyRin-c/umap-alternative/releases) から配布します。
+
+| 配布物 | 対応環境 |
+| --- | --- |
+| Python wheel | CPython 3.10〜3.15。Windows x64 または Linux x86-64（glibc 2.34 以上） |
+| C ABI ZIP | Windows x64。DLL、MSVC 用 `.lib`、C ヘッダー、サンプルを同梱 |
+
+Python では、OS とバージョンに合う wheel を取得して `python -m pip install <wheel のファイル名>` でインストールします。Windows x64・CPython 3.10 の例です。
+
+```powershell
+py -3.10 -m pip install ./umap_alternative-0.1.0-cp310-cp310-win_amd64.whl
+```
+
+```python
+from umap_alternative import UMAP
+
+points = [[0, 0], [1, 0.1], [0.2, 1.3], [1.7, 2.1], [2.2, 0.4]]
+embedding = UMAP(n_neighbors=3, n_jobs=1, random_state=42, compatibility_layout=True).fit_transform(points)
+```
+
+C/C++ アプリへの組み込みは [C ABI の使い方](crates/umap-capi/README.md)、公開版との互換性は [検証記録](reference/implementation_status.md)、配布物を作る手順は [リリース手順](docs/releasing.md) を参照してください。
+
 ## 開発環境
 
 - Rust 1.93.1 と Clippy、rustfmt は `rust-toolchain.toml` で指定しています。Rustup が取得します。

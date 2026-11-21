@@ -11,6 +11,7 @@ license = "MIT"
 license-files = ["LICENSE"]
 dynamic = ["version"]
 dependencies = [
+    "numba>=0.61",
     "numpy>=1.24",
     "scipy>=1.10",
     "scikit-learn>=1.2",

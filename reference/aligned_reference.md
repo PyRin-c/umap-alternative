@@ -203,11 +203,17 @@ unmodified public fit. The padded diagnostic remains in the fixture.
 
 The window-one and linked-last-row controls also match exactly.
 
-The public wheel returns a Numba typed list. This implementation uses a
-Python list of float32 NumPy arrays. Its graph-mode mappers expose the fuzzy
-CSR graphs. Connected dense compatibility layouts have coordinate fixtures.
-Modern layouts, additional nearest-neighbor backends, and mapper-specific
-embedding behavior are outside this stage.
+`fit_transform` returns the same `numba.typed.List` stored in
+`embeddings_`, matching the public wheel. Its elements are C-contiguous,
+two-dimensional NumPy arrays with dtype `float32`. A successful `update`
+appends in place, preserves the existing arrays, and returns `None`.
+The estimator serializes the layouts as ordinary arrays and restores the
+typed list on unpickling.
+
+The graph-mode mappers expose the fuzzy CSR graphs. Connected dense
+compatibility layouts have coordinate fixtures. Modern layouts, additional
+nearest-neighbor backends, and mapper-specific embedding behavior are outside
+this stage.
 
 ## Reproduction
 

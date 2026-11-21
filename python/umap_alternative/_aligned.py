@@ -51,6 +51,12 @@ def _graph_components(graph):
     return graph.shape, graph.indptr.tolist(), graph.indices.tolist(), graph.data.tolist()
 
 
+def _typed_embeddings(embeddings):
+    from numba.typed import List
+
+    return List([np.ascontiguousarray(layout, dtype=np.float32) for layout in embeddings])
+
+
 def _initial_layout(mapper, n_components, rng):
     graph = mapper.graph_.copy()
     graph.eliminate_zeros()
@@ -272,7 +278,7 @@ class AlignedUMAP(BaseEstimator):
             embeddings.append(current)
         n_epochs = max(200 if mapper.n_epochs is None else mapper.n_epochs for mapper in mappers)
         fallback = self._optimize(mappers, embeddings, links, n_epochs, 0, rng)
-        self.embeddings_ = embeddings
+        self.embeddings_ = _typed_embeddings(embeddings)
         self._links = links
         self._fallback_rng = fallback if fallback is not None else np.random.RandomState()
         self._fitted_mappers = mappers
@@ -280,8 +286,20 @@ class AlignedUMAP(BaseEstimator):
         return self
 
     def fit_transform(self, X, y=None, *, relations=_MISSING):
-        """Fit and return the same list of arrays exposed as ``embeddings_``."""
+        """Fit and return the Numba typed list exposed as ``embeddings_``."""
         return self.fit(X, y, relations=relations).embeddings_
+
+    def __getstate__(self):
+        state = super().__getstate__()
+        if "embeddings_" in state:
+            # Serialize the arrays so the estimator can still be pickled.
+            return {**state, "embeddings_": list(state["embeddings_"])}
+        return state
+
+    def __setstate__(self, state):
+        if "embeddings_" in state:
+            state = {**state, "embeddings_": _typed_embeddings(state["embeddings_"])}
+        super().__setstate__(state)
 
     def update(self, X, y=None, *, relations=_MISSING, **params):
         """Append a dataset while keeping all fitted slices fixed."""

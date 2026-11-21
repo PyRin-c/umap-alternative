@@ -2,10 +2,13 @@
 
 import json
 from pathlib import Path
+import pickle
 import platform
 
 import numpy as np
 import pytest
+from numba import typeof, types
+from numba.typed import List
 from scipy.sparse import csr_matrix
 from threadpoolctl import threadpool_limits
 
@@ -39,9 +42,16 @@ def inputs(family="base", relations="complete"):
 
 
 def assert_layout(layout, bits):
+    assert type(layout) is np.ndarray
     assert layout.dtype == np.float32
     assert layout.ndim == 2
+    assert layout.flags.c_contiguous
     np.testing.assert_array_equal(layout.view(np.uint32), bits)
+
+
+def assert_embedding_type(embeddings):
+    assert type(embeddings) is List
+    assert typeof(embeddings) == types.ListType(types.Array(types.float32, 2, "C"))
 
 
 def assert_graphs(model, expected):
@@ -66,6 +76,7 @@ def test_initial_alignment(name):
     model = AlignedUMAP(**(PUBLIC["settings"] | expected["overrides"]))
     assert model.fit(data, relations=relations) is model
     assert_graphs(model, expected["graphs"])
+    assert_embedding_type(model.embeddings_)
     for actual, bits in zip(model.embeddings_, expected["embeddings"], strict=True):
         assert_layout(actual, bits)
 
@@ -109,6 +120,9 @@ def test_batch_trajectory(name):
     data, links = inputs(expected["family"], expected["relation_group"])
     model = AlignedUMAP(**(PUBLIC["settings"] | expected["overrides"]))
     result = model.fit_transform(data, relations=links)
+    assert type(result).__name__ == PUBLIC["cases"]["fit-transform"]["returns"]
+    assert result is model.embeddings_
+    assert_embedding_type(result)
     assert_graphs(model, expected["graphs"])
     for actual, bits in zip(result, expected["embeddings"], strict=True):
         assert_layout(actual, bits)
@@ -123,12 +137,25 @@ def test_append_from_public_frozen_layouts(name):
     # Isolate the append from the prior fit by supplying the public checkpoints.
     for layout, bits in zip(model.embeddings_, expected["before"]["embeddings"], strict=True):
         layout[:] = np.asarray(bits, dtype=np.uint32).view(np.float32)
-    old_layouts = tuple(model.embeddings_)
+    embeddings = model.embeddings_
+    old_layouts = tuple(embeddings)
     assert model.update(data[2], relations=dict(expected["relations"]), n_epochs=epochs) is None
+    assert model.embeddings_ is embeddings
+    assert_embedding_type(embeddings)
     assert_graphs(model, expected["after"]["graphs"])
     assert all(before is after for before, after in zip(old_layouts, model.embeddings_[:2], strict=True))
     for actual, bits in zip(model.embeddings_, expected["after"]["embeddings"], strict=True):
         assert_layout(actual, bits)
+
+
+def test_aligned_pickle_restores_the_typed_embeddings():
+    data, relations = inputs()
+    expected = PUBLIC["cases"]["epoch-0-weight-0.01"]
+    model = AlignedUMAP(**PUBLIC["settings"]).fit(data, relations=relations)
+    restored = pickle.loads(pickle.dumps(model))
+    assert_embedding_type(restored.embeddings_)
+    for layout, bits in zip(restored.embeddings_, expected["embeddings"], strict=True):
+        assert_layout(layout, bits)
 
 
 @pytest.mark.parametrize("name", OPTIMIZER["cases"])

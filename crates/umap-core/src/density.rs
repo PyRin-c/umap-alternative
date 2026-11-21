@@ -168,14 +168,53 @@ pub(crate) fn original_radii_and_weights(
     graph: &CsrGraph,
     input: OriginalRadiusInput<'_>,
 ) -> Result<(Vec<f32>, Vec<f32>), DensityError> {
-    let (values, weights) = original_means_and_weights(graph, input)?;
+    let (values, weights) = original_log_inputs_and_weights(graph, input)?;
     Ok((
-        values
-            .into_iter()
-            .map(|mean| (f64::from(mean) + 1e-8).ln() as f32)
-            .collect(),
+        values.into_iter().map(optimizer_log_radius).collect(),
         weights,
     ))
+}
+
+fn optimizer_log_radius(value: f32) -> f32 {
+    // The reference standardizes NumPy float32 log outputs. Even a one-bit
+    // change to a radius can shift the density gradient after standardization.
+    // Remez coefficients from NumPy 2.5.5, numpy/_core/src/umath/npy_simd_data.h.
+    const P: [u32; 6] = [
+        0,
+        0x3f80_0000,
+        0x4007_361c,
+        0x3fbd_70a9,
+        0x3ec3_0333,
+        0x3cd4_2bcd,
+    ];
+    const Q: [u32; 6] = [
+        0x3f80_0000,
+        0x4027_361c,
+        0x401c_fe0d,
+        0x3f7c_8ae4,
+        0x3e1e_5bf3,
+        0x3bc0_83df,
+    ];
+    if !value.is_normal() || value < 0.0 {
+        return value.ln();
+    }
+    let bits = value.to_bits();
+    let mut exponent = ((bits >> 23) as i32 - 126) as f32;
+    let mut mantissa = f32::from_bits(0x3f00_0000 | (bits & 0x007f_ffff));
+    if mantissa <= std::f32::consts::FRAC_1_SQRT_2 {
+        mantissa *= 2.0;
+        exponent -= 1.0;
+    }
+    let x = mantissa - 1.0;
+    let evaluate = |coefficients: [u32; 6]| {
+        coefficients[..5]
+            .iter()
+            .rev()
+            .fold(f32::from_bits(coefficients[5]), |acc, &term| {
+                acc.mul_add(x, f32::from_bits(term))
+            })
+    };
+    exponent.mul_add(std::f32::consts::LN_2, evaluate(P) / evaluate(Q))
 }
 
 fn original_means_and_weights(
@@ -486,7 +525,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn original_optimizer_radii_keep_offset_at_one() {
+    fn original_optimizer_radii_round_offset_in_float32() {
         let graph = CsrGraph {
             n_rows: 2,
             n_cols: 2,
@@ -494,10 +533,25 @@ mod tests {
             indices: vec![1, 0],
             data: vec![0.5, 0.5],
         };
-        let (radii, weights) =
-            original_radii_and_weights(&graph, OriginalRadiusInput::EdgeDistances(&[1.0; 2]))
-                .unwrap();
-        assert_eq!(weights, [1.0; 2]);
-        assert_eq!(radii, [1e-8_f32; 2]);
+        for (distance, expected) in [(0.0, 0xc193_5d8e), (1.0, 0)] {
+            let (radii, weights) = original_radii_and_weights(
+                &graph,
+                OriginalRadiusInput::EdgeDistances(&[distance; 2]),
+            )
+            .unwrap();
+            assert_eq!(weights, [1.0; 2]);
+            assert_eq!(
+                radii.iter().map(|r| r.to_bits()).collect::<Vec<_>>(),
+                [expected; 2]
+            );
+        }
+    }
+
+    #[test]
+    fn optimizer_log_radius_matches_observed_float32_rounding() {
+        assert_eq!(
+            optimizer_log_radius(f32::from_bits(0x40b7_c6bf)).to_bits(),
+            0x3fdf_bded
+        );
     }
 }

@@ -2,10 +2,7 @@
 
 use std::fmt;
 
-use crate::density::{
-    DensityError, OriginalRadiusInput, RadiusSpace, original_log_inputs_and_weights,
-    original_radii_and_weights, radii_and_weights_from_edge_distances,
-};
+use crate::density::{DensityError, OriginalRadiusInput, original_radii_and_weights};
 use crate::embedding::{
     DenseEmbedding, DenseEmbeddingConfig, DenseEmbeddingFitError, EmbeddingLayoutConfig,
     prepare_dense_embedding, serial_negative_sampler, zero_weak_memberships,
@@ -119,7 +116,7 @@ pub fn optimize_densmap_csr(
     checkpoint: impl FnMut(usize, &[f32]),
 ) -> Result<(), DensmapError> {
     let density = prepare_density(layout.n_epochs, options, || {
-        radii_and_weights_from_edge_distances(graph, edge_distances, RadiusSpace::Original)
+        original_radii_and_weights(graph, OriginalRadiusInput::EdgeDistances(edge_distances))
     })?;
     optimize_layout(
         embedding,
@@ -200,14 +197,7 @@ fn fit_initialized_graph(
         .map_err(|error| DensmapError::Preparation(error.into()))?;
     let density = if let Some((input, options)) = density {
         prepare_density(layout.n_epochs, options, || {
-            // Configured feature distances are supplied in graph storage order.
-            // Keep the established dense and precomputed optimizer checkpoints.
-            if matches!(input, OriginalRadiusInput::EdgeDistances(_)) {
-                original_radii_and_weights(&graph, input)
-            } else {
-                original_log_inputs_and_weights(&graph, input)
-                    .map(|(inputs, weights)| (inputs.into_iter().map(f32::ln).collect(), weights))
-            }
+            original_radii_and_weights(&graph, input)
         })?
     } else {
         None
@@ -292,7 +282,6 @@ impl DensityOptimizer {
         for radius in &mut original {
             *radius = (*radius - mean) / standard_deviation;
         }
-
         Self {
             options,
             original,
@@ -356,10 +345,12 @@ impl DensityOptimizer {
         let shifted_var = variance(log_radii, radius_mean, &mut self.squared_deviations)
             + self.options.dens_var_shift as f32;
         let standard_deviation = f64::from(shifted_var.sqrt());
+        // The input radii are standardized already. The public calculation
+        // uses their dot product with the uncentered embedding log radii.
         let cross_product: f64 = log_radii
             .iter()
             .zip(&self.original)
-            .map(|(&radius, &original)| f64::from(radius - radius_mean) * f64::from(original))
+            .map(|(&radius, &original)| f64::from(radius) * f64::from(original))
             .sum();
         let covariance = cross_product / (graph.n_rows as f64 - 1.0);
         for ((weight, &radius), &original) in correlation_weights

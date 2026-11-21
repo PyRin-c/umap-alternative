@@ -179,16 +179,17 @@ fn assert_checkpoint(platform: &str, name: &str, key: usize, actual: &[u32], exp
     // Only the observed active residuals receive a tolerance. Inactive
     // checkpoints and isolated cases with exact replay require identical bits.
     let residual = match name {
-        "weighted_active" | "frac_above_half" | "frac_below_one" if key >= 1 => Some((1, 1e-6)),
+        "weighted_active" | "weighted_repel" | "frac_above_half" | "frac_below_one" if key >= 1 => {
+            Some((2, 1e-6))
+        }
         "frac_below_half" | "frac_exact_half" if key >= 2 => Some((1, 2.4e-7)),
-        "weighted_repel" if key >= 1 => Some((1, 2.4e-7)),
+        "frac_default" if key >= 9 => Some((1, 6e-8)),
         "weighted_weak_density" if key == 1 => Some((1, 4e-9)),
-        "weak_edges_short" if key >= 1 => Some((25, 1.2e-7)),
+        "weak_edges_short" if key >= 1 => Some((5, 1.9e-9)),
         "weak_edges_long" if key >= 3 => Some((10, 1e-6)),
         "held_out_1d" if (4..=5).contains(&key) => Some((1, 7.5e-9)),
-        "held_out_3d_small_shift" if key >= 1 => Some((4, 4.8e-7)),
-        "held_out_3d_first_active" if key >= 1 => Some((16, 2e-6)),
-        "held_out_3d" if key >= 3 => Some((190, 6.45e-5)),
+        "held_out_3d_first_active" if key >= 1 => Some((1, 1.2e-7)),
+        "held_out_3d" if key >= 3 => Some((2, 4.8e-7)),
         _ => None,
     };
     let Some((max_steps, max_error)) = residual else {

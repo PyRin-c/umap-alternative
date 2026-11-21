@@ -62,7 +62,7 @@ vertex count, the pair probes at shifts 0, 0.1, 1 and 4 support
 
 ```text
 v = sum((r_i - m)^2) / n + dens_var_shift
-c = sum((r_i - m) * R_i) / (n - 1)
+c = sum(r_i * R_i) / (n - 1)
 w_i = R_i - c * (r_i - m) / v
 ```
 
@@ -101,9 +101,11 @@ sum, round the weighted product before adding it. Divide the two sums in
 float32, widen the quotient for the offset and logarithm, then round the log
 radius to float32. The mean and population variance use float32 pairwise
 reductions. The variance shift and square root also round to float32.
-The covariance sums wide products of the float32 centered embedding
-radii and standardized input radii. The sum of positive memberships is
-half the float32 sum of the incident weights from the original radius pass.
+The covariance sums wide products of the float32 embedding log radii
+before mean subtraction and the standardized input radii. The
+per-vertex weights still use the centered embedding radii. The sum
+of positive memberships is half the float32 sum of the incident
+weights from the original radius pass.
 
 The first-active probes include nine disjoint reciprocal pairs with distinct
 radii and three variance shifts. They isolate the log and covariance
@@ -129,34 +131,40 @@ available. The native test also supplies exactly coincident endpoints with
 zero variance and verifies that the zero-distance positives do not request
 a gradient.
 
-For the original finite fixtures, replay improved from 1,866 to 1,948
-bit-identical coordinate values out of 2,176 per capture. This counts
-each captured epoch key once, including the final key. Both Rust hosts
-gave the same comparison for both captures. All inactive checkpoints,
-plain controls, paired first-active cases and the default fraction case
-agree bit for bit.
+The current replay matches 2,285 of 2,437 finite coordinate values
+in the Windows capture and 2,283 of 2,437 in the Ubuntu capture.
+This counts each captured epoch key once, including the final key.
+All inactive checkpoints, plain controls and paired first-active
+cases agree bit for bit.
 
-| Probe with residuals | Max absolute difference before | Max absolute difference after | Max float32 steps after |
+| Active probe | Previous max absolute difference | Current max absolute difference | Current max float32 steps |
 | --- | ---: | ---: | ---: |
-| Weighted, density active at key 1 | 9.54e-7 | 9.54e-7 | 1 |
+| Weighted, density active at key 1 | 9.54e-7 | 9.54e-7 | 2 |
 | Weighted, half or the predecessor of half | 2.38e-7 | 2.38e-7 | 1 |
-| Weighted with effective repulsion | 9.54e-7 | 2.38e-7 | 1 |
+| Weighted with effective repulsion | 2.38e-7 | 9.54e-7 | 2 |
 | Weighted with `dens_lambda=0.2` | 3.73e-9 | 3.73e-9 | 1 |
-| Weak edges, retained in the 3-epoch run | 1.19e-7 | 1.19e-7 | 25 |
+| Default density fraction | 0 | 5.96e-8 | 1 |
+| Weak edges, retained in the 3-epoch run | 1.19e-7 | 1.86e-9 | 5 |
 | Weak edges, pruned in the 16-epoch run | 3.34e-6 | 9.54e-7 | 10 |
 | Independent 1D run | 7.45e-9 | 7.45e-9 | 1 |
-| Independent 3D first-active run with no effective negatives | 2.15e-6 | 1.91e-6 | 16 |
-| Independent 3D first-active run with shift 1e-12 | 4.77e-7 | 4.77e-7 | 4 |
-| Independent 3D run with effective negatives | 6.63e-5 | 6.44e-5 | 190 |
+| Independent 3D first-active run with no effective negatives | 1.91e-6 | 1.19e-7 | 1 |
+| Independent 3D first-active run with shift 1e-12 | 4.77e-7 | 0 | 0 |
+| Independent 3D run with effective negatives | 6.44e-5 | 4.77e-7 | 2 |
 
 The 3D run with effective negatives matches through epoch 2 before density
-activates. At epoch 3, the maximum difference decreased from 5.03e-5 to
-4.53e-5 and one additional coordinate differs. Over all keys of that run,
-the exact count changed from 78 to 76 out of 189, and the maximum float32
-step distance decreased from 211 to 190. Its plain control matches for all
-eight epochs. The short weak-edge run has more float32 steps near zero
-despite the same maximum absolute difference. The remaining numerical
-differences bound the replay to the tested precision.
+activates. At epoch 3, the maximum difference decreased from 4.53e-5 to
+5.96e-8. Over all keys of that run, the exact count increased from 76 to
+147 out of 189. Its plain control matches for all eight epochs.
+
+For the dense Python fit with `dens_frac=1` and 30 epochs, the first
+difference is one coordinate at epoch 2 (one float32 step). The final
+maximum absolute difference increased from `1.91e-6` to `8.11e-6`.
+Adding the wide weighted distance to the stored radius sum before rounding
+reduced the 30-epoch error to `1.43e-6` and increased the 16-epoch weak-edge error to
+`6.06e-5`. Applying the float32 polynomial to the embedding radii caused
+differences in the previously exact zero-shift and tiny-shift pair controls.
+The implementation retains the existing embedding-radius calculation and
+the Python tests record separate bounds for the three affected cases.
 
 ## Seeded fitting
 
@@ -200,8 +208,14 @@ memberships. An independent replay of the input reduction matched all
 47 standardized radii from the 3D, weighted, weak-edge, paired and 1D
 controls. It accumulated each weighted squared distance in float64,
 stored each update in float32, and applied the logarithm to the
-float32 mean with the float32 offset. The aligned input distances also
-matched for all edges in these controls.
+float32 mean with the float32 offset. One log argument in the 3D run is
+`0x40b7c6bf`. The observed float32 log is `0x3fdfbded`, one step below
+the wide logarithm rounded to float32. That difference changes the
+standardized input radius used by the optimizer. Rust now applies
+the pinned NumPy float32 rational polynomial to the optimizer inputs.
+A mean of one plus the offset rounds to one and yields a zero log radius.
+[NumPy float32 logarithm](https://github.com/numpy/numpy/blob/v2.5.5/numpy/_core/src/umath/loops_exponent_log.dispatch.c.src#L487-L498),
+[Polynomial coefficients](https://github.com/numpy/numpy/blob/v2.5.5/numpy/_core/src/umath/npy_simd_data.h#L104-L118)
 
 To isolate the per-edge gradient, run the public optimizer for two
 epochs with only the selected edge's interval set to `1`. Set the other
@@ -209,9 +223,11 @@ intervals to `100` and keep all edges in the density sweep. At
 `a=.65, b=1.2, dens_lambda=1.3, dens_var_shift=.03` and learning rate
 `.31`, the maximum first-update error for the independent replay was
 `1.34e-5` in the 3D case and `1.49e-8` in the weighted case.
-Sweeping the precision of the affinity and radius sums, log, covariance,
-variance and exponential did not reduce the 3D error. The gradient
-arithmetic in the native optimizer still needs a matching reconstruction.
+Passing unit vectors in place of the standardized input radii exposed
+the covariance independently of the endpoint terms. Changing the radius
+at a third vertex followed the raw embedding log radius at that vertex.
+The uncentered cross product reduced the isolated 3D first-update error
+to `9.54e-7`.
 
 ## Reproduction
 

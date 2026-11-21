@@ -198,14 +198,27 @@ impl<'a> DenseApproximateIndex<'a> {
         queries: &[f32],
         n_query_rows: usize,
     ) -> Result<RankedNeighbors, ApproximateSearchError> {
+        self.query_with_width(queries, n_query_rows, self.fit_ranks.width)
+    }
+
+    /// Search using the requested result width for entry and cutoff decisions.
+    pub fn query_with_width(
+        &self,
+        queries: &[f32],
+        n_query_rows: usize,
+        width: usize,
+    ) -> Result<RankedNeighbors, ApproximateSearchError> {
+        if !(1..=self.fit_ranks.width).contains(&width) {
+            return Err(ApproximateSearchError::RankShape);
+        }
         let data = DenseRows {
             data: self.data.as_ref(),
             n_rows: self.n_rows,
             n_features: self.n_features,
         };
         let queries = DenseRows::new(queries, n_query_rows, data.n_features)?;
-        let mut result = RankedNeighbors::with_capacity(n_query_rows, self.fit_ranks.width)?;
-        let k = self.fit_ranks.width.min(data.n_rows);
+        let mut result = RankedNeighbors::with_capacity(n_query_rows, width)?;
+        let k = width.min(data.n_rows);
         let factor = if self.metric.is_angular() { 1.24 } else { 1.12 };
         let mut visited = vec![usize::MAX; data.n_rows];
         for (row, query) in queries.data.chunks_exact(queries.n_features).enumerate() {

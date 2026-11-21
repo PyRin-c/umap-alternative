@@ -163,17 +163,23 @@ training model uses Adam with learning rate `0.001` and gradient clip value
 | Training probe | Absolute loss difference | Encoder weights | Decoder weights | Fitted coordinates |
 | --- | ---: | ---: | ---: | ---: |
 | One positive-only step | 0 | 50/50 | | 64/64 |
-| One step with two negatives per positive | 0 | 44/50 | | 0/64 |
+| One step with two negatives per positive | 0 | 50/50 | | 64/64 |
 | One step with reconstruction | 0 | 50/50 | 51/51 | 64/64 |
-| One step with encoder reconstruction gradients | 0 | 48/50 | 51/51 | 64/64 |
-| Five positive-only steps | 5.96e-8 | 48/50 | | 64/64 |
+| One step with encoder reconstruction gradients | 0 | 50/50 | 51/51 | 64/64 |
+| Five positive-only steps | 0 | 50/50 | | 64/64 |
 
-Weights and coordinates count matching float32 bits. The single negative
-step differed by at most 1.28e-6 in fitted coordinates. Across the full
-trainable fixture, the wheel matched 5/162 output bits. The largest absolute
-difference was 3.38e-5 for fitted coordinates and 2.22e-5 for the decoder
-inverse. Full training parity, landmark losses and large-data defaults
-remain open.
+Weights and coordinates count matching float32 bits. The layout loss now
+evaluates the positive and negative pairs in one batch. Its distance is
+the square root of the sum of squared coordinate differences plus
+`1e-12`, including coincident and near-coincident pairs. The square uses
+TensorFlow's power operation. The resulting loss uses the softplus of
+the negated logit and adds the logit for negative examples.
+
+All 162 outputs of the full trainable fixture now match float32 bits on
+the pinned Windows CPU stack, including the single-row predictions and
+inverse results with and without a decoder. The earlier maximum fitted
+difference was `3.38e-5`. Landmark losses, large-data defaults, and other
+training stacks remain open.
 
 The frozen inference probes match the reference artifacts. This port saves
 the estimator state and Keras artifacts for both singleton and multi-row

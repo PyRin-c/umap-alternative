@@ -43,9 +43,11 @@ def _sampled_pca_anchor(features, n_components, rng, *, graph=None, sample_size=
     sampled = len(features) > sample_size
     anchors = rng.choice(len(features), size=sample_size, replace=False) if sampled else None
     sample = features[anchors] if sampled else features
-    center = sample.mean(axis=0, dtype=np.float32)
+    # Accumulate column sums in float32, then divide and center in float64.
+    sample = np.ascontiguousarray(sample, dtype=np.float32)
+    center = sample.sum(axis=0, dtype=np.float32).astype(np.float64) / len(sample)
     left, values, _ = randomized_svd(
-        (sample - center).astype(np.float64),
+        sample.astype(np.float64) - center,
         n_components=n_components, n_oversamples=8, n_iter=1, random_state=rng,
     )
     scores = np.ascontiguousarray(left * values, dtype=np.float32)

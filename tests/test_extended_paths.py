@@ -7,6 +7,7 @@ from scipy.sparse import csr_matrix
 
 import umap_alternative
 from umap_alternative import AlignedUMAP, ParametricUMAP, UMAP, _native, _recursive, load_ParametricUMAP
+from umap_alternative._feature_search import ApproximateFeatureIndex
 
 
 OPTIONS = {
@@ -46,6 +47,19 @@ def test_automatic_search_uses_the_distinct_row_boundary():
     collapsed = UMAP(**OPTIONS, transform_mode="graph", unique=True).fit(np.resize(TRAINING, (4096, 2)))
     assert collapsed._feature_search_index is None
     assert collapsed.graph_.shape == (len(TRAINING), len(TRAINING))
+
+
+def test_approximate_query_uses_its_requested_width():
+    training = np.random.RandomState(42).normal(size=(96, 4)).astype(np.float32)
+    query = np.random.RandomState(15).normal(size=(41, 4))[40:].astype(np.float32)
+    index = ApproximateFeatureIndex(training, 5, "euclidean", 42)
+
+    narrow, distances = index.query(query, k=1)
+    broad, _ = index.query(query, k=5)
+    # NNDescent visits different candidates at these widths.
+    np.testing.assert_array_equal(narrow, [[36]])
+    np.testing.assert_array_equal(broad, [[19, 36, 86, 5, 15]])
+    assert distances.shape == (1, 1)
 
 
 @pytest.mark.parametrize("mode", ["graph", "embedding"])

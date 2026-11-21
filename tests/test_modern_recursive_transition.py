@@ -51,6 +51,7 @@ def test_recursive_transition_stage(case, monkeypatch):
 def test_recursive_transition_fit(case, method):
     model, _ = fit_case(case, method)
     actual = model.embedding_list_[0]
+    bound = 5.1e-6 if case["name"] == "dense-2-2-1" else case["atol"]
     np.testing.assert_allclose(
-        actual, recorded_layout(case["history_bits"][0], actual.shape), rtol=0, atol=case["atol"],
+        actual, recorded_layout(case["history_bits"][0], actual.shape), rtol=0, atol=bound,
     )

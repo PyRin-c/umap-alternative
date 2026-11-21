@@ -168,9 +168,17 @@ named by either relation. Window one matches 36/36 bits at 8 epochs.
 With window two, the differences occur in the last slice. The replay
 matches 29/36 bits at 2 epochs and 24/36 at 8 epochs, with maxima
 0.0801959 and 0.5040512 on both platforms. Linking row 5 while leaving
-row 4 unlinked restores 36/36 at 8 epochs. This suggests an interaction
-between the index extent of the relations and the composed offsets.
-A flattened-index replay with the inferred extent still diverges.
+row 4 unlinked restores 36/36 at 8 epochs.
+
+The optimizer receives relation and weight arrays of shape `(3, 5, 5)`
+for the six-row input. The fixture generator calls the same public
+optimizer with the row axis extended to six, using `-1` for the missing
+relations and zero for their weights. The existing bounded Rust traversal
+then matches all 36 coordinates at two epochs and 35 of 36 at eight
+epochs, with the last coordinate within one float32 step. The tests
+cover this padded replay while preserving the unmodified wheel results
+in the fixture. Layouts for trailing rows use the explicit missing-relation
+semantics of the padded replay.
 
 The public wheel returns a Numba typed list. This implementation uses a
 Python list of float32 NumPy arrays. Its graph-mode mappers expose the fuzzy

@@ -124,6 +124,26 @@ uses the approximate comparison above. The measured differences leave the
 wheel's projection state, first-round candidate scheduling and search-index
 construction open for further reconstruction.
 
+### Current Euclidean ranks and query width
+
+The fitted width determines the training graph. The requested query
+width now reaches the native walk and controls its entry and cutoff
+decisions. A four-feature, 96-row Gaussian probe (training seed 42)
+distinguishes a one-neighbor walk from the prefix of a five-neighbor walk.
+The ordered query results for the archived row are `[36]` at width 1
+and `[19, 36, 86, 5, 15]` at width 5, matching NNDescent at both widths.
+The Rust tests also exercise the one-rank and invalid-width boundaries.
+
+For a `RandomState(42)` Gaussian float32 matrix with four features and
+`NNDescent(random_state=42, n_jobs=1)`, all 480 training slots agree
+at 96 rows and width 5. At 4,096 rows, the training search matches
+20,463 of 20,480 ordered slots at width 5 and 61,423 of 61,440 at
+width 15. All distances in the matching slots agree after float32
+conversion. Seven Gaussian held-out rows from `RandomState(5)` match
+19 of 35 query ranks at width 5 and all 105 at width 15, with the
+reference's default epsilon. Candidate selection and prepared query
+construction remain separate sources of rank differences.
+
 ## Training rank timing
 
 Windows x86-64 release measurements used a single Rust thread, eight

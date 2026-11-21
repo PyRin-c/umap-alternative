@@ -51,23 +51,24 @@ class _EdgeModel(Model):
         repeated_head = tf.repeat(head, self.negative_sample_rate, axis=0)
         repeated_tail = tf.repeat(tail, self.negative_sample_rate, axis=0)
         order = keras.random.shuffle(tf.range(tf.shape(repeated_tail)[0]), seed=self.shuffle_seed)
-        positives = self._logits(head, tail)
-        negatives = self._logits(repeated_head, tf.gather(repeated_tail, order))
-        logits = tf.concat((positives, negatives), axis=0)
-        labels = tf.concat((tf.ones_like(positives), tf.zeros_like(negatives)), axis=0)
-        layout = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=labels, logits=logits))
+        head_batch = tf.concat((head, repeated_head), axis=0)
+        tail_batch = tf.concat((tail, tf.gather(repeated_tail, order)), axis=0)
+        logits = self._logits(head_batch, tail_batch)
+        labels = tf.cast(tf.range(tf.shape(logits)[0]) < tf.shape(head)[0], logits.dtype)
+        layout = tf.reduce_mean(tf.nn.softplus(-logits) + (1.0 - labels) * logits)
         if self.decoder is None:
             return layout
         reconstruction = tf.reduce_mean(self.reconstruction_loss(y, y_pred[2]))
         return layout + self.reconstruction_weight * reconstruction
 
     def _logits(self, head, tail):
-        squared = tf.reduce_sum(tf.square(head - tail), axis=-1)
-        nonzero = squared > 0
-        # Use a finite derivative for coincident embeddings, including self-paired negatives.
-        distance = tf.sqrt(tf.where(nonzero, squared, tf.ones_like(squared)))
-        power = tf.where(nonzero, distance ** (2 * self.b), tf.zeros_like(distance))
-        return -tf.math.log1p(self.a * power)
+        delta = head - tail
+        if delta.dtype == tf.float16:
+            delta = tf.cast(delta, tf.float32)
+        squared = tf.reduce_sum(tf.pow(delta, 2), axis=-1)
+        # Match the distance offset for coincident and near-coincident pairs.
+        distance = tf.sqrt(squared + 1e-12)
+        return -tf.math.log1p(self.a * distance ** (2 * self.b))
 
     def get_config(self):
         return {

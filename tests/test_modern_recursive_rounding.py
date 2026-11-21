@@ -62,5 +62,22 @@ def test_recursive_star_before_outer_normalization(case):
     values = recorded_layout(archive["input_bits"], (27, 27))
     actual = replay(archive["graph"], values, case, 42)
     expected = recorded_layout(case["layout_bits"], actual.shape)
+    if case["threshold"] == len(values):
+        np.testing.assert_array_equal(actual.view(np.uint32), expected.view(np.uint32))
+        return
     bound = 2e-7 if case["name"] == "star-raw-3-11" else 1e-6
     np.testing.assert_allclose(actual, expected, rtol=0, atol=bound)
+
+
+@pytest.mark.parametrize("case", REFERENCE["mixed_scale_pca"], ids=lambda case: str(case["seed"]))
+def test_recursive_full_pca_keeps_the_weak_axis(case):
+    seed = case["seed"]
+    values = np.random.RandomState(seed).normal(size=(129, 3)).astype(np.float32)
+    values *= np.exp2(np.linspace(-12, 16, 3, dtype=np.float32))
+    values[::3] *= np.float32(-2**-8)
+    rng = np.random.RandomState(seed)
+    anchors = _recursive._sampled_pca_anchor(values, 3, rng, sample_size=len(values))
+    layout = _recursive._recursive_base(anchors, depth=1)
+    assert layout.view(np.uint32).ravel().tolist() == case["layout_bits"]
+    assert rng_checkpoint(rng) == {key: case["rng"][key] for key in ("cursor", "gaussian_bits")}
+    assert rng.randint(0, 2**32, size=4, dtype=np.uint32).tolist() == case["rng"]["next_words"]

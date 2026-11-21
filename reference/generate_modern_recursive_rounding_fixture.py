@@ -116,13 +116,31 @@ def archive_cases():
     return {"input_bits": bits(values), "graph": graph_bits, "cases": cases}
 
 
+def mixed_scale_pca_cases():
+    from scipy.sparse import diags
+
+    edges = np.ones(128, dtype=np.float32)
+    graph = diags([edges, edges], [-1, 1], format="csr")
+    for seed in (489, 742):
+        values = np.random.RandomState(seed).normal(size=(129, 3)).astype(np.float32)
+        values *= np.exp2(np.linspace(-12, 16, 3, dtype=np.float32))
+        values[::3] *= np.float32(-2**-8)
+        rng = TracedRandomState(seed)
+        layout = recursive_init(
+            graph, values, 1., 1., n_components=3, random_state=rng, base_init_threshold=len(values),
+            n_embedding_epochs=0, recursive_parallel=False,
+        )
+        yield {"seed": seed, "layout_bits": bits(layout), "rng": checkpoint(rng)}
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        parts = {"base": base_cases(), "contractions": contraction_cases()}
+        parts = {"base": base_cases(), "contractions": contraction_cases(),
+                 "mixed_scale_pca": list(mixed_scale_pca_cases())}
         archive = archive_cases()
     lines = [f'  "{key}": [\n' + ",\n".join("    " + json.dumps(case, separators=(",", ":")) for case in cases)
              + "\n  ]" for key, cases in parts.items()]

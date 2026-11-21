@@ -73,9 +73,8 @@ def check_stages():
         assert observed["batch"] == reference["batch"], name
         residual = abs(observed["loss"] - reference["loss"])
         assert residual <= 3e-7, name
-        if name != "negative_step":
-            assert observed["coordinate_bits"] == reference["coordinate_bits"], name
-        if name in ("positive_step", "reconstruction_step"):
+        assert observed["coordinate_bits"] == reference["coordinate_bits"], name
+        if "encoder_weight_bits" in observed:
             assert observed["encoder_weight_bits"] == reference["encoder_weight_bits"], name
         if "decoder_weight_bits" in observed:
             assert observed["decoder_weight_bits"] == reference["decoder_weight_bits"], name
@@ -89,6 +88,8 @@ def check_stages():
     observed = actual["five_positive_batches"]
     reference = expected["five_positive_batches"]
     assert observed["batches"] == reference["batches"]
+    assert observed["coordinate_bits"] == reference["coordinate_bits"]
+    assert observed["encoder_weight_bits"] == reference["encoder_weight_bits"]
     residuals = [abs(a - b) for a, b in zip(observed["losses"], reference["losses"], strict=True)]
     print(f"five positive batches  max loss residual {max(residuals):.9g}", flush=True)
     report_bits("  fitted coordinates", observed["coordinate_bits"], reference["coordinate_bits"])
@@ -152,7 +153,9 @@ def report_full_training():
             if observed["status"] == "error":
                 assert observed["type"] == reference["type"], (name, field)
             else:
-                report_bits(f"{name} {field}", observed["result"]["bits"], reference["result"]["bits"])
+                actual_bits, expected_bits = observed["result"]["bits"], reference["result"]["bits"]
+                assert actual_bits == expected_bits, (name, field)
+                report_bits(f"{name} {field}", actual_bits, expected_bits)
 
 
 if __name__ == "__main__":

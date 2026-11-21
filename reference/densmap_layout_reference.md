@@ -193,6 +193,26 @@ appended two rows with `densmap=True, n_epochs=[2, 4, 6]` exited with an
 access violation. The corresponding plain fit updated to the same
 coordinates as a scalar six-epoch update.
 
+## First-active gradient isolation
+
+The public optimizer call exposes standardized input radii and graph
+memberships. An independent replay of the input reduction matched all
+47 standardized radii from the 3D, weighted, weak-edge, paired and 1D
+controls. It accumulated each weighted squared distance in float64,
+stored each update in float32, and applied the logarithm to the
+float32 mean with the float32 offset. The aligned input distances also
+matched for all edges in these controls.
+
+To isolate the per-edge gradient, run the public optimizer for two
+epochs with only the selected edge's interval set to `1`. Set the other
+intervals to `100` and keep all edges in the density sweep. At
+`a=.65, b=1.2, dens_lambda=1.3, dens_var_shift=.03` and learning rate
+`.31`, the maximum first-update error for the independent replay was
+`1.34e-5` in the 3D case and `1.49e-8` in the weighted case.
+Sweeping the precision of the affinity and radius sums, log, covariance,
+variance and exponential did not reduce the 3D error. The gradient
+arithmetic in the native optimizer still needs a matching reconstruction.
+
 ## Reproduction
 
 Run from the repository root. Pass the corresponding capture path via

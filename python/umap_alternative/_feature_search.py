@@ -164,20 +164,21 @@ class ApproximateFeatureIndex:
         return self._index
 
     def training_ranks(self):
-        return self._as_arrays(*self._native_index().training_ranks())
+        return self._as_arrays(*self._native_index().training_ranks(), self.k)
 
     def query(self, X, k):
         queries = check_array(X, dtype=np.float32, order="C")
         if queries.shape[1] != self.shape[1] or not 1 <= k <= self.k:
             raise ValueError("approximate query shape or neighbor count differs from the fitted index")
-        indices, distances = self._as_arrays(*self._native_index().query(queries.tobytes(), len(queries)))
+        indices, distances = self._as_arrays(*self._native_index().query(queries.tobytes(), len(queries), k), k)
         query_rows = getattr(self, "query_rows", None)
         if query_rows is not None:
             indices = np.where(indices >= 0, query_rows[indices], -1)
-        return indices[:, :k], distances[:, :k]
+        return indices, distances
 
-    def _as_arrays(self, indices, distances):
+    @staticmethod
+    def _as_arrays(indices, distances, width):
         return (
-            np.asarray(indices, dtype=np.int32).reshape(-1, self.k),
-            np.asarray(distances, dtype=np.float32).reshape(-1, self.k),
+            np.asarray(indices, dtype=np.int32).reshape(-1, width),
+            np.asarray(distances, dtype=np.float32).reshape(-1, width),
         )

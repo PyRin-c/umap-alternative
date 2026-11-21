@@ -765,17 +765,23 @@ impl NativeApproximateIndex {
         (ranks.indices.clone(), ranks.distances.clone())
     }
 
+    #[pyo3(signature = (queries, n_rows, width=None))]
     fn query(
         &self,
         py: Python<'_>,
         queries: &Bound<'_, PyBytes>,
         n_rows: usize,
+        width: Option<usize>,
     ) -> PyResult<(Vec<i32>, Vec<f32>)> {
         let bytes = queries.as_bytes();
         let ranks = py.detach(|| {
             let queries = metric_row_words(bytes, f32::from_ne_bytes)?;
             self.index
-                .query(&queries, n_rows)
+                .query_with_width(
+                    &queries,
+                    n_rows,
+                    width.unwrap_or(self.index.training_ranks().width),
+                )
                 .map_err(|error| PyValueError::new_err(error.to_string()))
         })?;
         Ok((ranks.indices, ranks.distances))

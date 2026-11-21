@@ -134,6 +134,16 @@ fn keeps_small_data_routing_and_wide_rank_scales_separate() {
         assert_eq!(&row[5..], &[0.0; 3]);
     }
     assert!(index.query(&[], 0).unwrap().indices.is_empty());
+    let narrow = index.query_with_width(&[-1.0, 20.0], 2, 1).unwrap();
+    assert_eq!(narrow.width, 1);
+    assert_eq!(narrow.indices, [0, 4]);
+    assert_eq!(narrow.distances, [1.0, 2.0]);
+    for width in [0, 9] {
+        assert!(matches!(
+            index.query_with_width(&[0.0], 1, width),
+            Err(ApproximateSearchError::RankShape)
+        ));
+    }
     assert!(matches!(
         index.query(&[f32::NAN], 1),
         Err(ApproximateSearchError::Matrix(_))

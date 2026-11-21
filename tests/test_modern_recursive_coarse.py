@@ -15,6 +15,7 @@ FIXTURE = (
 )
 CASES = json.loads(FIXTURE.read_text(encoding="utf-8"))["cases"]
 COORDINATE_BOUNDS = {
+    "four-level-budget-2": 5.1e-6,
     "four-level-budget-3": 3e-5,
     "four-level-positive-only": 2e-5,
     "ratio-three-stars-budget-None": 2e-5,

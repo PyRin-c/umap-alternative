@@ -86,8 +86,24 @@ def update_initial_layout(previous, graph, links):
 
 
 def capture():
+    from inspect import signature
+    from unittest.mock import patch
+
     import numpy as np
-    from umap import AlignedUMAP
+    from umap import AlignedUMAP, aligned_umap
+
+    optimize = aligned_umap.optimize_layout_aligned_euclidean
+    parameters = signature(optimize)
+
+    def optimize_with_explicit_relation_extent(*args, **kwargs):
+        call = parameters.bind(*args, **kwargs)
+        width = max(map(len, call.arguments["head_embeddings"]))
+        for name, fill in (("relations", -1), ("regularisation_weights", 0)):
+            values = call.arguments[name]
+            if values.shape[2] < width:
+                call.arguments[name] = np.pad(values, ((0, 0), (0, 0), (0, width - values.shape[2])),
+                                              constant_values=fill)
+        return optimize(*call.args, **call.kwargs)
 
     def family(seed, size, width, extra, drop):
         rng = np.random.RandomState(seed)
@@ -237,11 +253,14 @@ def capture():
         ("all_but_last", 1, 8), ("all_but_last", 2, 2), ("all_but_last", 2, 8),
         ("include_last", 2, 8),
     ):
-        fit(
-            f"batch-{group}-window-{window}-epochs-{epochs}", group=group,
-            family_name="relation_extent", n_neighbors=3, transform_seed=37,
-            alignment_window_size=window, n_epochs=epochs,
-        )
+        name = f"batch-{group}-window-{window}-epochs-{epochs}"
+        options = dict(group=group, family_name="relation_extent", n_neighbors=3, transform_seed=37,
+                       alignment_window_size=window, n_epochs=epochs)
+        fit(name, **options)
+        if group == "all_but_last" and window == 2:
+            with patch.object(aligned_umap, "optimize_layout_aligned_euclidean",
+                              optimize_with_explicit_relation_extent):
+                fit(f"{name}-padded", **options)
 
     # Replay from the captured adjacency, independently of the estimator.
     counts = {}

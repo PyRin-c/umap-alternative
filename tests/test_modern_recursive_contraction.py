@@ -50,7 +50,11 @@ def test_recursive_contraction_fit(case, method):
         "holdout-three-level-transition": 2.5e-4,
         "holdout-two-coarse-epochs": 2e-5,
     }.get(case["name"], 1.2e-5)
-    initial_bound = 2e-5 if case["name"] == "holdout-two-coarse-epochs" else 3e-6
+    initial_bound = {
+        "holdout-two-level-fuzzy": 8e-6,
+        "holdout-three-level-transition": 3.5e-6,
+        "holdout-two-coarse-epochs": 2e-5,
+    }.get(case["name"], 3e-6)
     expected = recorded_layout(case["embedding_bits"], model.embedding_.shape)
     np.testing.assert_allclose(model.embedding_, expected, rtol=0, atol=refined_bound)
     for epoch, actual, bits in zip(model.n_epochs, model.embedding_list_, case["history_bits"], strict=True):

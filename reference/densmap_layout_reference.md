@@ -127,22 +127,27 @@ scaling and rounding the coordinate write.
 
 ## Exact checkpoint replay and degeneracy
 
-Equal input log radii have zero standard deviation. The wheel returns
-NaN coordinates at the first active update in the equal-input probe and
-finite coordinates at zero effective density updates. Equal embedding log
-radii with distinct input radii produce finite updates for shifts 0.1,
-1e-12, and 1e-40. At shift zero or 1e-50 the wheel reports
-`ZeroDivisionError`. The latter shift rounds to zero in float32. Rust
-reports a nonfinite density-gradient error before writing the affected edge
-in these undefined cases. Checkpoints for earlier completed epochs remain
-available. The native test also supplies exactly coincident endpoints with
-zero variance and verifies that the zero-distance positives do not request
-a gradient.
+Equal input log radii have zero standard deviation. Python reports
+`RuntimeWarning: invalid value encountered in divide` during
+standardization, including with zero or one epoch and a disabled density
+term. When the density term runs, sampled positives write the reference
+NaN pattern `0xffc00000` to their endpoints. This holds with a zero
+learning rate and for coincident endpoints. The Rust schedule matches the
+observed checkpoints, including delayed density activation with repulsion
+and partial NaN layouts while a weaker pair has yet to receive an update.
+With `output_dens=True`, Python saves the embedding and history before
+raising `ValueError("Input contains NaN.")` during diagnostic refit.
 
-The replay matches all 2,437 finite coordinate values in each of the
-Windows and Ubuntu captures. This counts each recorded epoch key once,
-including the final key. It includes every epoch of the eight-epoch
-3D case with effective negative updates and the weak-edge pruning cases.
+Equal embedding log radii with distinct input radii produce finite
+updates for shifts 0.1, 1e-12, and 1e-40. A sampled update at shift zero
+or 1e-50 encounters a zero divisor and raises `ZeroDivisionError` in
+Python. Rust returns the corresponding layout error and leaves earlier
+completed checkpoints available. The 1e-50 shift rounds to zero in float32.
+
+The replay matches every recorded coordinate bit in the Windows and
+Ubuntu captures. It includes every epoch of the eight-epoch 3D case
+with effective negative updates, the weak-edge pruning cases, and
+the signed NaNs in the zero-input-variance cases.
 The Python tests compare every recorded coordinate and both output radii
 by float32 bits, including the dense 30-epoch fit with `dens_frac=1`.
 
@@ -182,8 +187,7 @@ For dense features, Rust callers can use
 and three density parameters, then returns the standard owning graph and
 embedding handle. The dense pair smoke test matches the public CSR and
 coordinate bits at zero, one, and two epochs. The Python adapter matches
-the precomputed training graph in the finite replay cases. Inputs with
-undefined density statistics produce a native arithmetic error.
+the precomputed training graph in the finite replay cases.
 The Python adapter currently requires internally computed neighbors and an
 infinite distance cutoff. Density-preserving incremental updates remain
 open. A public Windows probe that fitted eight rows at four epochs and

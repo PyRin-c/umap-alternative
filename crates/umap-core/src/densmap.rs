@@ -104,8 +104,8 @@ impl std::error::Error for DensmapError {
 /// The callback receives the coordinates after epoch `e` with key `e`, then
 /// receives the final coordinates with key `layout.n_epochs`. At zero epochs
 /// only key zero is reported. A failed update leaves previously completed
-/// updates applied. Undefined density statistics produce an arithmetic error
-/// when a sampled noncoincident edge needs its density gradient.
+/// updates applied. Undefined standardized input radii write NaN to sampled
+/// endpoints. A zero density divisor on a sampled edge returns an error.
 pub fn optimize_densmap_csr(
     embedding: &mut [f32],
     graph: &CsrGraph,
@@ -115,9 +115,12 @@ pub fn optimize_densmap_csr(
     negative_sampler: impl FnMut(usize) -> usize,
     checkpoint: impl FnMut(usize, &[f32]),
 ) -> Result<(), DensmapError> {
-    let density = prepare_density(layout.n_epochs, options, || {
-        original_radii_and_weights(graph, OriginalRadiusInput::EdgeDistances(edge_distances))
-    })?;
+    let density = prepare_density(
+        layout.n_epochs,
+        options,
+        || original_radii_and_weights(graph, OriginalRadiusInput::EdgeDistances(edge_distances)),
+        None::<fn()>,
+    )?;
     optimize_layout(
         embedding,
         graph,
@@ -143,10 +146,42 @@ pub fn fit_graph_with_checkpoints(
     caller_rng: &mut Mt19937,
     checkpoint: Option<impl FnMut(usize, &[f32])>,
 ) -> Result<DenseEmbedding, DensmapError> {
+    fit_graph_with_checkpoints_and_warning(
+        graph,
+        initial,
+        layout,
+        density,
+        caller_rng,
+        checkpoint,
+        None::<fn()>,
+    )
+}
+
+/// Fit a supplied graph and notify the caller of zero input-radius deviation.
+///
+/// A provided callback observes the standardization even when the density term
+/// is inactive. Python uses this to report the reference's division warning.
+pub fn fit_graph_with_checkpoints_and_warning(
+    graph: CsrGraph,
+    initial: &[f32],
+    layout: &EmbeddingLayoutConfig<impl Copy + Into<f64>, impl Copy + Into<f64>>,
+    density: Option<(OriginalRadiusInput<'_>, DensmapOptions)>,
+    caller_rng: &mut Mt19937,
+    checkpoint: Option<impl FnMut(usize, &[f32])>,
+    warn_invalid: Option<impl FnOnce()>,
+) -> Result<DenseEmbedding, DensmapError> {
     let mut coordinates = initial.to_vec();
     normalize_columns(&mut coordinates, graph.n_rows, layout.n_components)
         .map_err(|error| DensmapError::Preparation(error.into()))?;
-    fit_initialized_graph(graph, coordinates, layout, density, caller_rng, checkpoint)
+    fit_initialized_graph(
+        graph,
+        coordinates,
+        layout,
+        density,
+        caller_rng,
+        checkpoint,
+        warn_invalid,
+    )
 }
 
 /// Fit a dense fuzzy graph and a seeded density-preserving embedding.
@@ -180,6 +215,7 @@ pub fn fit_dense_densmap_seeded(
         Some((input, options)),
         &mut caller_rng,
         None::<fn(usize, &[f32])>,
+        None::<fn()>,
     )
 }
 
@@ -190,15 +226,19 @@ fn fit_initialized_graph(
     density: Option<(OriginalRadiusInput<'_>, DensmapOptions)>,
     caller_rng: &mut Mt19937,
     checkpoint: Option<impl FnMut(usize, &[f32])>,
+    warn_invalid: Option<impl FnOnce()>,
 ) -> Result<DenseEmbedding, DensmapError> {
     let shape = (graph.n_rows, layout.n_components);
     let mut next_rng = caller_rng.clone();
     let mut sampler = serial_negative_sampler(&mut next_rng, &coordinates, shape.0, shape.1)
         .map_err(|error| DensmapError::Preparation(error.into()))?;
     let density = if let Some((input, options)) = density {
-        prepare_density(layout.n_epochs, options, || {
-            original_radii_and_weights(&graph, input)
-        })?
+        prepare_density(
+            layout.n_epochs,
+            options,
+            || original_radii_and_weights(&graph, input),
+            warn_invalid,
+        )?
     } else {
         None
     };
@@ -226,17 +266,16 @@ fn prepare_density(
     n_epochs: usize,
     options: DensmapOptions,
     input_radii: impl FnOnce() -> Result<(Vec<f32>, Vec<f32>), DensityError>,
+    warn_invalid: Option<impl FnOnce()>,
 ) -> Result<Option<DensityOptimizer>, DensmapError> {
     options.validate()?;
-    if n_epochs <= 1 || !options.active_at(n_epochs - 1, n_epochs) {
+    let active = n_epochs > 1 && options.active_at(n_epochs - 1, n_epochs);
+    if !active && warn_invalid.is_none() {
         return Ok(None);
     }
     let (radii, incident_weights) = input_radii().map_err(DensmapError::OriginalRadii)?;
-    Ok(Some(DensityOptimizer::new(
-        radii,
-        &incident_weights,
-        options,
-    )))
+    let optimizer = DensityOptimizer::new(radii, &incident_weights, options, warn_invalid);
+    Ok(active.then_some(optimizer))
 }
 
 fn optimize_layout(
@@ -274,14 +313,25 @@ pub(crate) struct DensityOptimizer {
 }
 
 impl DensityOptimizer {
-    fn new(mut original: Vec<f32>, incident_weights: &[f32], options: DensmapOptions) -> Self {
+    fn new(
+        mut original: Vec<f32>,
+        incident_weights: &[f32],
+        options: DensmapOptions,
+        warn_invalid: Option<impl FnOnce()>,
+    ) -> Self {
         let n_rows = original.len();
         let mut squared_deviations = vec![0.0; n_rows];
         let mean = mean(&original);
         let standard_deviation = variance(&original, mean, &mut squared_deviations).sqrt();
+        if standard_deviation == 0.0
+            && let Some(warn_invalid) = warn_invalid
+        {
+            warn_invalid();
+        }
         for radius in &mut original {
             *radius = (*radius - mean) / standard_deviation;
         }
+        let undefined_original = original.first().is_some_and(|radius| radius.is_nan());
         Self {
             options,
             original,
@@ -292,6 +342,7 @@ impl DensityOptimizer {
                 correlation_weights: vec![0.0; n_rows],
                 scale_per_vertex: 0.0,
                 standard_deviation: 0.0,
+                undefined_original,
             },
             squared_deviations,
         }
@@ -318,6 +369,7 @@ impl DensityOptimizer {
             correlation_weights,
             scale_per_vertex,
             standard_deviation,
+            ..
         } = &mut self.epoch;
         affinity_sums.fill(0.0);
         log_radii.fill(0.0);
@@ -372,9 +424,19 @@ pub(crate) struct DensityEpoch {
     correlation_weights: Vec<f64>,
     scale_per_vertex: f64,
     standard_deviation: f32,
+    undefined_original: bool,
 }
 
 impl DensityEpoch {
+    pub(crate) fn undefined_update(&self, membership: f32) -> Result<bool, LayoutError> {
+        if self.standard_deviation * self.standard_deviation == 0.0
+            || membership * self.standard_deviation == 0.0
+        {
+            return Err(LayoutError::DensityDivisionByZero);
+        }
+        Ok(self.undefined_original)
+    }
+
     pub(crate) fn edge_scale(
         &self,
         head: usize,

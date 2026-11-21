@@ -154,8 +154,13 @@ def build():
     add("weak_edges_short", "weak_edges", 3, dens_frac=1.)
     add("weak_edges_long", "weak_edges", 16, dens_frac=1.)
     add("equal_input_one", "equal_input", 1, dens_frac=1.)
+    add("equal_input_zero", "equal_input", 0, dens_frac=1.)
+    add("equal_input_inactive_fraction", "equal_input", 2, dens_frac=0.)
     add("equal_input_disabled", "equal_input", 2, dens_frac=1., dens_lambda=0.)
     add("equal_input", "equal_input", 2, dens_frac=1.)
+    add("equal_input_zero_learning_rate", "equal_input", 2, dens_frac=1., learning_rate=0.)
+    add("equal_input_delayed", "equal_input", 7, dens_frac=.5,
+        repulsion_strength=.8, negative_sample_rate=3.)
     add("equal_embedding_shifted", "equal_embedding", 2, dens_frac=1.)
     add("equal_embedding_unshifted", "equal_embedding", 2, dens_frac=1., dens_var_shift=0.,
         expected_error="ZeroDivisionError")

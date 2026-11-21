@@ -43,11 +43,16 @@ def precomputed_case(name, **overrides):
     return case, model, distances
 
 
-@pytest.mark.parametrize("name", [name for name in LAYOUT["cases"] if name != "equal_input"])
+@pytest.mark.parametrize("name", LAYOUT["cases"])
 def test_precomputed_density_and_plain_checkpoints_match_public_graph(name):
     case, model, distances = precomputed_case(name)
-    with pytest.warns(UserWarning, match="using precomputed metric"):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         fitted = model.fit_transform(distances)
+    assert any("using precomputed metric" in str(w.message) for w in caught)
+    runtime_warnings = [str(w.message) for w in caught if w.category is RuntimeWarning]
+    expected_warnings = ["invalid value encountered in divide"] if case["dataset"] == "equal_input" else []
+    assert runtime_warnings == expected_warnings
     expected_graph = case["graph"]
     np.testing.assert_array_equal(model.graph_.indptr, expected_graph["indptr"])
     np.testing.assert_array_equal(model.graph_.indices, expected_graph["indices"])
@@ -67,6 +72,39 @@ def test_precomputed_density_and_plain_checkpoints_match_public_graph(name):
     else:
         assert not hasattr(model, "embedding_list_")
     assert model.transform(distances.copy()) is model.embedding_
+
+
+@pytest.mark.parametrize("name", ["equal_embedding_unshifted", "equal_embedding_underflow_shift"])
+def test_sampled_zero_embedding_variance_raises_public_exception(name):
+    error = LAYOUT["errors"][name]
+    _, model, distances = precomputed_case("equal_embedding_shifted", **error["options"])
+    with pytest.warns(UserWarning, match="using precomputed metric"):
+        with pytest.raises(ZeroDivisionError, match="^division by zero$"):
+            model.fit_transform(distances)
+    assert hasattr(model, "graph_")
+    assert not hasattr(model, "embedding_")
+
+
+def test_output_dens_rejects_nan_after_publishing_embedding():
+    case, model, distances = precomputed_case("equal_input", output_dens=True)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="using precomputed metric")
+        with pytest.warns(RuntimeWarning, match="invalid value encountered in divide"):
+            with pytest.raises(ValueError, match=r"^Input contains NaN\.$"):
+                model.fit_transform(distances)
+    assert hasattr(model, "graph_")
+    assert not hasattr(model, "rad_orig_")
+    assert_values(model.embedding_, case["final"])
+    for snapshot, expected in zip(model.embedding_list_, case["checkpoints"].values(), strict=True):
+        assert_values(snapshot, expected)
+
+
+def test_zero_input_variance_obeys_numpy_invalid_mode_without_updates():
+    _, model, distances = precomputed_case("equal_input_zero")
+    with pytest.warns(UserWarning, match="using precomputed metric"):
+        with np.errstate(invalid="raise"):
+            with pytest.raises(FloatingPointError, match="invalid value encountered in divide"):
+                model.fit(distances)
 
 
 @pytest.mark.parametrize("epochs", [0, 1, 2, 3, 10, 30])
@@ -155,10 +193,11 @@ def test_densmap_early_epoch_cutoff_preserves_public_weak_edges():
     )
 
 
-def test_undefined_density_gradient_keeps_the_initial_fit_unpublished():
-    _, model, distances = precomputed_case("equal_input")
-    with pytest.warns(UserWarning, match="using precomputed metric"):
-        with pytest.raises(ValueError, match="density correlation gradient"):
-            model.fit(distances)
-    assert not hasattr(model, "embedding_")
+def test_zero_input_variance_scalar_fit_publishes_nan_embedding():
+    case, model, distances = precomputed_case("equal_input", n_epochs=2)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="using precomputed metric")
+        with pytest.warns(RuntimeWarning, match="invalid value encountered in divide"):
+            assert model.fit(distances) is model
+    assert_values(model.embedding_, case["final"])
     assert not hasattr(model, "embedding_list_")

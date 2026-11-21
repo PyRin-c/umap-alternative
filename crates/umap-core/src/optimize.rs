@@ -275,7 +275,22 @@ pub(crate) fn optimize_csr_with_density(
                     0
                 };
 
-                if positive_due {
+                let undefined_density = if positive_due {
+                    density_epoch
+                        .map(|density| density.undefined_update(graph.data[entry]))
+                        .transpose()?
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+                if undefined_density {
+                    // Preserve the reference's signed quiet NaN at both endpoints.
+                    let value = f32::from_bits(0xffc0_0000);
+                    for endpoint in [row, index] {
+                        embedding[endpoint * n_components..(endpoint + 1) * n_components]
+                            .fill(value);
+                    }
+                } else if positive_due {
                     attractive_update_with_distance(
                         embedding,
                         n_components,
@@ -311,7 +326,7 @@ pub(crate) fn optimize_csr_with_density(
                             n_rows: graph.n_rows,
                         });
                     }
-                    if vertex == row {
+                    if vertex == row || undefined_density {
                         continue;
                     }
                     negative_update_rows(

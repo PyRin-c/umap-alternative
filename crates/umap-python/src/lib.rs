@@ -11,7 +11,7 @@ use umap_core::density::{
     DensityError, OriginalRadiusInput, embedding_radius_log_inputs_euclidean,
     original_radius_log_inputs,
 };
-use umap_core::densmap::{DensmapOptions, fit_graph_with_checkpoints};
+use umap_core::densmap::{DensmapError, DensmapOptions, fit_graph_with_checkpoints_and_warning};
 use umap_core::discrete::{count_distance, levenshtein, myers};
 use umap_core::embedding::{
     DenseEmbedding, DenseEmbeddingConfig, DenseEmbeddingInit, EmbeddingLayoutConfig,
@@ -36,11 +36,13 @@ use umap_core::inverse::{
     fit_inverse_scales_from_ranked_distances, inverse_transform_dense_with_gradient,
     inverse_transform_dense_with_metric,
 };
+use umap_core::layout::LayoutError;
 use umap_core::modern_initialization::{
     ModernInit, ModernInitConfig, ModernInitRescale, initialize_modern_layout, recursive_hub_order,
 };
 use umap_core::modern_layout::{ModernLayoutConfig, ModernOptimizer};
 use umap_core::neighbors::DistanceMetric;
+use umap_core::optimize::OptimizeError;
 use umap_core::packed::{
     PackedBitMetric, PackedRows, fit_packed_graph, fit_packed_update_graph, rank_packed_queries,
 };
@@ -1382,17 +1384,30 @@ fn _fit_graph_embedding_with_rng(
                 }
             }
         });
-        py.detach(|| {
-            fit_graph_with_checkpoints(
+        let mut invalid_density_standardization = false;
+        let result = py.detach(|| {
+            fit_graph_with_checkpoints_and_warning(
                 graph,
                 &initial_coordinates,
                 &config,
                 density,
                 &mut rng,
                 checkpoint,
+                Some(|| invalid_density_standardization = true),
             )
-        })
-        .map_err(|error| PyValueError::new_err(error.to_string()))?
+        });
+        if invalid_density_standardization {
+            // Use the NumPy ufunc so seterr and the caller's warning filter apply.
+            py.import("numpy")?
+                .getattr("divide")?
+                .call1((vec![0.0_f32], 0.0_f32))?;
+        }
+        result.map_err(|error| match error {
+            DensmapError::Optimize(OptimizeError::Layout(LayoutError::DensityDivisionByZero)) => {
+                PyZeroDivisionError::new_err("division by zero")
+            }
+            _ => PyValueError::new_err(error.to_string()),
+        })?
     };
     let (words, cursor) = rng.state();
     Ok((shape, coordinates, (words.to_vec(), cursor), history))

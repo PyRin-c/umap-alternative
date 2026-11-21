@@ -1183,21 +1183,34 @@ class UMAP(BaseEstimator, TransformerMixin):
                 exclude_graph_neighbors=bool(self.exclude_graph_neighbors), **layout_options,
             )
             embedding[np.diff(graph.indptr) == 0] = np.nan
-        elif spectral:
+        elif spectral or (embedding_mode and embedding is None):
             rng = check_random_state(embedding_options.pop("seed"))
-            embedding, history = _fit_spectral_embedding(
-                graph, X_checked, metric, rng, checkpoint_epochs=checkpoint_epochs,
-                densmap=densmap, **embedding_options,
-            )
-        elif embedding_mode and embedding is None:
-            rng = check_random_state(embedding_options.pop("seed"))
-            embedding, history = _fit_graph_embedding(
-                graph, X_checked, metric, rng, initial_coordinates, spectral=False,
+            layout_options = dict(
                 checkpoint_epochs=checkpoint_epochs, densmap=densmap, **embedding_options,
             )
+            try:
+                if spectral:
+                    embedding, history = _fit_spectral_embedding(
+                        graph, X_checked, metric, rng, **layout_options,
+                    )
+                else:
+                    embedding, history = _fit_graph_embedding(
+                        graph, X_checked, metric, rng, initial_coordinates, spectral=False,
+                        **layout_options,
+                    )
+            except (ZeroDivisionError, FloatingPointError, RuntimeWarning):
+                if densmap is not None:
+                    self.graph_ = graph
+                raise
         elif embedding is not None:
             embedding[np.diff(graph.indptr) == 0] = np.nan
         if embedding_mode and getattr(self, "output_dens", False):
+            if densmap is not None and np.isnan(embedding).any():
+                self.graph_ = graph
+                self.embedding_ = embedding
+                if history is not None:
+                    self.embedding_list_ = history
+                raise ValueError("Input contains NaN.")
             self._store_density_diagnostics(X_checked, graph, embedding, metric)
             if inverse_rows is not None:
                 self.rad_orig_ = self.rad_orig_[inverse_rows]

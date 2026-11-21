@@ -175,9 +175,6 @@ fn public_densmap_checkpoints() {
     for (platform, source) in [("Windows", WINDOWS), ("Ubuntu", UBUNTU)] {
         let fixture: Fixture = serde_json::from_str(source).unwrap();
         for (name, case) in &fixture.cases {
-            if name == "equal_input" {
-                continue;
-            }
             let replay = Replay::new(&fixture, case);
             if let Some(expected) = &case.original_radii {
                 let actual = radii_from_edge_distances(
@@ -210,14 +207,6 @@ fn public_densmap_checkpoints() {
 #[test]
 fn variance_and_fraction_errors_preserve_completed_checkpoints() {
     let fixture: Fixture = serde_json::from_str(WINDOWS).unwrap();
-    let original = &fixture.cases["equal_input"];
-    assert!(
-        original
-            .final_bits
-            .iter()
-            .all(|&bits| f32::from_bits(bits).is_nan())
-    );
-    let mut replay = Replay::new(&fixture, original);
     let check_error = |replay: &Replay, initial: &[u32]| {
         let mut seen = Vec::new();
         let error = replay.run(|key, coordinates| seen.push((key, bits(coordinates))));
@@ -225,17 +214,13 @@ fn variance_and_fraction_errors_preserve_completed_checkpoints() {
         assert!(matches!(
             error,
             Err(DensmapError::Optimize(OptimizeError::Layout(
-                LayoutError::NonFiniteArithmetic {
-                    quantity: "density correlation gradient",
-                    ..
-                }
+                LayoutError::DensityDivisionByZero
             )))
         ));
     };
-    check_error(&replay, &original.checkpoints[&0]);
 
     let shifted = &fixture.cases["equal_embedding_shifted"];
-    replay = Replay::new(&fixture, shifted);
+    let mut replay = Replay::new(&fixture, shifted);
     for name in [
         "equal_embedding_unshifted",
         "equal_embedding_underflow_shift",
@@ -245,6 +230,8 @@ fn variance_and_fraction_errors_preserve_completed_checkpoints() {
         replay.density.dens_var_shift = invalid.options.dens_var_shift.unwrap();
         check_error(&replay, &shifted.checkpoints[&0]);
     }
+    replay.initial = vec![0.0, 0.0, 4.0, 4.0];
+    check_error(&replay, &bits(&replay.initial));
 
     for name in ["frac_below_zero", "frac_above_one"] {
         let invalid = &fixture.errors[name];
@@ -262,19 +249,32 @@ fn variance_and_fraction_errors_preserve_completed_checkpoints() {
 }
 
 #[test]
-fn coincident_edges_need_no_gradient_even_with_zero_variance() {
+fn undefined_input_poisoning_follows_the_positive_edge_schedule() {
     let fixture: Fixture = serde_json::from_str(WINDOWS).unwrap();
-    let mut replay = Replay::new(&fixture, &fixture.cases["equal_embedding_shifted"]);
-    replay.initial = vec![0.0, 0.0, 10.0, 10.0];
-    replay.density.dens_var_shift = 0.0;
-    let expected = bits(&replay.initial);
+    let mut replay = Replay::new(&fixture, &fixture.cases["equal_input"]);
+    replay.initial = vec![0.0, 1.0, 4.0, 4.0];
+    replay.graph.data = vec![1.0, 1.0, 1.0 / 3.0, 1.0 / 3.0];
+    replay.layout.n_epochs = 5;
+    replay.layout.negative_sample_rate = 3.0;
+    replay.layout.repulsion_strength = 0.8;
+    // Observed by calling the public optimizer with intervals [1, 1, 3, 3].
+    let nan = 0xffc0_0000;
+    let partial = [nan, nan, 4.0_f32.to_bits(), 4.0_f32.to_bits()];
+    let expected = [
+        bits(&replay.initial).try_into().unwrap(),
+        partial,
+        partial,
+        [nan; 4],
+        [nan; 4],
+        [nan; 4],
+    ];
     let mut keys = Vec::new();
     let final_bits = replay
         .run(|key, coordinates| {
             keys.push(key);
-            assert_eq!(bits(coordinates), expected);
+            assert_eq!(bits(coordinates), expected[key], "checkpoint {key}");
         })
         .unwrap();
-    assert_eq!(keys, [0, 1, 2]);
-    assert_eq!(final_bits, expected);
+    assert_eq!(keys, [0, 1, 2, 3, 4, 5]);
+    assert_eq!(final_bits, [nan; 4]);
 }

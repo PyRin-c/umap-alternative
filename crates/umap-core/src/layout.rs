@@ -127,6 +127,8 @@ pub enum LayoutError {
         /// Intermediate value observed by the kernel.
         value: f32,
     },
+    /// A sampled density update encountered a zero divisor.
+    DensityDivisionByZero,
     /// Applying the computed step would produce a non-finite coordinate.
     NonFiniteUpdate {
         /// Endpoint name (`"head"` or `"tail"`).
@@ -214,6 +216,7 @@ impl fmt::Display for LayoutError {
             Self::NonFiniteArithmetic { quantity, value } => {
                 write!(formatter, "layout update {quantity} is not finite: {value}")
             }
+            Self::DensityDivisionByZero => formatter.write_str("division by zero"),
             Self::NonFiniteUpdate {
                 endpoint,
                 component,

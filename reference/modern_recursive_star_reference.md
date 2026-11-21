@@ -1,5 +1,9 @@
 # Nine-row recursive star placement in UMAP 0.6.0
 
+The [raw rounding follow-up](modern_recursive_rounding_reference.md)
+reduces the fitted star residual to `4.769e-6` and measures the first
+remaining difference in the PCA-only checkpoint.
+
 The [fixture generator](generate_modern_recursive_star_fixture.py)
 records public `label_propagation_init`, `simplicial_set_embedding`,
 `UMAP.fit` and `UMAP.fit_transform` outputs. It suppresses warnings and

@@ -18,7 +18,6 @@ COORDINATE_BOUNDS = {
     "four-level-budget-3": 3e-5,
     "four-level-positive-only": 2e-5,
     "ratio-three-stars-budget-None": 2e-5,
-    "ratio-three-stars-positive-only-eleven": 3e-5,
     "two-level-strong_to_one": 2e-5,
     "three-level-budget-4": 2e-5,
     "three-level-budget-6": 1e-4,

@@ -19,8 +19,19 @@ _COARSE_EPOCHS = 50
 def _recursive_base(coordinates, depth):
     coordinates = np.array(coordinates, dtype=np.float32, copy=True, order="C")
     coordinates -= coordinates.mean(axis=0)
-    lower, upper = np.percentile(coordinates, (5, 95), axis=0)
-    spans = (upper - lower).astype(np.float32)
+    ranks = (len(coordinates) - 1) * np.array([0.05, 0.95], dtype=np.float64)
+    floor = np.floor(ranks).astype(np.intp)
+    ceiling = np.ceil(ranks).astype(np.intp)
+    partitioned = np.partition(coordinates, np.r_[floor, ceiling], axis=0)
+    left, right = partitioned[floor], partitioned[ceiling]
+    gap = right - left
+    offset = (ranks - floor)[:, None]
+    # Interpolate from the nearer endpoint in float32. Compute the distance
+    # from either endpoint before rounding it to float32.
+    lower, upper = np.where(
+        offset < 0.5, left + gap * offset.astype(np.float32), right - gap * (1.0 - offset).astype(np.float32),
+    )
+    spans = upper - lower
     spans[spans == 0] = 1.0
     target = 3.0 * np.log10(len(coordinates)) * np.log2(depth + 1.0)
     return (coordinates * (target / spans.astype(np.float64))).astype(np.float32)
@@ -28,9 +39,7 @@ def _recursive_base(coordinates, depth):
 
 def _sampled_pca_anchor(features, n_components, rng):
     # The projection draws one normal sketch with eight extra columns.
-    centered = features.astype(np.float64)
-    # The feature means round before centering the float64 sketch input.
-    centered -= features.mean(axis=0, dtype=np.float32)
+    centered = (features - features.mean(axis=0, dtype=np.float32)).astype(np.float64)
     left, values, _ = randomized_svd(
         centered, n_components=n_components, n_oversamples=8, n_iter=1, random_state=rng,
     )
@@ -144,11 +153,11 @@ def _coarse_graphs(graph, labels, n_parts, weights, remove_diagonal):
     if weights == "transition":
         # The next contraction uses raw support and ranks hubs by the
         # normalized layout degrees. Expansion also uses the layout weights.
-        coarse = csr_matrix((values, (source, target)), shape=shape)
-        transition = coarse.astype(np.float64)
-        totals = np.asarray(transition.sum(axis=1)).ravel()
+        # Accumulate duplicate cross-part weights before rounding the layout.
+        coarse = csr_matrix((values.astype(np.float64), (source, target)), shape=shape)
+        totals = np.asarray(coarse.sum(axis=1)).ravel()
         inverse = np.divide(1.0, totals, out=np.zeros_like(totals), where=totals > 0)
-        transition = transition.multiply(inverse[:, None]).tocsr()
+        transition = coarse.multiply(inverse[:, None]).tocsr()
         layout = (transition + transition.T - transition.multiply(transition.T)).astype(np.float32)
         layout.eliminate_zeros()
         return coarse, layout
@@ -184,7 +193,7 @@ def _expand_layout(graph, labels, child, anchor):
     left, _, right = np.linalg.svd(expanded.T @ (anchor - anchor.mean(axis=0)))
     if np.linalg.det(left @ right) < 0:
         left[:, -1] *= -1
-    return expanded @ (left @ right)
+    return (expanded.astype(np.float64) @ (left @ right)).astype(np.float32)
 
 
 def _modern_recursive_initialization(graph, features, n_components, rng, options, ratio, weights, refine):

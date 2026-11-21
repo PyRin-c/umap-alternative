@@ -9,12 +9,14 @@
 
 ZIP は展開した状態で同梱サンプルと C ABI のスモークテスト2本をリンクして実行します。wheel は対応する各 Python でインストールし、学習・変換・更新・保存復元を確認します。
 
+公開用ビルドでは Rust のビルドパスを置き換え、MSVC の PDB 参照をファイル名にします。Maturin の Rust SBOM 生成は、ローカルワークスペースのファイル URL を含むため無効にしています。添付前に ZIP と wheel の中身を照合し、ビルド端末のパスが検出された場合はドラフトの作成を中止します。
+
 ビルドが失敗した場合は Actions で該当ジョブを確認します。添付の途中でドラフトが残った場合は、同じ実行の成果物から不足分を補うか、未公開のドラフトを整理してワークフローを再実行します。再実行時は同じタグのリリースが存在するとエラーになります。
 
 Windows で ZIP の作成と検証を再現するには、リポジトリのルートから次を実行します。
 
 ```powershell
-cargo build --release --locked -p umap-capi
+python scripts/release_build.py cargo build --release --locked -p umap-capi
 ./scripts/package-windows-cabi.ps1
 ```
 

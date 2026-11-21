@@ -3,6 +3,8 @@
 import argparse
 import hashlib
 from pathlib import Path
+import re
+import subprocess
 import tomllib
 from zipfile import ZipFile
 
@@ -11,6 +13,14 @@ ROOT = Path(__file__).resolve().parents[1]
 PYTHON_TAGS = ("cp310", "cp311", "cp312", "cp313", "cp314", "cp315")
 PLATFORM_TAGS = ("win_amd64", "manylinux_2_34_x86_64")
 DLL_MEMBERS = {"umap_capi.dll", "umap_capi.lib", "umap_capi.h", "fit_graph.c", "README.md", "LICENSE"}
+LOCAL_PATH = re.compile(
+    rb"file://(?:/[a-z]:/|/)|"
+    rb"(?<![a-z0-9])[a-z]:[\\/]+(?:a|build|git_repo|Program Files(?: \(x86\))?|"
+    rb"runneradmin|target|temp|tmp|Users|workspace)[\\/]+|"
+    rb"(?<![a-z0-9_])/(?:home|Users|mnt/[a-z]|tmp|var/tmp|workspace|__w|builds|opt/hostedtoolcache)/",
+    re.IGNORECASE,
+)
+ABSOLUTE_PDB = re.compile(rb"RSDS.{20}(?:[a-zA-Z]:[\\/]|[\\/])", re.DOTALL)
 
 
 def release_version(tag):
@@ -35,6 +45,22 @@ def hash_assets(directory, version):
     if actual != expected:
         raise SystemExit(f"Unexpected release assets. Missing: {sorted(expected - actual)}. Extra: {sorted(actual - expected)}.")
 
+    sources = {
+        path.removeprefix("python/")
+        for path in subprocess.check_output(
+            ["git", "ls-files", "python/umap_alternative"], cwd=ROOT, text=True,
+        ).splitlines()
+    }
+    source_contents = {
+        name: subprocess.check_output(
+            ["git", "show", f"HEAD:python/{name}"], cwd=ROOT,
+        ).replace(b"\r\n", b"\n")
+        for name in sources
+    }
+    dist_info = f"umap_alternative-{version}.dist-info"
+    wheel_members = sources | {
+        f"{dist_info}/{path}" for path in ("METADATA", "WHEEL", "RECORD", "licenses/LICENSE")
+    }
     checksums = []
     for name in sorted(expected):
         path = directory / name
@@ -42,8 +68,31 @@ def hash_assets(directory, version):
             bad_file = archive.testzip()
             if bad_file is not None:
                 raise SystemExit(f"{name} contains a damaged entry: {bad_file}")
-            if name == dll_name and set(archive.namelist()) != DLL_MEMBERS:
-                raise SystemExit(f"{name} does not contain the expected C ABI files.")
+            names = archive.namelist()
+            if name == dll_name:
+                valid_members = len(names) == len(DLL_MEMBERS) and set(names) == DLL_MEMBERS
+            else:
+                extra = set(names) - wheel_members
+                valid_members = (
+                    wheel_members.issubset(names)
+                    and len(names) == len(wheel_members) + 1
+                    and len(extra) == 1
+                    and all(
+                        member.startswith("umap_alternative/_native.")
+                        and member.endswith((".pyd", ".so"))
+                        for member in extra
+                    )
+                )
+            if not valid_members:
+                raise SystemExit(f"{name} does not contain the expected release files.")
+            for member in names:
+                data = archive.read(member)
+                if LOCAL_PATH.search(data) or ABSOLUTE_PDB.search(data) or (
+                    b"\0" in data and any(LOCAL_PATH.search(data[offset::2]) for offset in (0, 1))
+                ):
+                    raise SystemExit(f"{name}: machine-specific path in {member}.")
+                if member in source_contents and data.replace(b"\r\n", b"\n") != source_contents[member]:
+                    raise SystemExit(f"{name}: {member} differs from the committed Python source.")
         with path.open("rb") as asset:
             digest = hashlib.file_digest(asset, "sha256").hexdigest()
         checksums.append(f"{digest}  {name}\n")

@@ -31,5 +31,8 @@ python-source = "python"
 module-name = "umap_alternative._native"
 locked = true
 
+[tool.maturin.sbom]
+rust = false
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

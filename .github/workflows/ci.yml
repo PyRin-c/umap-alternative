@@ -31,7 +31,7 @@ jobs:
       - run: uv run --no-sync cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: uv run --no-sync cargo test --workspace --locked
       - run: uv run --no-sync pytest
-      - run: cargo build --release --locked -p umap-capi
+      - run: uv run --no-sync python scripts/release_build.py cargo build --release --locked -p umap-capi
       - name: Verify the C ABI on Linux
         if: runner.os == 'Linux'
         shell: bash
@@ -77,7 +77,7 @@ jobs:
           version: '0.13.9'
       - run: uv python install ${{ matrix.python }}
       - run: uv sync --locked --no-install-project
-      - run: uv run --no-sync maturin build --release --locked --compatibility ${{ matrix.compatibility }} --interpreter python --out target/wheel-verification
+      - run: uv run --no-sync python scripts/release_build.py maturin build --release --locked --compatibility ${{ matrix.compatibility }} --interpreter python --out target/wheel-verification
       - name: Install and verify the wheel
         shell: pwsh
         run: |

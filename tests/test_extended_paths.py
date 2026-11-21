@@ -39,6 +39,9 @@ def test_automatic_search_uses_the_distinct_row_boundary():
     assert not _native._uses_approximate_search(4095, False)
     assert _native._uses_approximate_search(4096, False)
     data = np.random.default_rng(719).standard_normal((4096, 3), dtype=np.float32)
+    below_boundary = UMAP(**OPTIONS, transform_mode="graph").fit(data[:-1])
+    assert below_boundary._feature_search_index is None
+    assert below_boundary.graph_.shape == (4095, 4095)
     graph_model = UMAP(**OPTIONS, transform_mode="graph").fit(data)
     assert graph_model._feature_search_index is not None
     held = graph_model.transform(data[::2048] + .015)

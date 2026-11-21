@@ -1017,15 +1017,13 @@ class UMAP(BaseEstimator, TransformerMixin):
                     "native approximate fitting requires dense unsupervised Euclidean, cosine, "
                     "or correlation features with at least two effective neighbors"
                 )
-            if isinstance(self.random_state, numbers.Integral):
-                seed = int(self.random_state)
-            else:
-                rng = check_random_state(self.random_state)
-                seed = int(rng.randint(0, 2**32, dtype=np.uint32))
+            rng = check_random_state(self.random_state)
             feature_search_index = ApproximateFeatureIndex(
-                X_checked, n_neighbors, metric, seed,
-                query_rows=first if inverse_rows is not None else None,
+                X_checked, n_neighbors, metric, 0,
+                query_rows=first if inverse_rows is not None else None, rng=rng,
             )
+            if embedding_mode:
+                embedding_options["seed"] = rng
             indices, distances = feature_search_index.training_ranks()
             cut = (indices >= 0) & (distances >= cutoff)
             removed = np.count_nonzero(cut)

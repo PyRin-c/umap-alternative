@@ -146,7 +146,7 @@ class ExactFeatureIndex:
 
 
 class ApproximateFeatureIndex:
-    def __init__(self, training, k, metric, seed, query_rows=None):
+    def __init__(self, training, k, metric, seed, query_rows=None, *, rng=None):
         self.training = training.astype(np.float32, copy=False).tobytes(order="C")
         self.shape = training.shape
         self.k = k
@@ -154,13 +154,23 @@ class ApproximateFeatureIndex:
         self.seed = seed
         self.query_rows = query_rows
         self._index = None
+        if rng is not None:
+            algorithm, words, cursor, has_gaussian, cached_gaussian = rng.get_state()
+            self._rng_state = (words.tolist(), cursor)
+            words, cursor = self._native_index().rng_after()
+            rng.set_state(
+                (algorithm, np.asarray(words, dtype=np.uint32), cursor, has_gaussian, cached_gaussian)
+            )
 
     def __getstate__(self):
         return {**self.__dict__, "_index": None}
 
     def _native_index(self):
         if self._index is None:
-            self._index = _native.NativeApproximateIndex(self.training, self.shape, self.k, self.metric, self.seed)
+            self._index = _native.NativeApproximateIndex(
+                self.training, self.shape, self.k, self.metric, self.seed,
+                rng_state=getattr(self, "_rng_state", None),
+            )
         return self._index
 
     def training_ranks(self):

@@ -731,6 +731,7 @@ fn _rank_configured_features(
 #[pyclass(module = "umap_alternative._native")]
 struct NativeApproximateIndex {
     index: DenseApproximateIndex<'static>,
+    rng_after: Option<RngState>,
 }
 
 #[pyfunction]
@@ -741,6 +742,7 @@ fn _uses_approximate_search(n_rows: usize, force: bool) -> bool {
 #[pymethods]
 impl NativeApproximateIndex {
     #[new]
+    #[pyo3(signature = (training, shape, k, metric, seed, *, rng_state=None))]
     fn new(
         py: Python<'_>,
         training: &Bound<'_, PyBytes>,
@@ -748,16 +750,35 @@ impl NativeApproximateIndex {
         k: usize,
         metric: &str,
         seed: u32,
+        rng_state: Option<RngState>,
     ) -> PyResult<Self> {
         let metric = parse_metric(metric)?;
         let data = training.as_bytes();
-        let index = py.detach(|| {
+        py.detach(|| {
             let data = metric_row_words(data, f32::from_ne_bytes)?;
-            DenseApproximateIndex::build(&data, shape.0, shape.1, k, metric, seed)
-                .map(DenseApproximateIndex::into_owned)
-                .map_err(|error| PyValueError::new_err(error.to_string()))
-        })?;
-        Ok(Self { index })
+            let (index, rng_after) = if let Some((words, cursor)) = rng_state {
+                let mut rng = Mt19937::from_state(&words, cursor)
+                    .map_err(|error| PyValueError::new_err(error.to_string()))?;
+                let index = DenseApproximateIndex::build_with_rng(
+                    &data, shape.0, shape.1, k, metric, &mut rng,
+                );
+                let (words, cursor) = rng.state();
+                (index, Some((words.to_vec(), cursor)))
+            } else {
+                (
+                    DenseApproximateIndex::build(&data, shape.0, shape.1, k, metric, seed),
+                    None,
+                )
+            };
+            let index = index
+                .map_err(|error| PyValueError::new_err(error.to_string()))?
+                .into_owned();
+            Ok(Self { index, rng_after })
+        })
+    }
+
+    fn rng_after(&self) -> Option<RngState> {
+        self.rng_after.clone()
     }
 
     fn training_ranks(&self) -> (Vec<i32>, Vec<f32>) {

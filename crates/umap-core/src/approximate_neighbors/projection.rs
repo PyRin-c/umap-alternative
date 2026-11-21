@@ -19,17 +19,36 @@ pub fn training_projection_leaves(
     max_depth: u8,
 ) -> Result<Vec<Vec<usize>>, ApproximateSearchError> {
     let data = DenseRows::training(training, n_rows, n_features)?;
+    Ok(training_leaves(
+        data,
+        caller_scalar,
+        tree_ordinal,
+        leaf_size.get(),
+        max_depth,
+        false,
+    ))
+}
+
+pub(super) fn training_leaves(
+    data: DenseRows<'_>,
+    caller_scalar: u64,
+    tree_ordinal: usize,
+    leaf_size: usize,
+    max_depth: u8,
+    angular: bool,
+) -> Vec<Vec<usize>> {
     let key = tree_key(caller_scalar, tree_ordinal);
     let mut leaves = Vec::new();
     collect_training_leaves(
         data,
-        (0..n_rows).collect(),
+        (0..data.n_rows).collect(),
         key,
-        leaf_size.get(),
+        leaf_size,
         max_depth,
+        angular,
         &mut leaves,
     );
-    Ok(leaves)
+    leaves
 }
 
 fn collect_training_leaves(
@@ -38,6 +57,7 @@ fn collect_training_leaves(
     key: u64,
     leaf_size: usize,
     depth: u8,
+    angular: bool,
     leaves: &mut Vec<Vec<usize>>,
 ) {
     if rows.len() <= leaf_size || depth == 0 {
@@ -46,17 +66,26 @@ fn collect_training_leaves(
     }
     let (a, b) = projection_pivots(&rows, pivot_words(key));
     let (left, right) = (data.row(a), data.row(b));
-    let normal: Vec<_> = left.iter().zip(right).map(|(a, b)| a - b).collect();
-    let offset = accumulate_projection(data.n_features, 0.0, |i, accumulator| {
-        normal[i].mul_add(-(left[i] + right[i]) * 0.5, accumulator)
-    });
+    let (normal, offset) = if angular {
+        (angular_normal(left, right).collect(), 0.0)
+    } else {
+        let normal: Vec<_> = left.iter().zip(right).map(|(a, b)| a - b).collect();
+        let offset = accumulate_projection(data.n_features, 0.0, |i, accumulator| {
+            normal[i].mul_add(-(left[i] + right[i]) * 0.5, accumulator)
+        });
+        (normal, offset)
+    };
     let boundary = partition_rows(&mut rows, |row| {
         let point = data.row(row);
         let margin = accumulate_projection(data.n_features, offset, |i, accumulator| {
             normal[i].mul_add(point[i], accumulator)
         });
         if !margin.is_finite() {
-            let metric = DistanceMetric::Euclidean;
+            let metric = if angular {
+                DistanceMetric::Cosine
+            } else {
+                DistanceMetric::Euclidean
+            };
             metric.distance(point, left) <= metric.distance(point, right)
         } else if margin.abs() <= 1.0e-8 {
             splitmix64(key ^ row as u64) & 1 == 0
@@ -69,8 +98,46 @@ fn collect_training_leaves(
         return;
     }
     let right = rows.split_off(boundary);
-    collect_training_leaves(data, rows, child_key(key, 0), leaf_size, depth - 1, leaves);
-    collect_training_leaves(data, right, child_key(key, 1), leaf_size, depth - 1, leaves);
+    collect_training_leaves(
+        data,
+        rows,
+        child_key(key, 0),
+        leaf_size,
+        depth - 1,
+        angular,
+        leaves,
+    );
+    collect_training_leaves(
+        data,
+        right,
+        child_key(key, 1),
+        leaf_size,
+        depth - 1,
+        angular,
+        leaves,
+    );
+}
+
+fn angular_normal<'a>(left: &'a [f32], right: &'a [f32]) -> impl Iterator<Item = f32> + 'a {
+    let left_norm = projection_norm(left);
+    let right_norm = projection_norm(right);
+    left.iter()
+        .zip(right)
+        .map(move |(&a, &b)| a / left_norm - b / right_norm)
+}
+
+pub(super) fn angular_margin(left: &[f32], right: &[f32], query: &[f32]) -> f32 {
+    let left_norm = projection_norm(left);
+    let right_norm = projection_norm(right);
+    accumulate_projection(query.len(), 0.0, |i, sum| {
+        (left[i] / left_norm - right[i] / right_norm).mul_add(query[i], sum)
+    })
+}
+
+fn projection_norm(point: &[f32]) -> f32 {
+    let norm =
+        accumulate_projection(point.len(), 0.0, |i, sum| point[i].mul_add(point[i], sum)).sqrt();
+    if norm == 0.0 { 1.0 } else { norm }
 }
 
 fn tree_key(scalar: u64, ordinal: usize) -> u64 {
@@ -123,7 +190,11 @@ pub(super) fn prepared_margin(left: &[f32], right: &[f32], query: &[f32]) -> f32
 }
 
 #[inline]
-fn accumulate_projection(width: usize, mut sum: f32, add: impl Fn(usize, f32) -> f32) -> f32 {
+pub(super) fn accumulate_projection(
+    width: usize,
+    mut sum: f32,
+    add: impl Fn(usize, f32) -> f32,
+) -> f32 {
     let wide_end = width / 32 * 32;
     if wide_end != 0 {
         let mut wide = [0.0; 32];

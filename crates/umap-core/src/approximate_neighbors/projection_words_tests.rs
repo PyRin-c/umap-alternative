@@ -37,7 +37,10 @@ fn pivot_words_skip_the_first_position_and_keep_the_partition_order() {
     let values = [9.0, 0.0, 8.0, 1.0, 7.0, 2.0];
     let data = DenseRows::training(&values, 6, 1).unwrap();
     let tree = build_word_tree(data, (0..6).collect(), 3, 2, &[[1, 1]], 0).unwrap();
-    let Tree::Split { a, b, left, right } = tree else {
+    let Tree::Split {
+        a, b, left, right, ..
+    } = tree
+    else {
         panic!("expected a split");
     };
     assert_eq!((a, b), (1, 2));
@@ -133,7 +136,9 @@ fn record_splits(
 ) {
     match tree {
         Tree::Leaf(rows) => leaves.push(rows),
-        Tree::Split { a, b, left, right } => {
+        Tree::Split {
+            a, b, left, right, ..
+        } => {
             pivots.push([a, b]);
             slots.push(slot);
             record_splits(*left, pivots, leaves, slots, 2 * slot + 1);

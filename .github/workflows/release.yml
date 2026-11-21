@@ -4,58 +4,75 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to rebuild
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
 
 jobs:
   version:
     if: github.event_name == 'workflow_dispatch' || !github.event.deleted
     runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.validate.outputs.tag }}
+      source_sha: ${{ steps.validate.outputs.source_sha }}
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: refs/tags/${{ env.RELEASE_TAG }}
       - name: Check the release tag and notes
+        id: validate
         run: |
-          [[ "$GITHUB_REF" == refs/tags/* ]]
-          python3 scripts/release_assets.py "$GITHUB_REF_NAME"
+          python3 scripts/release_assets.py "$RELEASE_TAG"
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   build:
     needs: version
     uses: ./.github/workflows/ci.yml
     with:
       release_assets: true
+      source_sha: ${{ needs.version.outputs.source_sha }}
 
   draft:
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-24.04
+    env:
+      RELEASE_TAG: ${{ needs.version.outputs.tag }}
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ needs.version.outputs.source_sha }}
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: release-*
           path: target/release-assets
           merge-multiple: true
       - name: Validate the release assets and calculate their checksums
-        run: python3 scripts/release_assets.py "$GITHUB_REF_NAME" --assets target/release-assets
+        run: python3 scripts/release_assets.py "$RELEASE_TAG" --assets target/release-assets
       - name: Attach the assets to a draft prerelease
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           releases=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[].tag_name')
-          if grep -Fxq "$GITHUB_REF_NAME" <<< "$releases"; then
-            echo "A release already exists for $GITHUB_REF_NAME."
+          if grep -Fxq "$RELEASE_TAG" <<< "$releases"; then
+            echo "A release already exists for $RELEASE_TAG."
             exit 1
           fi
-          gh release create "$GITHUB_REF_NAME" target/release-assets/* \
+          gh release create "$RELEASE_TAG" target/release-assets/* \
             --verify-tag --draft --prerelease \
-            --title "umap-alternative $GITHUB_REF_NAME preview" \
-            --notes-file "docs/releases/$GITHUB_REF_NAME.md"
+            --title "umap-alternative $RELEASE_TAG preview" \
+            --notes-file "docs/releases/$RELEASE_TAG.md"

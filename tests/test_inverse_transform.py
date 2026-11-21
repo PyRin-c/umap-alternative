@@ -31,7 +31,7 @@ def estimator(**overrides):
 
 
 def assert_bits(output, expected):
-    assert isinstance(output, np.ndarray)
+    assert type(output) is np.ndarray
     assert output.dtype == np.float32
     np.testing.assert_array_equal(output.view(np.uint32), expected)
 
@@ -78,7 +78,7 @@ def test_dense_inverse_uses_the_fitted_metric_and_scales(name):
             assert_bits(output, checkpoint["bits"])
 
 
-@pytest.mark.parametrize("case", REFERENCE["cases"], ids=lambda case: case["name"])
+@pytest.mark.parametrize("case", REFERENCE["cases"] + REFERENCE["tie_diagnostics"], ids=lambda case: case["name"])
 def test_inverse_uses_public_embedding_and_matches_locked_checkpoints(case):
     n_features, n_components = case["n_features"], case["n_components"]
     training = np.asarray(case["training"], dtype=np.float32).reshape(-1, n_features)

@@ -148,7 +148,8 @@ def test_recursive_anchor_can_use_a_subset(weighted, bits):
         4, "transition", None,
     )
     assert rng.get_state()[2] == 134
-    np.testing.assert_allclose(actual, np.asarray(bits, dtype=np.uint32).view(np.float32), atol=2e-6, rtol=0)
+    assert actual.dtype == np.float32
+    np.testing.assert_array_equal(actual.view(np.uint32), bits)
 
 
 def test_aligned_can_use_continuous_target_neighbor_counts():

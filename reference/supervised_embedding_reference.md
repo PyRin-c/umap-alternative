@@ -66,7 +66,9 @@ Independent feature-only fits and target-weight controls supported a
 directed target graph with local connectivity one. The blended graph uses
 the union of the feature and directed target supports. A missing feature
 membership uses half the smallest positive feature membership, floored at
-`1e-8`. A missing target membership uses `1e-4`. On this directed support,
+`1e-8`. For a missing target membership, apply the same rule using the
+target graph's smallest positive membership and cap the result at `1e-4`.
+On this directed support,
 below `0.5` the product is `feature * target**(weight / (1 - weight))`.
 From `0.5` onward it is `feature**((1 - weight) / weight) * target`.
 Calculate the product in float64, round to float32, divide each row by its
@@ -80,26 +82,26 @@ ordinary numeric value.
 The Rust stage accepts Euclidean, Manhattan and Chebyshev targets. The
 fixtures cover scalar and vector labels, weight endpoints, values on both
 sides of `0.5`, different feature and target neighborhood widths, a small
-feature membership and an independent 11-row holdout. Both fit methods
-matched the structure of all 36 emitted CSR graphs on each host. They
-matched membership bits in 34 graphs and 1,388 of 1,420 stored entries.
-Eight of nine embeddings and 116 of 138 coordinate bits matched on each
-host, including active random and spectral layouts at 19 or 30 epochs.
-The tests use bitwise checks for the repeatable cases and explicit graph
-tolerances for the two holdouts below.
+feature membership and independent 11-row holdouts. The tests compare the
+structure and weights of all 36 emitted CSR graphs through both fit methods,
+and every recorded embedding coordinate, including active random and
+spectral layouts at 19 or 30 epochs.
 [Windows fixture](fixtures/umap-learn-0.6.0-supervised-continuous-windows-x86_64.json)
 [Ubuntu fixture](fixtures/umap-learn-0.6.0-supervised-continuous-ubuntu-x86_64.json)
 
-| Holdout | Changed stored weights | Max weight difference | Changed coordinates | Max coordinate difference |
-| --- | ---: | ---: | ---: | ---: |
-| Euclidean target, spectral | 16/92 | `1.102686e-6` | 22/22 | `4.098988` |
-| Manhattan target, random | 0/86 | `0` | 0/22 | `0` |
-| Chebyshev target, random | 16/86 | `6.529689e-5` | 0/22 | `0` |
+| Holdout | Matching stored weights | Matching coordinates |
+| --- | ---: | ---: |
+| Euclidean target, spectral | 92/92 | 22/22 |
+| Manhattan target, random | 86/86 | 22/22 |
+| Chebyshev target, random | 86/86 | 22/22 |
 
-Feature-only and weight-zero controls for those holdouts matched exactly.
-A separate wide Euclidean distance reconstruction reduced the graph-mode
-holdout difference to two stored weights at the tested weight `0.37`. The
-remaining distance and layout arithmetic is unresolved.
+The Euclidean target computes squared distances with wide subtraction and
+accumulation, rounds them to float32, then takes the float32 square root.
+This matches all 66 ranked distances passed to the public scale search in
+the Euclidean holdout. The smallest Chebyshev target membership is about
+`2.4e-5`. Using half of that value for missing target edges reproduces the
+weighted intersection and resulting normalized CSR. Both holdout tests
+compare exact weight and coordinate bits.
 
 The scalar cosine controls matched a candidate graph reconstruction.
 Vector cosine weight `0.5` and `1` differed in 20/38 and 14/38 stored weights,

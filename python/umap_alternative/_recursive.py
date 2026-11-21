@@ -47,7 +47,8 @@ def _sampled_pca_anchor(features, n_components, rng, *, graph=None, sample_size=
     # The projection draws one normal sketch with eight extra columns.
     sample_size = max(_ANCHOR_SAMPLE_SIZE if sample_size is None else sample_size, n_components)
     sampled = len(features) > sample_size
-    anchors = rng.choice(len(features), size=sample_size, replace=False) if sampled else None
+    # Accumulate the sampled rows in their original training order.
+    anchors = np.sort(rng.choice(len(features), size=sample_size, replace=False)) if sampled else None
     sample = features[anchors] if sampled else features
     # Accumulate column sums in float32, then divide and center in float64.
     sample = np.ascontiguousarray(sample, dtype=np.float32)

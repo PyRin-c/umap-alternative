@@ -328,7 +328,7 @@ def _fit_modern_initialization(
     return coordinates
 
 
-def _rank_tied_manhattan_distances(distances, k):
+def _rank_tied_float64_distances(distances, k):
     return np.argsort(np.asarray(distances, dtype=np.float64))[:k].tolist()
 
 
@@ -337,7 +337,7 @@ def _rank_tied_sparse_training_distances(distances, k):
 
 
 def _sparse_tie_ranker(metric):
-    return _rank_tied_manhattan_distances if metric == "manhattan" else _rank_tied_dense_distances
+    return _rank_tied_float64_distances if metric == "manhattan" else _rank_tied_dense_distances
 
 
 def _modern_projector(rng, shape, *, draw_seed):
@@ -1781,6 +1781,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             fitted_distances=distances,
             unique_fit=unique_fit,
             metric_gradient=metric.distance_gradient if configured else None,
+            rank_ties=_rank_tied_float64_distances,
             **self._embedding_transform_options,
         )
         return np.asarray(coordinates, dtype=np.float32).reshape(queries.shape[0], n_features)

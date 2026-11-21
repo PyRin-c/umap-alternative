@@ -19,7 +19,7 @@ use crate::fuzzy_graph::{
 use crate::layout::{LayoutError, validate_csr_rows, validate_csr_shape};
 use crate::neighbors::{
     DistanceMetric, KnnError, Neighbor, PrecomputedKnnError, dense_knn_counting_cutoff,
-    exhaustive_knn_with_metric, exhaustive_manhattan_target_knn, precomputed_knn,
+    exhaustive_continuous_target_knn, exhaustive_knn_with_metric, precomputed_knn,
 };
 
 pub use crate::fuzzy_graph::supplied_neighbors::{
@@ -532,22 +532,13 @@ fn compose_continuous_target(
     isolated: usize,
 ) -> Result<CsrGraph, DenseContinuousGraphFitError> {
     let n_rows = graph.n_rows;
-    let neighbors = if target.metric == DistanceMetric::Manhattan {
-        exhaustive_manhattan_target_knn(
-            target.values,
-            n_rows,
-            target.n_features,
-            target.n_neighbors,
-        )
-    } else {
-        exhaustive_knn_with_metric(
-            target.values,
-            n_rows,
-            target.n_features,
-            target.n_neighbors,
-            target.metric,
-        )
-    }
+    let neighbors = exhaustive_continuous_target_knn(
+        target.values,
+        n_rows,
+        target.n_features,
+        target.n_neighbors,
+        target.metric,
+    )
     .map_err(|error| DenseContinuousGraphFitError::TargetGraph(error.into()))?;
     for (row, candidates) in neighbors.iter().enumerate() {
         for (position, neighbor) in candidates.iter().enumerate() {

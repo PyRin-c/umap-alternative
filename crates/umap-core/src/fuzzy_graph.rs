@@ -512,7 +512,6 @@ pub(crate) fn continuous_intersection(
         .filter(|&weight| weight > 0.0)
         .reduce(f32::min)
         .map_or(1.0e-8, |minimum| (f64::from(minimum) / 2.0).max(1.0e-8));
-    let target_floor = 1.0e-4_f64;
     let k = neighbors[0].len();
     let exponent = if target_weight < 0.5 {
         target_weight / (1.0 - target_weight)
@@ -520,15 +519,30 @@ pub(crate) fn continuous_intersection(
         (1.0 - target_weight) / target_weight
     };
 
+    let targets: Vec<Vec<_>> = neighbors
+        .iter()
+        .enumerate()
+        .map(|(row, neighbors)| {
+            let (rho, sigma) = row_parameters(&distances[row * k..(row + 1) * k], 1.0, batch_floor);
+            let mut memberships: Vec<_> = neighbors
+                .iter()
+                .filter(|neighbor| neighbor.index != row)
+                .map(|neighbor| (neighbor.index, membership(neighbor.distance, rho, sigma)))
+                .filter(|&(_, weight)| weight > 0.0)
+                .collect();
+            memberships.sort_unstable_by_key(|&(column, _)| column);
+            memberships
+        })
+        .collect();
+    let target_floor = targets
+        .iter()
+        .flatten()
+        .map(|&(_, weight)| f64::from(weight))
+        .fold(1.0, f64::min);
+    let target_floor = (target_floor / 2.0).clamp(1.0e-8, 1.0e-4);
+
     let mut directed = Vec::with_capacity(features.n_rows);
-    for (row, neighbors) in neighbors.iter().enumerate() {
-        let (rho, sigma) = row_parameters(&distances[row * k..(row + 1) * k], 1.0, batch_floor);
-        let mut target = neighbors
-            .iter()
-            .filter(|neighbor| neighbor.index != row)
-            .map(|neighbor| (neighbor.index, membership(neighbor.distance, rho, sigma)))
-            .filter(|&(_, weight)| weight > 0.0)
-            .collect::<Vec<_>>();
+    for (row, target) in targets.iter().enumerate() {
         let entries = features.indptr[row]..features.indptr[row + 1];
         let columns = &features.indices[entries.clone()];
         let feature_weights = &features.data[entries];
@@ -537,13 +551,12 @@ pub(crate) fn continuous_intersection(
         support.sort_unstable();
         support.dedup();
 
-        target.sort_unstable_by_key(|&(column, _)| column);
         let mut memberships = Vec::with_capacity(support.len());
         for column in support {
             let left = columns
                 .binary_search(&column)
                 .map_or(0.0, |i| feature_weights[i]);
-            let right = find_membership(&target, column);
+            let right = find_membership(target, column);
             if left == 0.0 && right == 0.0 {
                 continue;
             }

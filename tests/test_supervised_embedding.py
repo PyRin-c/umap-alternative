@@ -23,10 +23,10 @@ def load_fixture(stage):
 CATEGORICAL = load_fixture("embedding")
 CONTINUOUS = load_fixture("continuous")
 SUPPORTED_TARGET_METRICS = {"euclidean", "manhattan", "chebyshev"}
-GRAPH_RESIDUALS = {"euclidean_holdout": 1.2e-6, "chebyshev_holdout": 6.6e-5}
 
 
 def assert_array_bits(array, expected):
+    assert type(array) is np.ndarray
     assert array.shape == tuple(expected["shape"])
     assert array.dtype.name == expected["dtype"]
     bits_dtype = np.uint32 if array.dtype == np.float32 else np.uint64
@@ -66,13 +66,14 @@ def exercise_fit(fixture, name, method, monkeypatch):
     if graph is None:
         assert not hasattr(model, "graph_")
     else:
-        assert_csr_matches(model.graph_, graph, atol=GRAPH_RESIDUALS.get(name, 0.0))
+        assert type(model.graph_).__name__ == graph["type"]
+        assert_csr_matches(model.graph_, graph)
         assert model.n_neighbors_ == min(model.n_neighbors, len(data) - 1)
     expected = case["embedding"]
     if expected is None:
         assert not hasattr(model, "embedding_")
     else:
-        if "repeat_embeddings" in case or name == "euclidean_holdout":
+        if "repeat_embeddings" in case:
             assert model.embedding_.shape == tuple(expected["shape"])
             assert model.embedding_.dtype.name == expected["dtype"]
             assert np.isfinite(model.embedding_).all()

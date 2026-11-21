@@ -70,11 +70,16 @@ pub struct DenseInverseOutput {
     pub exterior_queries: usize,
 }
 
+/// Select the closest candidate positions in distance order when distances tie.
+pub type InverseCandidateRanker<'a> = dyn FnMut(&[f64], usize) -> Vec<usize> + 'a;
+
 /// Errors validating or reconstructing a dense inverse query batch.
 #[derive(Debug, PartialEq)]
 pub enum DenseInverseError {
     /// A custom feature metric returned an invalid distance or gradient.
     InvalidGradient,
+    /// A tie ranker returned invalid positions or distances out of order.
+    CandidateOrder,
     /// The training matrix shape or values are invalid.
     Training,
     /// The embedding matrix shape or values are invalid.
@@ -101,6 +106,7 @@ impl fmt::Display for DenseInverseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidGradient => f.write_str("invalid inverse metric distance or gradient"),
+            Self::CandidateOrder => f.write_str("invalid inverse candidate order"),
             Self::Training => f.write_str("invalid dense inverse training matrix"),
             Self::Embedding => f.write_str("invalid fitted embedding for dense inverse transform"),
             Self::Queries => f.write_str("invalid dense inverse query matrix"),
@@ -260,7 +266,7 @@ pub fn initialize_dense_inverse(
     a: f64,
     b: f64,
 ) -> Result<DenseInverseOutput, DenseInverseError> {
-    initialize(input, a, b).map(|(output, _)| output)
+    initialize(input, a, b, None).map(|(output, _)| output)
 }
 
 /// Reconstruct dense Euclidean features and run serial inverse layout updates.
@@ -287,12 +293,31 @@ pub fn inverse_transform_dense_with_metric(
     layout: DenseInverseLayout,
     metric: DistanceMetric,
 ) -> Result<DenseInverseOutput, DenseInverseError> {
+    inverse_transform_dense_with_metric_and_ranker(input, scales, a, b, layout, metric, None)
+}
+
+/// Reconstruct features with a metric and optional caller-defined distance tie order.
+pub fn inverse_transform_dense_with_metric_and_ranker(
+    input: &DenseInverseInput<'_>,
+    scales: &[InverseLocalScale],
+    a: f64,
+    b: f64,
+    layout: DenseInverseLayout,
+    metric: DistanceMetric,
+    ranker: Option<&mut InverseCandidateRanker<'_>>,
+) -> Result<DenseInverseOutput, DenseInverseError> {
     if metric.is_boolean() {
         return Err(DenseInverseError::UnsupportedMetric(metric));
     }
-    inverse_transform_dense_with_gradient(input, scales, a, b, layout, |left, right, gradient| {
-        Ok(metric_gradient(metric, left, right, gradient))
-    })
+    inverse_transform_dense_with_gradient_and_ranker(
+        input,
+        scales,
+        a,
+        b,
+        layout,
+        |left, right, gradient| Ok(metric_gradient(metric, left, right, gradient)),
+        ranker,
+    )
 }
 
 /// Reconstruct features using a caller-provided original-space distance and gradient.
@@ -304,9 +329,26 @@ pub fn inverse_transform_dense_with_gradient(
     layout: DenseInverseLayout,
     gradient: impl FnMut(&[f32], &[f32], &mut [f64]) -> Result<f64, DenseInverseError>,
 ) -> Result<DenseInverseOutput, DenseInverseError> {
+    inverse_transform_dense_with_gradient_and_ranker(input, scales, a, b, layout, gradient, None)
+}
+
+/// Reconstruct features with a caller-defined metric gradient and optional distance tie order.
+///
+/// When a tie affects the selected prefix, the ranker receives the full list
+/// of candidate distances in discovery order and returns the closest positions
+/// in distance order. Without a ranker, equal distances keep discovery order.
+pub fn inverse_transform_dense_with_gradient_and_ranker(
+    input: &DenseInverseInput<'_>,
+    scales: &[InverseLocalScale],
+    a: f64,
+    b: f64,
+    layout: DenseInverseLayout,
+    gradient: impl FnMut(&[f32], &[f32], &mut [f64]) -> Result<f64, DenseInverseError>,
+    ranker: Option<&mut InverseCandidateRanker<'_>>,
+) -> Result<DenseInverseOutput, DenseInverseError> {
     validate_parameters(a, b, layout.initial_alpha).map_err(DenseInverseError::Layout)?;
     validate_repulsion_strength(layout.repulsion_strength).map_err(DenseInverseError::Layout)?;
-    let (mut output, edges) = initialize(input, a, b)?;
+    let (mut output, edges) = initialize(input, a, b, ranker)?;
     if layout.n_epochs <= 1 || layout.initial_alpha == 0.0 {
         return Ok(output);
     }
@@ -349,6 +391,7 @@ fn initialize(
     input: &DenseInverseInput<'_>,
     a: f64,
     b: f64,
+    mut ranker: Option<&mut InverseCandidateRanker<'_>>,
 ) -> Result<(DenseInverseOutput, Vec<InverseEdge>), DenseInverseError> {
     validate_parameters(a, b, 0.0).map_err(DenseInverseError::Layout)?;
     let DenseInverseInput {
@@ -378,7 +421,9 @@ fn initialize(
     let mut edges = Vec::new();
     let mut seen = vec![usize::MAX; n_training];
     let mut candidates = Vec::new();
-    let mut ranked = Vec::new();
+    let mut distances = Vec::new();
+    let mut order = Vec::new();
+    let mut selected = Vec::new();
     let mut weights = Vec::new();
     for (row, (query, simplex)) in queries
         .chunks_exact(n_components)
@@ -415,15 +460,43 @@ fn initialize(
         if candidates.len() < k {
             return Err(DenseInverseError::Triangulation);
         }
-        ranked.clear();
-        ranked.extend(candidates.iter().map(|&vertex| (vertex, distance(vertex))));
-        ranked.sort_by(|a, b| a.1.total_cmp(&b.1));
-        ranked.truncate(k);
+        distances.clear();
+        distances.extend(candidates.iter().map(|&vertex| distance(vertex)));
+        order.clear();
+        order.extend(0..candidates.len());
+        order.sort_by(|&left, &right| distances[left].total_cmp(&distances[right]));
+        let ranked_ties;
+        let order = match ranker.as_deref_mut() {
+            Some(rank)
+                if order
+                    .windows(2)
+                    .take(k)
+                    .any(|pair| distances[pair[0]] == distances[pair[1]]) =>
+            {
+                ranked_ties = rank(&distances, k);
+                selected.clear();
+                selected.resize(distances.len(), false);
+                if ranked_ties.len() != k
+                    || ranked_ties
+                        .iter()
+                        .zip(&order)
+                        .any(|(&position, &expected)| {
+                            position >= distances.len()
+                                || distances[position] != distances[expected]
+                                || std::mem::replace(&mut selected[position], true)
+                        })
+                {
+                    return Err(DenseInverseError::CandidateOrder);
+                }
+                &ranked_ties
+            }
+            _ => &order[..k],
+        };
         weights.clear();
-        weights.extend(ranked.iter().map(|&(vertex, distance)| InverseEdge {
+        weights.extend(order.iter().map(|&index| InverseEdge {
             row,
-            vertex,
-            weight: 1.0 / (1.0 + a * distance.powf(2.0 * b)),
+            vertex: candidates[index],
+            weight: 1.0 / (1.0 + a * distances[index].powf(2.0 * b)),
         }));
         // The optimizer visits distance-ranked edges. Initialization traverses
         // the same edges in original row order, rounding after each addition.

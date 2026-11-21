@@ -31,10 +31,10 @@ use umap_core::fuzzy_graph::{
     combine_memberships, compute_knn_memberships, reset_membership_scales, smooth_knn_distances,
 };
 use umap_core::inverse::{
-    DenseInverseError, DenseInverseInput, DenseInverseLayout, InverseTriangulation,
-    dense_inverse_epochs, fit_dense_inverse_scales_with_metric,
-    fit_inverse_scales_from_ranked_distances, inverse_transform_dense_with_gradient,
-    inverse_transform_dense_with_metric,
+    DenseInverseError, DenseInverseInput, DenseInverseLayout, InverseCandidateRanker,
+    InverseTriangulation, dense_inverse_epochs, fit_dense_inverse_scales_with_metric,
+    fit_inverse_scales_from_ranked_distances, inverse_transform_dense_with_gradient_and_ranker,
+    inverse_transform_dense_with_metric_and_ranker,
 };
 use umap_core::layout::LayoutError;
 use umap_core::modern_initialization::{
@@ -2161,7 +2161,7 @@ fn _transform_dense_embedding(
     n_features, n_components, k, a, b, learning_rate, fit_epochs,
     repulsion_strength, negative_sample_rate, transform_seed, local_connectivity,
     use_computed_scales=true, metric="euclidean", cutoff=None, fitted_distances=None, unique_fit=None,
-    metric_gradient=None
+    metric_gradient=None, rank_ties=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn _inverse_transform_dense_embedding(
@@ -2188,6 +2188,7 @@ fn _inverse_transform_dense_embedding(
     fitted_distances: Option<(Vec<f32>, usize, usize)>,
     unique_fit: Option<(Vec<f32>, Vec<usize>)>,
     metric_gradient: Option<Py<PyAny>>,
+    rank_ties: Option<Py<PyAny>>,
 ) -> PyResult<Vec<f32>> {
     let metric = parse_metric(metric)?;
     let options = GraphOptions::new(local_connectivity, 1.0)
@@ -2217,6 +2218,7 @@ fn _inverse_transform_dense_embedding(
         },
     };
     let mut callback_error = None;
+    let mut rank_error = None;
     let output = py.detach(|| {
         let scales = if needs_scales {
             if let Some((distances, width, target)) = &fitted_distances {
@@ -2245,8 +2247,19 @@ fn _inverse_transform_dense_embedding(
         } else {
             Vec::new()
         };
+        let mut rank = |distances: &[f64], k| {
+            python_rank_ties(
+                rank_ties.as_ref().expect("configured tie ranker"),
+                distances,
+                k,
+                &mut rank_error,
+            )
+        };
+        let ranker = rank_ties
+            .as_ref()
+            .map(|_| &mut rank as &mut InverseCandidateRanker<'_>);
         if let Some(callback) = &metric_gradient {
-            inverse_transform_dense_with_gradient(
+            inverse_transform_dense_with_gradient_and_ranker(
                 &input,
                 &scales,
                 a,
@@ -2272,13 +2285,16 @@ fn _inverse_transform_dense_embedding(
                     out.copy_from_slice(&gradient);
                     Ok(distance)
                 },
+                ranker,
             )
         } else {
-            inverse_transform_dense_with_metric(&input, &scales, a, b, layout, metric)
+            inverse_transform_dense_with_metric_and_ranker(
+                &input, &scales, a, b, layout, metric, ranker,
+            )
         }
         .map(|result| result.coordinates)
     });
-    if let Some(error) = callback_error {
+    if let Some(error) = callback_error.or(rank_error) {
         return Err(error);
     }
     output.map_err(|error| PyValueError::new_err(error.to_string()))

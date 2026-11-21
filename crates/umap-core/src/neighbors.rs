@@ -223,11 +223,12 @@ pub(crate) fn dense_knn_counting_cutoff(
     )
 }
 
-pub(crate) fn exhaustive_manhattan_target_knn(
+pub(crate) fn exhaustive_continuous_target_knn(
     data: &[f32],
     n_rows: usize,
     n_features: usize,
     k: usize,
+    metric: DistanceMetric,
 ) -> Result<Vec<Vec<Neighbor>>, KnnError> {
     dense_knn_by(
         data,
@@ -236,12 +237,24 @@ pub(crate) fn exhaustive_manhattan_target_knn(
         k,
         f32::INFINITY,
         false,
-        |left, right| {
-            // Continuous Manhattan targets use wide subtraction.
-            left.iter()
+        |left, right| match metric {
+            // The dense float32 target matrix stores the squared distance
+            // before taking its square root.
+            DistanceMetric::Euclidean => (left
+                .iter()
+                .zip(right)
+                .map(|(&left, &right)| {
+                    let delta = f64::from(left) - f64::from(right);
+                    delta * delta
+                })
+                .sum::<f64>() as f32)
+                .sqrt(),
+            DistanceMetric::Manhattan => left
+                .iter()
                 .zip(right)
                 .map(|(&left, &right)| (f64::from(left) - f64::from(right)).abs())
-                .sum::<f64>() as f32
+                .sum::<f64>() as f32,
+            _ => metric.distance(left, right),
         },
     )
     .map(|(neighbors, _)| neighbors)

@@ -128,6 +128,14 @@ the archived star, its positive coarse updates, the rank-one
 holdouts, and the four-level transition and fuzzy-union cases.
 The repeated-singular-value controls compare the PCA subspace.
 
+## Sampled PCA row order
+
+The draw selects the anchor set. The PCA input then orders the selected
+rows by their original training indices before accumulating the column
+sums. Both 17-row controls select the same seven anchors, one with
+uniform graph weights and one with varying weights. The port matches all
+68 output coordinate bits and the caller RNG cursor in those controls.
+
 ## Reproduce
 
 Use separate locked reference and project environments with one

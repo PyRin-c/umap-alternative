@@ -3,8 +3,9 @@ use std::collections::BTreeMap;
 use umap_core::inverse::{
     DenseInverseError, DenseInverseInput, DenseInverseLayout, InverseTriangulation,
     dense_inverse_epochs, fit_dense_inverse_scales, initialize_dense_inverse,
-    inverse_transform_dense,
+    inverse_transform_dense, inverse_transform_dense_with_metric_and_ranker,
 };
+use umap_core::neighbors::DistanceMetric;
 
 #[derive(Deserialize)]
 struct Fixture {
@@ -185,6 +186,34 @@ fn reports_inverse_distance_tie_bits() {
         total += expected.len();
     }
     eprintln!("distance ties {matched}/{total}");
+}
+
+#[test]
+fn rejects_invalid_inverse_tie_ranks() {
+    let case = fixture()
+        .tie_diagnostics
+        .into_iter()
+        .find(|case| case.name == "ties_36_2")
+        .unwrap();
+    let layout = DenseInverseLayout {
+        n_epochs: 0,
+        initial_alpha: case.initial_alpha,
+        repulsion_strength: 1.0,
+        negative_sample_rate: 5.0,
+        seed: case.transform_seed,
+    };
+    for invalid in [vec![], vec![usize::MAX, 0], vec![0, 0]] {
+        let result = inverse_transform_dense_with_metric_and_ranker(
+            &case.input(),
+            &[],
+            case.a,
+            case.b,
+            layout,
+            DistanceMetric::Euclidean,
+            Some(&mut |_, _| invalid.clone()),
+        );
+        assert_eq!(result, Err(DenseInverseError::CandidateOrder));
+    }
 }
 
 #[test]

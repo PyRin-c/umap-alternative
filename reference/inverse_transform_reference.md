@@ -25,6 +25,11 @@ this repository. [Original transform checkpoints](transform_reference.md)
   Delaunay neighbors in ascending vertex order. Rank all discovered candidates
   by distance, including those discovered during the last visit, and keep
   the closest `k`.
+- The Python estimator uses NumPy's float64 `argsort` on the full discovery
+  buffer when equal distances affect the selected prefix. The Rust ranker
+  verifies that the selected positions are unique and at the expected
+  distances. Direct Rust and C entry points retain discovery order by
+  default. Rust callers can supply a tie ranker.
 - For ranking and the curve, subtract and square in float32, then sum and
   take the square root in float64. Evaluate `1 / (1 + a * d^(2 * b))` and
   normalize the memberships in float64. Accumulate the feature coordinates
@@ -109,12 +114,15 @@ matched every coordinate bit in the regression fixture on both platforms.
 | Initialization and one-epoch runs | 2,365 / 2,365 |
 | Positive epochs with attraction alone | 156 / 156 |
 | Positive epochs with attraction and repulsion | 288 / 288 |
-| Separate tied-distance diagnostics | 165 / 190 |
+| Separate tied-distance diagnostics, default Rust ordering | 165 / 190 |
+| Separate tied-distance diagnostics, Python estimator | 190 / 190 |
 
 The optimized counts include 9/9 coordinates for each of the original
-45-epoch interior and exterior checkpoints. The tied-distance differences
-occur in 4 of 15 cases, where a tie changes which vertices fill the candidate
-quota.
+45-epoch interior and exterior checkpoints. The default Rust ordering
+chooses different candidates in four of the fifteen tied-distance cases.
+Public-wheel observations of all 50 tied queries gave the same discovered
+candidates as the replay. NumPy's float64 ordering reproduced the selected
+vertices and their optimizer order in all 50 queries.
 
 The Python tests replay the locked checkpoints through the estimator and
 also reproduce both original 45-epoch results from a real fit and forward

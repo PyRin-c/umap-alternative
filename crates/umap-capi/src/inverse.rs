@@ -233,6 +233,7 @@ fn map_inverse_error(error: DenseInverseError) -> u32 {
         DenseInverseError::Neighbors(error) => map_knn_error(error),
         DenseInverseError::LocalScales
         | DenseInverseError::InvalidGradient
+        | DenseInverseError::CandidateOrder
         | DenseInverseError::UnsupportedMetric(_)
         | DenseInverseError::NoMembership { .. }
         | DenseInverseError::Sampling(_)

@@ -1,6 +1,6 @@
 # umap-alternative
 
-UMAP を Rust で独立実装するリポジトリです。`umap-learn` との数値の完全一致を検証したうえで高速化し、Rust ライブラリ、C ABI、PyO3 + Maturin による Python Wheel として提供します。
+UMAP を Rust で独立実装するリポジトリです。固定した環境で `umap-learn 0.6.0` の検証ケースと比較し、Rust ライブラリ、C ABI、PyO3 + Maturin による Python Wheel として提供します。
 
 `crates/umap-core` が Rust 本体の置き場で、`crates/umap-python` が Python 拡張です。Python Wheel は `UMAP(transform_mode="graph")` のグラフ構築と変換、および固定シードを使った密な入力の埋め込みを提供します。`crates/umap-capi` の C ABI は、密な入力のグラフ構築と固定シードによる埋め込みに加え、学習済みデータに対する新しい入力の埋め込み変換と有向 COO グラフを提供します。数値のビット単位の一致は、記録済みの fixture で検証しています。
 
@@ -25,8 +25,10 @@ uv run --locked pytest
 
 ## Python Wheel
 
+Python パッケージは **CPython 3.10 以上**を対象とします。Windows x64 と Linux x86-64 の CI では CPython 3.10〜3.15 の各バージョンで wheel を作成し、インストール後の学習・変換・更新と戻り値の型を確認します。公開 `umap-learn` との数値のビット比較は、依存バージョンを固定した CPython 3.13.12 の環境で行います。
+
 `from umap_alternative import ParametricUMAP` で Keras を使った埋め込みを学習できます。
-複数行の学習には TensorFlow と Keras が必要です。ライブラリのインポート時には読み込みません。
+複数行の学習には、使用する Python 版に対応した TensorFlow と Keras が必要です。ライブラリのインポート時には読み込みません。
 `encoder` と `decoder` には Keras モデルを指定できます。`parametric_reconstruction=True`
 の場合、`inverse_transform` は学習済みデコーダを使います。
 [Windows CPU での検証結果](reference/parametric_reference.md)
@@ -35,7 +37,15 @@ uv run --locked pytest
 uv run --locked maturin build --release --locked --interpreter python
 ```
 
-Wheel は `target/wheels/` に生成されます。Python パッケージ名は `umap-alternative`、インポート名は `umap_alternative` です。Windows と Linux の CI では Wheel を隔離環境にインストールし、インポートまで確認します。
+開発用以外の Python 向けにビルドする場合は、対象バージョンを指定します。CPython 3.10 向けの例です。CPython 3.15 の自動取得には uv 0.13.9 で動作確認しています。
+
+```sh
+uv python install 3.10
+uv sync --locked --python 3.10 --no-install-project
+uv run --no-sync --python 3.10 maturin build --release --locked --compatibility pypi --interpreter python
+```
+
+Wheel は `target/wheels/` に生成されます。Python パッケージ名は `umap-alternative`、インポート名は `umap_alternative` です。
 
 `UMAP(random_state=42, n_jobs=1, compatibility_layout=True).fit_transform(X)` は、密な特徴量、および Euclidean、Manhattan、Chebyshev の疎な特徴量から `float32` の `embedding_` を作り、学習時の CSR グラフを `graph_` に格納します。既定の `init="spectral"` は枝刈り後のグラフの連結成分を配置します。グラフが連結の場合、出力次元数はサンプル数未満にしてください。`init="random"` や、各行が異なり各列に幅がある NumPy 配列も指定できます。`n_epochs` には非負の整数を指定でき、小規模データでは `None` が 500 エポックになります。学習データと正規化後の格納内容が一致する入力の `transform` は学習済みの座標を返します。
 

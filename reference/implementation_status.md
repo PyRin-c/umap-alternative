@@ -31,6 +31,8 @@
 
 ## 数値比較の再現
 
+Python の wheel は Windows x64 と Linux x86-64 で CPython 3.10〜3.15 の学習・変換・更新と戻り値の型を照合する。固定した CPython 3.13.12 の参照フィクスチャを CPython 3.10.20、NumPy 2.2.6、SciPy 1.15.3 の環境でそのまま比較すると、座標、同距離の順位、疎行列の書き換えなどに差が出る。公開版も同じ 3.10 環境で実行した Windows の追加照合では、同距離を含む trustworthiness 21ケース、CSR の離散ターゲット処理1ケース、スペクトル初期化1ケースが一致した。
+
 固定した公開 wheel から、直接距離44値と Minkowski の推定器の入出力を採取した。Windows と Ubuntu WSL で採取ファイルは同一だった。推定器は、学習 CSR 34重み、外部変換 COO 8項目、更新後 CSR 42重み、学習18・変換4・更新後22座標をビット比較する。学習後の外部変換には同距離の候補を含め、COO の格納順も照合する。
 
 Windows と Ubuntu WSL の両方で、インストール済み Python wheel の4,789件、locked release の Rust 204件、C11 スモークテスト2本、警告をエラーにした Clippy が通過した。

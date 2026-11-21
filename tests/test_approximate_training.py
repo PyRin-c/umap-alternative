@@ -20,14 +20,6 @@ def digest(values, dtype):
     return hashlib.sha256(np.asarray(values, dtype=dtype).tobytes(order="C")).hexdigest()
 
 
-def assert_numeric(actual, expected, *, max_ulp):
-    if isinstance(expected, str):
-        assert digest(actual, "<f4") == expected
-    else:
-        reference = np.frombuffer(bytes.fromhex(expected["float32_le"]), dtype="<f4")
-        np.testing.assert_array_max_ulp(np.ravel(actual), reference, maxulp=max_ulp)
-
-
 @pytest.mark.parametrize(
     "case", REFERENCE["cases"], ids=lambda c: f"{c['metric']}-{c['rows']}-{c['features']}-k{c['width']}"
 )
@@ -43,21 +35,21 @@ def test_approximate_training_and_transform(case):
     assert isinstance(index, ApproximateFeatureIndex)
     columns, distances = index.training_ranks()
     assert digest(columns, "<i4") == case["columns"]
-    assert_numeric(distances, case["distances"], max_ulp=1)
+    assert digest(distances, "<f4") == case["distances"]
     graph = model.graph_.tocsr()
     assert digest(graph.indptr, "<i8") == case["indptr"]
     assert digest(graph.indices, "<i4") == case["indices"]
-    assert_numeric(graph.data, case["weights"], max_ulp=16)
+    assert digest(graph.data, "<f4") == case["weights"]
 
     queries = np.random.RandomState(5).normal(size=(32, features)).astype(np.float32)
     for query_width, expected in case["query"].items():
         indices, distances = index.query(queries, k=int(query_width))
         assert digest(indices, "<i4") == expected["indices"]
-        assert_numeric(distances, expected["distances"], max_ulp=4)
+        assert digest(distances, "<f4") == expected["distances"]
     transformed = model.transform(queries).tocoo()
     assert digest(transformed.row, "<i4") == case["transform"]["rows"]
     assert digest(transformed.col, "<i4") == case["transform"]["columns"]
-    assert_numeric(transformed.data, case["transform"]["weights"], max_ulp=1)
+    assert digest(transformed.data, "<f4") == case["transform"]["weights"]
 
 
 @pytest.mark.parametrize(

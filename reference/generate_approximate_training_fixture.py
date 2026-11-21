@@ -32,12 +32,6 @@ def digest(values, dtype):
     return hashlib.sha256(np.asarray(values, dtype=dtype).tobytes(order="C")).hexdigest()
 
 
-def numerical(values, keep_bits):
-    if keep_bits:
-        return {"float32_le": np.asarray(values, dtype="<f4").tobytes(order="C").hex()}
-    return digest(values, "<f4")
-
-
 def capture():
     from umap import UMAP
     from umap.umap_ import nearest_neighbors
@@ -53,11 +47,16 @@ def capture():
         (128, 32, 5, 39, 43),
         (129, 33, 5, 40, 43),
         (255, 64, 5, 13, 11),
+        (93, 15, 5, 211, 91),
+        (97, 16, 5, 212, 91),
+        (99, 17, 5, 213, 91),
+        (213, 63, 7, 343, 151),
+        (214, 64, 7, 344, 151),
+        (215, 65, 7, 345, 151),
     ))
     for metric, rows, features, width, data_seed, seed in cases:
         data = np.random.RandomState(data_seed).normal(size=(rows, features)).astype(np.float32)
         angular = metric != "euclidean"
-        keep_bits = metric == "cosine" and features >= 31
         columns, distances, search = nearest_neighbors(
             data, width, metric, {}, angular, np.random.RandomState(seed), n_jobs=1,
         )
@@ -74,17 +73,17 @@ def capture():
             )
             query_ranks[query_width] = {
                 "indices": digest(query_indices, "<i4"),
-                "distances": numerical(query_distances, keep_bits),
+                "distances": digest(query_distances, "<f4"),
             }
         transformed = model.transform(queries).tocoo()
         result.append(dict(
             metric=metric, rows=rows, features=features, width=width, data_seed=data_seed, seed=seed,
-            columns=digest(columns, "<i4"), distances=numerical(distances, keep_bits),
+            columns=digest(columns, "<i4"), distances=digest(distances, "<f4"),
             indptr=digest(graph.indptr, "<i8"), indices=digest(graph.indices, "<i4"),
-            weights=numerical(graph.data, keep_bits),
+            weights=digest(graph.data, "<f4"),
             query=query_ranks, transform=dict(
                 rows=digest(transformed.row, "<i4"), columns=digest(transformed.col, "<i4"),
-                weights=numerical(transformed.data, keep_bits),
+                weights=digest(transformed.data, "<f4"),
             ),
         ))
     caller_rng = []

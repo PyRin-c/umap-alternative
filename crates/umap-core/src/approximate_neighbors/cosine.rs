@@ -77,6 +77,29 @@ fn squared_norm(row: &[f32]) -> f32 {
 
 pub(super) fn priority(left: &[f32], right: &[f32]) -> f32 {
     let dot = accumulate_projection(left.len(), 0.0, |i, sum| left[i].mul_add(right[i], sum));
+    log_priority(dot)
+}
+
+pub(super) fn batched_priority(left: &[f32], right: &[f32]) -> f32 {
+    // A complete group of four candidates accumulates 16 feature lanes per
+    // dot product. A single candidate accumulates 32 lanes instead.
+    let (left, left_tail) = left.as_chunks::<16>();
+    let (right, right_tail) = right.as_chunks::<16>();
+    let mut lanes = [0.0_f32; 16];
+    for (a, b) in left.iter().zip(right) {
+        for i in 0..16 {
+            lanes[i] = a[i].mul_add(b[i], lanes[i]);
+        }
+    }
+    let reduced =
+        std::array::from_fn(|i| (lanes[i] + lanes[i + 8]) + (lanes[i + 4] + lanes[i + 12]));
+    let dot = accumulate_projection(left_tail.len(), reduce_4_lanes(&reduced), |i, sum| {
+        left_tail[i].mul_add(right_tail[i], sum)
+    });
+    log_priority(dot)
+}
+
+fn log_priority(dot: f32) -> f32 {
     if dot >= 1.0 {
         0.0
     } else if dot > 0.0 {

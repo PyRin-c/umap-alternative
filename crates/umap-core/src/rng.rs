@@ -351,7 +351,7 @@ pub fn recursive_part_labels(
         .collect()
 }
 
-fn next_negative_word(lanes: &mut [i64; 3]) -> i32 {
+pub(crate) fn next_negative_word(lanes: &mut [i64; 3]) -> i32 {
     lanes[0] = advance_lane(lanes[0], 0xffff_fffe, 13, 12, 19);
     lanes[1] = advance_lane(lanes[1], 0xffff_fff8, 2, 4, 25);
     lanes[2] = advance_lane(lanes[2], 0xffff_fff0, 3, 17, 11);

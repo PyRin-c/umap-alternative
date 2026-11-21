@@ -275,6 +275,8 @@ impl PreparedQuery {
         let mut result_heap = vec![missing; width];
         let mut frontier = BinaryHeap::new();
         let mut vacant_candidates = Vec::new();
+        let mut unseen_edges = Vec::new();
+        let groups_of_four = data.batches_cosine();
         let positions = self.prepared_positions.as_deref();
         let priority = |point: Neighbor| {
             let position = positions.map_or(point.index, |map| map[point.index]);
@@ -314,12 +316,16 @@ impl PreparedQuery {
             }
             result_heap.fill(missing);
             frontier.clear();
-            let mut visit = |index: usize| {
+            let visit = |seen: &mut [usize], index: usize, batched: bool| {
                 if seen[index] == row {
                     return Ok(None);
                 }
                 seen[index] = row;
-                let distance = query_distance(self.metric, query, data.row(index));
+                let distance = if batched {
+                    cosine::batched_priority(query, data.row(index))
+                } else {
+                    query_distance(self.metric, query, data.row(index))
+                };
                 if !distance.is_finite() {
                     return Err(ApproximateSearchError::NonFiniteDistance {
                         row,
@@ -335,7 +341,7 @@ impl PreparedQuery {
                     tree.leaf(data, DistanceMetric::Euclidean, query)
                 };
                 for &index in leaf {
-                    if let Some(point) = visit(index)? {
+                    if let Some(point) = visit(&mut seen, index, false)? {
                         if point.distance < result_heap[0].distance {
                             sift_down(&mut result_heap, point);
                         }
@@ -347,7 +353,7 @@ impl PreparedQuery {
             } else {
                 for _ in 0..width.min(self.training_width) {
                     let index = sample_absolute_vertex(&mut rng, data.n_rows);
-                    if let Some(point) = visit(index)? {
+                    if let Some(point) = visit(&mut seen, index, false)? {
                         sift_down(&mut result_heap, point);
                         frontier.push(priority(point));
                     }
@@ -358,10 +364,23 @@ impl PreparedQuery {
                 if f32::from_bits(distance) >= bound {
                     break;
                 }
+                let edges = &self.edges[index];
+                let (candidates, batched_len) = if groups_of_four {
+                    unseen_edges.clear();
+                    unseen_edges.extend(
+                        edges
+                            .iter()
+                            .copied()
+                            .filter(|&candidate| seen[candidate] != row),
+                    );
+                    (unseen_edges.as_slice(), unseen_edges.len() / 4 * 4)
+                } else {
+                    (edges.as_slice(), 0)
+                };
                 if epsilon == 0.0 && bound.is_infinite() {
                     vacant_candidates.clear();
-                    for &candidate in &self.edges[index] {
-                        if let Some(point) = visit(candidate)? {
+                    for (i, &candidate) in candidates.iter().enumerate() {
+                        if let Some(point) = visit(&mut seen, candidate, i < batched_len)? {
                             vacant_candidates.push(point);
                         }
                     }
@@ -387,8 +406,8 @@ impl PreparedQuery {
                     }
                     continue;
                 }
-                for &candidate in &self.edges[index] {
-                    if let Some(point) = visit(candidate)?
+                for (i, &candidate) in candidates.iter().enumerate() {
+                    if let Some(point) = visit(&mut seen, candidate, i < batched_len)?
                         && point.distance < bound
                     {
                         if point.distance < result_heap[0].distance {

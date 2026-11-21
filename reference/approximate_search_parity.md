@@ -14,7 +14,7 @@ against both new and still-retained links. A sweep that changes at most
 `floor(n_rows * k / 1000)` directed slots ends refinement. Explicit
 supplied-rank replay retains its existing fixed-round behavior.
 
-The regression covers ten Euclidean, six correlation, and twelve cosine
+The regression covers ten Euclidean, six correlation, and eighteen cosine
 configurations. It compares every ordered training index, distance, CSR
 pointer, column, and weight. The cases include rows 59, 60, and 61, and
 automatic approximate routing at 4,096 rows with widths 5 and 15. The
@@ -56,32 +56,38 @@ layout initialization. Six reference fits cover a fresh state, a cached
 Gaussian, and a cursor that crosses the twist boundary, each at zero and
 two epochs. The tests compare coordinates and the entire final RNG state.
 
-## Remaining numerical differences
+## Cosine accumulation and candidate order
 
-The four 31-, 32-, 33-, and 64-feature cosine cases use bounded numerical
-checks for distances and weights, with exact ordered ranks, CSR support,
-and COO order. The measured differences agree on Windows and Ubuntu.
+A single comparison accumulates full blocks of 32 features. The
+four-candidate path accumulates full blocks of 16 features per dot product,
+then handles four-feature blocks and the scalar tail in the same order as
+the single comparison. One-coordinate probes gave the same priorities in
+both paths. Multi-coordinate probes with repeated training rows revealed
+which priorities came from leaf initialization and which came from
+expansion through the search graph.
 
-| Array | Differing values | Maximum difference |
-| --- | ---: | ---: |
-| Training rank distances | 11 / 3,195 | 1 ULP |
-| Held-out rank distances | 38 / 768 | 4 ULP |
-| Fitted CSR weights | 26 / 3,254 | 16 ULP |
-| Held-out COO weights | 18 / 640 | 1 ULP |
+Training candidates occupy fixed-capacity max heaps. Refinement draws one
+random priority for each direction of a training link. When comparing two
+fresh candidates, a vacant slot ends the run of candidates and the tail
+uses the single-comparison kernel. Comparisons against retained candidates
+skip vacant slots before forming groups. A star supplied through public
+`init_graph`, with one refinement iteration and a sweep of candidate caps,
+distinguishes heap order from row order. The heap model matched all 6,608 observable
+single-versus-batch choices from 75 row-count and candidate-cap combinations.
+Held-out expansion batches four previously unseen neighbors at a time.
 
-The fixture retains each reference float32 value for reproducing these
-differences. Public one-coordinate probes matched the normalized training
-rows involved in the residuals. The remaining differences appear when
-ranking with a multi-coordinate cosine dot product. All other fixture
-cases compare float32 bits directly.
+For example, in the 127-row, 31-feature case, the zero-based pair 50 and 87
+first appears during refinement. Its learned distance bits are `3f1ec3e9`.
+A pre-normalized query for the same pair in a single search leaf yields
+`3f1ec3ea`. The fixture uses NumPy RandomState seed 38 for the features
+and index seed 43.
 
-The 127-row, 31-feature case isolates the training difference to the
-reciprocal pair of rows 50 and 87 with zero-based indices. The fixture
-uses NumPy RandomState seed 38 for these features and index seed 43.
-The normalized rows match the one-coordinate probes, while the fitted
-pair yields a different float32 distance after the multi-coordinate dot.
-Projection ties in the training graph and other degree-cap configurations
-remain outside the captured scope.
+The 31-, 32-, 33-, and 64-feature cases now compare every distance and
+weight bit exactly. Six independent configurations also cover 15, 16,
+17, 63, 64, and 65 features. The 63-feature case exercises grouping past
+vacant retained slots in the second refinement iteration. Projection ties
+in the training graph and other degree-cap configurations remain outside
+the captured scope.
 
 ## Reproduction
 

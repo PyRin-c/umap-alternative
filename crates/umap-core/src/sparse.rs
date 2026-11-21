@@ -12,6 +12,9 @@ use crate::neighbors::{
 };
 use crate::transform::{DenseGraphTransformError, QueryTieRanking};
 
+mod euclidean_index;
+use euclidean_index::SparseEuclideanIndex;
+
 /// Borrowed CSR buffers with their declared shape.
 #[derive(Clone, Copy, Debug)]
 pub struct CsrFeatures<'a> {
@@ -388,20 +391,53 @@ fn csr_knn_counting_cutoff(
         data: normalized_data.as_deref().unwrap_or(input.data),
         ..input
     };
+    let canonical_euclidean = metric == SparseDistanceMetric::Dense(DistanceMetric::Euclidean)
+        && (!allow_duplicates
+            || input.indptr.windows(2).all(|offsets| {
+                input.indices[offsets[0]..offsets[1]]
+                    .windows(2)
+                    .all(|columns| columns[0] != columns[1])
+            }));
+    let mut euclidean_index = if canonical_euclidean {
+        SparseEuclideanIndex::new(input, input.shape.0)
+    } else {
+        None
+    };
+    let euclidean_pairs = if canonical_euclidean && euclidean_index.is_none() {
+        cache_euclidean_pairs(input)
+    } else {
+        None
+    };
     let mut removed = 0;
     let neighbors = collect_neighbors(input.shape.0, k, |query_index, candidates| {
-        let query = input.row(query_index);
-        for index in 0..input.shape.0 {
-            let distance = match metric {
-                SparseDistanceMetric::Dense(metric) => {
-                    sparse_distance(query, input.row(index), metric, input.shape.1)
-                }
-                SparseDistanceMetric::Cosine if query_index == index => 0.0,
-                SparseDistanceMetric::Cosine => sparse_cosine_distance(query, input.row(index)),
-            };
-            removed += usize::from(distance >= cutoff);
-            candidates.push(Neighbor { index, distance });
+        if let Some(index) = &mut euclidean_index {
+            index.fill(input.row(query_index), candidates);
+        } else if let Some(pairs) = &euclidean_pairs {
+            fill_euclidean_candidates(candidates, query_index, input.shape.0, pairs);
+        } else {
+            let query = input.row(query_index);
+            for index in 0..input.shape.0 {
+                let distance = match metric {
+                    SparseDistanceMetric::Dense(DistanceMetric::Euclidean)
+                        if canonical_euclidean =>
+                    {
+                        canonical_euclidean_distance(query, input.row(index))
+                    }
+                    SparseDistanceMetric::Dense(metric) => {
+                        sparse_distance(query, input.row(index), metric, input.shape.1)
+                    }
+                    SparseDistanceMetric::Cosine if query_index == index => 0.0,
+                    SparseDistanceMetric::Cosine => sparse_cosine_distance(query, input.row(index)),
+                };
+                removed += usize::from(distance >= cutoff);
+                candidates.push(Neighbor { index, distance });
+            }
+            return;
         }
+        removed += candidates
+            .iter()
+            .filter(|neighbor| neighbor.distance >= cutoff)
+            .count();
     });
     Ok((neighbors, removed))
 }
@@ -557,8 +593,17 @@ pub fn rank_sparse_feature_queries(
     let prefix_cosine = metric == DistanceMetric::Cosine && width.is_some();
     let mut ranks = Vec::new();
     let mut ranking = SparseFeatureRanking::new(training, metric);
+    let mut euclidean_index = if metric == DistanceMetric::Euclidean && width.is_none() {
+        SparseEuclideanIndex::new(training, queries.shape.0)
+    } else {
+        None
+    };
     for query in 0..queries.shape.0 {
-        ranking.fill(queries.row(query), width);
+        if let Some(index) = &mut euclidean_index {
+            index.fill(queries.row(query), &mut ranking.candidates);
+        } else {
+            ranking.fill(queries.row(query), width);
+        }
         ranking
             .select(query, k, &mut rank_ties)
             .map_err(Error::Ranking)?;
@@ -619,6 +664,7 @@ impl<'a> SparseFeatureRanking<'a> {
                 DistanceMetric::Euclidean if width.is_some() => {
                     euclidean_distance_pairs(merged_features(row, candidate)) as f32
                 }
+                DistanceMetric::Euclidean => canonical_euclidean_distance(row, candidate),
                 DistanceMetric::Manhattan if width.is_none() => {
                     let distance = manhattan_distance_pairs_wide(merged_features(row, candidate));
                     self.wide_distances.push(distance);
@@ -826,11 +872,28 @@ fn fit_sparse_graph_with_ranker(
 ) -> Result<RankedSparseGraph, SparseGraphFitError> {
     use SparseGraphFitError as Error;
     validate_csr_features(input, Some(k), false).map_err(Error::Knn)?;
+    let mut euclidean_index = if metric == DistanceMetric::Euclidean {
+        SparseEuclideanIndex::new(input, input.shape.0)
+    } else {
+        None
+    };
+    let euclidean_pairs = if metric == DistanceMetric::Euclidean && euclidean_index.is_none() {
+        cache_euclidean_pairs(input)
+    } else {
+        None
+    };
     let mut ranking = SparseFeatureRanking::new(input, metric);
     let mut neighbors = Vec::with_capacity(input.shape.0);
     let mut removed = 0;
     for row in 0..input.shape.0 {
-        ranking.fill(input.row(row), None);
+        if let Some(index) = &mut euclidean_index {
+            index.fill(input.row(row), &mut ranking.candidates);
+        } else if let Some(pairs) = &euclidean_pairs {
+            ranking.candidates.clear();
+            fill_euclidean_candidates(&mut ranking.candidates, row, input.shape.0, pairs);
+        } else {
+            ranking.fill(input.row(row), None);
+        }
         removed += ranking
             .candidates
             .iter()
@@ -856,6 +919,51 @@ fn fit_sparse_graph_with_ranker(
     let graph =
         build_graph_with_cutoff(&neighbors, k, f32::INFINITY, options).map_err(Error::Graph)?;
     Ok((graph, neighbors, removed))
+}
+
+fn cache_euclidean_pairs(input: CsrFeatures<'_>) -> Option<Vec<f32>> {
+    // Keep the exact row-by-row search for training sets whose pair table exceeds 8 MiB.
+    const MAX_CACHED_PAIRS: usize = (8 * 1024 * 1024) / std::mem::size_of::<f32>();
+    let rows = input.shape.0;
+    let pair_count = rows.checked_mul(rows.saturating_sub(1))? / 2;
+    if pair_count > MAX_CACHED_PAIRS {
+        return None;
+    }
+
+    let mut pairs = Vec::new();
+    pairs.try_reserve_exact(pair_count).ok()?;
+    // Save the lower triangle in row order. For finite inputs each squared
+    // difference has the same bits after exchanging its two operands.
+    for row in 1..rows {
+        let left = input.row(row);
+        for column in 0..row {
+            pairs.push(canonical_euclidean_distance(left, input.row(column)));
+        }
+    }
+    Some(pairs)
+}
+
+fn fill_euclidean_candidates(
+    candidates: &mut Vec<Neighbor>,
+    row: usize,
+    n_rows: usize,
+    pairs: &[f32],
+) {
+    let row_start = row * row.saturating_sub(1) / 2;
+    candidates.extend(
+        pairs[row_start..row_start + row]
+            .iter()
+            .enumerate()
+            .map(|(index, &distance)| Neighbor { index, distance }),
+    );
+    candidates.push(Neighbor {
+        index: row,
+        distance: 0.0,
+    });
+    candidates.extend((row + 1..n_rows).map(|index| Neighbor {
+        index,
+        distance: pairs[index * (index - 1) / 2 + row],
+    }));
 }
 
 fn rank_manhattan_ties(distances: SparseTieDistances<'_>, k: usize) -> Vec<usize> {
@@ -982,6 +1090,43 @@ fn merged_entries<T: Default + Copy>(
     })
 }
 
+// Both rows have strictly increasing columns. Preserve the original column
+// order for the f64 sum and round it to f32 before taking the square root.
+fn canonical_euclidean_distance(left: CsrRow<'_>, right: CsrRow<'_>) -> f32 {
+    let (mut left_position, mut right_position) = (0, 0);
+    let mut sum = 0.0_f64;
+    while left_position < left.columns.len() && right_position < right.columns.len() {
+        let difference = match left.columns[left_position].cmp(&right.columns[right_position]) {
+            Ordering::Less => {
+                let value = f64::from(left.values[left_position]);
+                left_position += 1;
+                value
+            }
+            Ordering::Greater => {
+                let value = -f64::from(right.values[right_position]);
+                right_position += 1;
+                value
+            }
+            Ordering::Equal => {
+                let value =
+                    f64::from(left.values[left_position]) - f64::from(right.values[right_position]);
+                left_position += 1;
+                right_position += 1;
+                value
+            }
+        };
+        sum += difference * difference;
+    }
+    for &value in left.values[left_position..]
+        .iter()
+        .chain(&right.values[right_position..])
+    {
+        let wide = f64::from(value);
+        sum += wide * wide;
+    }
+    (sum as f32).sqrt()
+}
+
 fn sparse_distance(
     left: CsrRow<'_>,
     right: CsrRow<'_>,
@@ -1014,5 +1159,178 @@ fn sparse_distance(
             unreachable!("CSR metric was dispatched before merging coordinates")
         }
         metric => boolean_distance_pairs(metric, merged_features(left, right), n_features),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_euclidean_pairs_preserve_distances_ties_and_cutoff_counts() {
+        let input = CsrFeatures {
+            indptr: &[0, 0, 3, 5, 7, 9],
+            indices: &[0, 1, 4, 1, 4, 0, 6, 2, 6],
+            data: &[
+                -0.0,
+                f32::from_bits(1),
+                3.0,
+                f32::from_bits(1),
+                -3.0,
+                1.0,
+                5.0,
+                -0.0,
+                -5.0,
+            ],
+            shape: (5, 7),
+        };
+        let metric = DistanceMetric::Euclidean;
+        let pairs = cache_euclidean_pairs(input).unwrap();
+        let mut candidates = Vec::new();
+        let distance_rows: Vec<Vec<_>> = (0..input.shape.0)
+            .map(|row| {
+                (0..input.shape.0)
+                    .map(|column| sparse_distance(input.row(row), input.row(column), metric, 7))
+                    .collect()
+            })
+            .collect();
+        for (row, expected) in distance_rows.iter().enumerate() {
+            candidates.clear();
+            fill_euclidean_candidates(&mut candidates, row, input.shape.0, &pairs);
+            for (column, candidate) in candidates.iter().enumerate() {
+                assert_eq!(candidate.index, column);
+                assert_eq!(candidate.distance.to_bits(), expected[column].to_bits());
+            }
+        }
+
+        for cutoff in [3.0, f32::INFINITY] {
+            let options = GraphOptions::default();
+            let k = 3;
+            let ranks = collect_neighbors(input.shape.0, k, |row, candidates| {
+                candidates.extend(
+                    distance_rows[row]
+                        .iter()
+                        .enumerate()
+                        .map(|(index, &distance)| Neighbor { index, distance }),
+                );
+            });
+            let expected_removed = distance_rows
+                .iter()
+                .flatten()
+                .filter(|&&distance| distance >= cutoff)
+                .count();
+            let expected_graph = build_graph_with_cutoff(&ranks, k, cutoff, options).unwrap();
+            let (graph, removed) = fit_sparse_euclidean_graph_with_cutoff(
+                input.indptr,
+                input.indices,
+                input.data,
+                input.shape,
+                k,
+                cutoff,
+                options,
+            )
+            .unwrap();
+            assert_eq!(removed, expected_removed);
+            assert_eq!(graph, expected_graph);
+            let mut tied_rows =
+                [&distance_rows[0], &distance_rows[3], &distance_rows[4]].into_iter();
+            let (graph, removed) = fit_sparse_feature_graph_with_cutoff(
+                input,
+                k,
+                metric,
+                f64::from(cutoff),
+                options,
+                |distances, count| {
+                    let SparseTieDistances::Float32(distances) = distances else {
+                        panic!("expected Euclidean distances in float32");
+                    };
+                    assert_eq!(distances, tied_rows.next().unwrap());
+                    let mut columns: Vec<_> = (0..distances.len()).collect();
+                    columns.sort_by(|&left, &right| distances[left].total_cmp(&distances[right]));
+                    columns.truncate(count);
+                    columns
+                },
+            )
+            .unwrap();
+            assert!(tied_rows.next().is_none());
+            assert_eq!(removed, expected_removed);
+            assert_eq!(graph, expected_graph);
+        }
+    }
+
+    #[test]
+    fn index_ranked_euclidean_fit_keeps_wide_duplicate_reduction() {
+        let input = CsrFeatures {
+            indptr: &[0, 3, 3, 4],
+            indices: &[0, 0, 0, 0],
+            data: &[16_777_216.0, 1.0, -16_777_216.0, 3.0],
+            shape: (3, 1),
+        };
+        let (ranks, removed) =
+            csr_knn_counting_cutoff(input, 3, DistanceMetric::Euclidean.into(), 2.0, true).unwrap();
+        assert_eq!(
+            ranks[0],
+            [
+                Neighbor {
+                    index: 0,
+                    distance: 0.0
+                },
+                Neighbor {
+                    index: 1,
+                    distance: 1.0
+                },
+                Neighbor {
+                    index: 2,
+                    distance: 2.0
+                },
+            ]
+        );
+        assert_eq!(removed, 4);
+    }
+
+    #[test]
+    fn cached_euclidean_pairs_keep_overflow_errors() {
+        let input = CsrFeatures {
+            indptr: &[0, 1, 2, 3],
+            indices: &[0, 0, 0],
+            data: &[f32::MAX, 0.0, -f32::MAX],
+            shape: (3, 1),
+        };
+        let error = fit_sparse_feature_graph_with_cutoff(
+            input,
+            2,
+            DistanceMetric::Euclidean,
+            f64::INFINITY,
+            GraphOptions::default(),
+            |distances, _| {
+                let SparseTieDistances::Float32(distances) = distances else {
+                    panic!("expected Euclidean distances in float32");
+                };
+                assert_eq!(distances, &[0.0, f32::INFINITY, f32::INFINITY]);
+                vec![0, 1]
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            SparseGraphFitError::Ranking(DenseGraphTransformError::NonFiniteDistance {
+                query: 0,
+                training: 1,
+                distance: f32::INFINITY,
+            })
+        );
+    }
+
+    #[test]
+    fn euclidean_pair_cache_falls_back_beyond_its_memory_budget() {
+        for rows in [2049, usize::MAX] {
+            let input = CsrFeatures {
+                indptr: &[],
+                indices: &[],
+                data: &[],
+                shape: (rows, 0),
+            };
+            assert!(cache_euclidean_pairs(input).is_none());
+        }
     }
 }

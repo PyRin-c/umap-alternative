@@ -1,6 +1,6 @@
 # GitHub Releases の準備
 
-初回は `v0.1.0` のプレビューを GitHub Releases で配布します。Python wheel は Windows x64 と Linux x86-64 の CPython 3.10〜3.15 向けです。C ABI は Windows x64 の DLL を ZIP にまとめます。
+プレビュー版は GitHub Releases で配布します。Python wheel は Windows x64 と Linux x86-64 の CPython 3.10〜3.15 向けです。C ABI は Windows x64 の DLL を ZIP にまとめます。
 
 1. `Cargo.toml` のワークスペース版と、`docs/releases/v<version>.md` のリリースノートを揃えます。
 2. 配布するコミットを GitHub に反映し、そのコミットの CI が通ったことを確認します。

@@ -8,6 +8,7 @@ import pytest
 
 from umap_alternative import UMAP
 from umap_alternative._feature_search import ApproximateFeatureIndex
+from umap_alternative._umap import _fit_neighbor_arrays
 
 
 FIXTURE_DIR = Path(__file__).parents[1] / "reference/fixtures"
@@ -81,6 +82,24 @@ def test_approximate_euclidean_leaf_matches_tied_public_query_order():
     indices, distances = search.query(queries, 5)
     np.testing.assert_array_equal(indices, [[2, 3, 0, 1, 4], [4, 6, 0, 2, 3], [7, 3, 5, 1, 0]])
     np.testing.assert_array_equal(distances, [[1] * 5, [0] * 4 + [2], [0] * 4 + [2]])
+
+
+def test_native_training_graph_keeps_nondefault_smoothing_and_rank_bits():
+    data = np.random.RandomState(71).normal(size=(96, 4)).astype(np.float32)
+    model = UMAP(
+        n_neighbors=7, n_jobs=1, random_state=42, transform_mode="graph",
+        local_connectivity=1.5, set_op_mix_ratio=0.375, force_approximation_algorithm=True,
+    ).fit(data)
+    index = model._feature_search_index
+    indices, distances = index.training_ranks()
+    shape, indptr, columns, weights = _fit_neighbor_arrays(indices, distances, 7, (1.5, 0.375))
+    assert model.graph_.shape == shape
+    np.testing.assert_array_equal(model.graph_.indptr, indptr)
+    np.testing.assert_array_equal(model.graph_.indices, columns)
+    assert digest(model.graph_.data, "<f4") == digest(weights, "<f4")
+    assert all(buffer.flags.writeable for buffer in (
+        model.graph_.indptr, model.graph_.indices, model.graph_.data,
+    ))
 
 
 @pytest.mark.parametrize("width", [1, 2, 5])

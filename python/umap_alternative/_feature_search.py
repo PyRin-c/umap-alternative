@@ -176,6 +176,9 @@ class ApproximateFeatureIndex:
     def training_ranks(self):
         return self._as_arrays(*self._native_index().training_ranks(), self.k)
 
+    def training_graph(self, graph_options):
+        return self._native_index().training_graph(graph_options)
+
     def query(self, X, k):
         queries = check_array(X, dtype=np.float32, order="C")
         if queries.shape[1] != self.shape[1] or not 1 <= k <= self.k:

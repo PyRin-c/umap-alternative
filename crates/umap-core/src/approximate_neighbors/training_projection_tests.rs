@@ -4,6 +4,40 @@ use super::*;
 use crate::approximate_neighbors::approximate_squared_euclidean;
 
 #[test]
+fn prepared_planes_match_recomputed_margins_across_vector_boundaries() {
+    let values = |width: usize, seed: usize| -> Vec<f32> {
+        (0..width)
+            .map(|i| ((i * 97 + seed) % 43) as f32 * 0.11 - 1.5)
+            .collect()
+    };
+    for width in [1, 3, 4, 7, 31, 32, 33, 64, 65] {
+        let left = values(width, 9);
+        let right = values(width, 13);
+        for angular in [false, true] {
+            let plane = PreparedProjection::new(&left, &right, angular);
+            for query in [values(width, 7), values(width, 51), vec![-0.0; width]] {
+                let expected = if angular {
+                    angular_margin(&left, &right, &query)
+                } else {
+                    prepared_margin(&left, &right, &query)
+                };
+                assert_eq!(plane.margin(&query).to_bits(), expected.to_bits());
+            }
+        }
+    }
+}
+
+#[test]
+fn prepared_planes_keep_nonfinite_sorting_margins() {
+    let pivots = [f32::MAX; 32];
+    let query = [0.0; 32];
+    let expected = prepared_margin(&pivots, &pivots, &query);
+    assert!(expected.is_nan());
+    let actual = PreparedProjection::new(&pivots, &pivots, false).margin(&query);
+    assert_eq!(actual.to_bits(), expected.to_bits());
+}
+
+#[test]
 fn training_ties_stay_with_original_rows() {
     let mut data = [0.0; 17];
     let rows: Vec<_> = (0..data.len()).collect();

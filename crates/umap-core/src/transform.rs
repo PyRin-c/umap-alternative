@@ -1,6 +1,7 @@
 //! Directed bipartite graphs and serial embeddings for held-out UMAP inputs.
 
 use std::fmt;
+use std::num::NonZeroUsize;
 
 use crate::fuzzy_graph::{GraphOptions, batch_scale_floor, membership, row_parameters_with_target};
 use crate::layout::{
@@ -10,7 +11,7 @@ use crate::layout::{
 use crate::neighbors::{DistanceMetric, KnnError, Neighbor, sort_closest_neighbors};
 use crate::numeric::pairwise_sum_by;
 use crate::optimize::OptimizeError;
-use crate::rng::{Mt19937, SerialNegativeSampler};
+use crate::rng::{Mt19937, NegativeVertexModulo, SerialNegativeSampler};
 use crate::sampling::EdgeSamplingCursor;
 
 mod initialization;
@@ -537,6 +538,9 @@ fn optimize_transform(
         embedding.chunks_exact(n_components).map(|row| row[0]),
         || rng.next_u32(),
     );
+    let tail_modulo = NegativeVertexModulo::new(
+        NonZeroUsize::new(graph.n_cols).expect("a nonempty transform graph has fitted vertices"),
+    );
 
     let initial_alpha = config.learning_rate / 4.0;
     let mut alpha = initial_alpha;
@@ -557,7 +561,7 @@ fn optimize_transform(
             // An incomplete fit still schedules samples over the full graph.
             for _ in 0..cursor.take_negative_samples(epoch)? {
                 let vertex = sampler
-                    .sample_from(*head, graph.n_cols)
+                    .sample_from(*head, tail_modulo)
                     .expect("graph head has a negative sampling stream");
                 if let Some(Some(other)) = fitted_rows.get(vertex) {
                     negative_update_fixed_tail(current, other, a, b, repulsion, alpha)?;

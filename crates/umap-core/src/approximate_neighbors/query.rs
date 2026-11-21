@@ -2,7 +2,9 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::num::NonZeroUsize;
 
-use super::projection::{angular_margin, partition_rows, prepared_margin, projection_pivots};
+use super::projection::{
+    PreparedProjection, angular_margin, partition_rows, prepared_margin, projection_pivots,
+};
 use super::{
     ApproximateSearchError, DenseRows, RankedNeighbors, TrainingNeighbor, Tree,
     approximate_squared_euclidean, cosine,
@@ -172,7 +174,7 @@ impl PreparedQuery {
         for (row, candidates) in ranks.iter().enumerate() {
             retained.clear();
             for candidate in candidates {
-                let other = candidate.point.index;
+                let other = candidate.index();
                 if other == row {
                     continue;
                 }
@@ -214,12 +216,7 @@ impl PreparedQuery {
             tree: None,
             prepared_positions: None,
         };
-        let tree = build_search_tree(
-            data,
-            &in_degree,
-            (0..data.n_rows).collect(),
-            margin_for(metric),
-        );
+        let tree = build_search_tree(data, &in_degree, (0..data.n_rows).collect(), metric);
         search.set_prepared_tree(tree, data.n_rows);
         search
     }
@@ -542,7 +539,7 @@ fn build_search_tree(
     data: DenseRows<'_>,
     in_degree: &[usize],
     mut rows: Vec<usize>,
-    projection: ProjectionMargin,
+    metric: DistanceMetric,
 ) -> Tree {
     const QUERY_LEAF_SIZE: usize = 30;
     if rows.len() <= QUERY_LEAF_SIZE {
@@ -559,32 +556,41 @@ fn build_search_tree(
             hubs.truncate(3);
         }
     }
-    let margin = |a, b, row| projection(data.row(a), data.row(b), data.row(row));
-    let (a, b) = [(hubs[0], hubs[1]), (hubs[0], hubs[2]), (hubs[1], hubs[2])]
+    let ((a, b), plane) = [(hubs[0], hubs[1]), (hubs[0], hubs[2]), (hubs[1], hubs[2])]
         .into_iter()
-        .min_by_key(|&(a, b)| {
-            let left = rows.iter().filter(|&&row| margin(a, b, row) > 0.0).count();
+        .map(|(a, b)| {
+            (
+                (a, b),
+                PreparedProjection::new(data.row(a), data.row(b), metric.is_angular()),
+            )
+        })
+        .min_by_key(|(_, plane)| {
+            let left = rows
+                .iter()
+                .filter(|&&row| plane.margin(data.row(row)) > 0.0)
+                .count();
             left.abs_diff(rows.len() - left)
         })
         .expect("three hub pairs");
-    let mut boundary = partition_rows(&mut rows, |row| margin(a, b, row) > 0.0);
+    let margin = |row| plane.margin(data.row(row));
+    let mut boundary = partition_rows(&mut rows, |row| margin(row) > 0.0);
     let mut threshold = 0.0;
     if boundary.min(rows.len() - boundary) < rows.len().div_ceil(8) {
         rows.sort_unstable_by(|&left, &right| {
-            margin(a, b, right)
-                .total_cmp(&margin(a, b, left))
+            margin(right)
+                .total_cmp(&margin(left))
                 .then(left.cmp(&right))
         });
         boundary = rows.len() / 2;
-        threshold = margin(a, b, rows[boundary]);
+        threshold = margin(rows[boundary]);
     }
     let right = rows.split_off(boundary);
     Tree::Split {
         a,
         b,
         threshold,
-        left: Box::new(build_search_tree(data, in_degree, rows, projection)),
-        right: Box::new(build_search_tree(data, in_degree, right, projection)),
+        left: Box::new(build_search_tree(data, in_degree, rows, metric)),
+        right: Box::new(build_search_tree(data, in_degree, right, metric)),
     }
 }
 

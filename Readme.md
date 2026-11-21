@@ -6,7 +6,7 @@ UMAP を Rust で独立実装するリポジトリです。固定した環境で
 
 ## 配布物
 
-初回のプレビュー版は [GitHub Releases](https://github.com/PyRin-c/umap-alternative/releases) から配布します。
+プレビュー版は [GitHub Releases](https://github.com/PyRin-c/umap-alternative/releases) から配布します。
 
 | 配布物 | 対応環境 |
 | --- | --- |
@@ -16,7 +16,7 @@ UMAP を Rust で独立実装するリポジトリです。固定した環境で
 Python では、OS とバージョンに合う wheel を取得して `python -m pip install <wheel のファイル名>` でインストールします。Windows x64・CPython 3.10 の例です。
 
 ```powershell
-py -3.10 -m pip install ./umap_alternative-0.1.0-cp310-cp310-win_amd64.whl
+py -3.10 -m pip install ./umap_alternative-0.2.0-cp310-cp310-win_amd64.whl
 ```
 
 ```python

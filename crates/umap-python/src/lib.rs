@@ -72,6 +72,12 @@ use umap_core::validation::{
 };
 
 type CsrComponents = ((usize, usize), Vec<usize>, Vec<usize>, Vec<f32>);
+type CsrBytes<'py> = (
+    (usize, usize),
+    Bound<'py, PyBytes>,
+    Bound<'py, PyBytes>,
+    Bound<'py, PyBytes>,
+);
 type PackedComponents<'py> = (Bound<'py, PyBytes>, (usize, usize));
 type FloatBuffer = (Vec<f64>, bool);
 type MembershipBuffers = (Vec<usize>, Vec<usize>, Vec<f64>);
@@ -600,6 +606,19 @@ fn metric_row_words<T, const N: usize>(
     Ok(words.iter().copied().map(decode).collect())
 }
 
+fn encode_words<'py, T: Copy, const N: usize>(
+    py: Python<'py>,
+    values: &[T],
+    encode: fn(T) -> [u8; N],
+) -> PyResult<Bound<'py, PyBytes>> {
+    PyBytes::new_with(py, values.len() * N, |buffer| {
+        for (word, &value) in buffer.as_chunks_mut::<N>().0.iter_mut().zip(values) {
+            *word = encode(value);
+        }
+        Ok(())
+    })
+}
+
 fn with_metric_row(
     values: &[u8],
     dtype: &str,
@@ -786,6 +805,35 @@ impl NativeApproximateIndex {
     fn training_ranks(&self) -> (Vec<i32>, Vec<f32>) {
         let ranks = self.index.training_ranks();
         (ranks.indices.clone(), ranks.distances.clone())
+    }
+
+    #[pyo3(signature = (graph_options=None))]
+    fn training_graph<'py>(
+        &self,
+        py: Python<'py>,
+        graph_options: Option<(f64, f64)>,
+    ) -> PyResult<CsrBytes<'py>> {
+        let options = parse_graph_options(graph_options)?.unwrap_or_default();
+        let ranks = self.index.training_ranks();
+        let graph = py
+            .detach(|| {
+                fit_supplied_neighbors_graph(
+                    &ranks.indices,
+                    &ranks.distances,
+                    ranks.indices.len() / ranks.width,
+                    ranks.width,
+                    ranks.width,
+                    options,
+                    f32::INFINITY,
+                )
+            })
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        Ok((
+            (graph.n_rows, graph.n_cols),
+            encode_words(py, &graph.indptr, usize::to_ne_bytes)?,
+            encode_words(py, &graph.indices, usize::to_ne_bytes)?,
+            encode_words(py, &graph.data, f32::to_ne_bytes)?,
+        ))
     }
 
     #[pyo3(signature = (queries, n_rows, width=None))]
@@ -1320,7 +1368,7 @@ fn _update_ranked_embedding(
 #[allow(clippy::too_many_arguments)]
 fn _fit_graph_embedding_with_rng(
     py: Python<'_>,
-    graph: CsrComponents,
+    graph: &Bound<'_, PyAny>,
     initial_coordinates: Vec<f32>,
     rng_state: RngState,
     n_components: usize,
@@ -1333,7 +1381,17 @@ fn _fit_graph_embedding_with_rng(
     checkpoint_epochs: Option<Vec<usize>>,
     density: Option<DensityInput>,
 ) -> PyResult<GraphEmbeddingComponents> {
-    let ((n_rows, n_cols), indptr, indices, data) = graph;
+    let ((n_rows, n_cols), indptr, indices, data) =
+        if let Ok((shape, indptr, indices, data)) = graph.extract::<CsrBytes<'_>>() {
+            (
+                shape,
+                metric_row_words(indptr.as_bytes(), usize::from_ne_bytes)?,
+                metric_row_words(indices.as_bytes(), usize::from_ne_bytes)?,
+                metric_row_words(data.as_bytes(), f32::from_ne_bytes)?,
+            )
+        } else {
+            graph.extract::<CsrComponents>()?
+        };
     let graph = CsrGraph {
         n_rows,
         n_cols,

@@ -77,9 +77,7 @@ fn collect_training_leaves(
     };
     let boundary = partition_rows(&mut rows, |row| {
         let point = data.row(row);
-        let margin = accumulate_projection(data.n_features, offset, |i, accumulator| {
-            normal[i].mul_add(point[i], accumulator)
-        });
+        let margin = projected_dot(&normal, point, offset);
         if !margin.is_finite() {
             let metric = if angular {
                 DistanceMetric::Cosine
@@ -189,7 +187,85 @@ pub(super) fn prepared_margin(left: &[f32], right: &[f32], query: &[f32]) -> f32
     })
 }
 
+/// Coefficients shared by the rows evaluated against one pair of build pivots.
+pub(super) struct PreparedProjection<'a> {
+    left: &'a [f32],
+    right: &'a [f32],
+    normal: Vec<f32>,
+    offset: f32,
+    angular: bool,
+}
+
+impl<'a> PreparedProjection<'a> {
+    pub(super) fn new(left: &'a [f32], right: &'a [f32], angular: bool) -> Self {
+        let (normal, offset) = if angular {
+            (angular_normal(left, right).collect(), 0.0)
+        } else {
+            let normal: Vec<_> = left.iter().zip(right).map(|(&a, &b)| a - b).collect();
+            let offset = left
+                .iter()
+                .zip(right)
+                .zip(&normal)
+                .fold(0.0_f64, |sum, ((&a, &b), &axis)| {
+                    sum - f64::from(axis * ((a + b) * 0.5))
+                });
+            (normal, offset as f32)
+        };
+        Self {
+            left,
+            right,
+            normal,
+            offset,
+            angular,
+        }
+    }
+
+    pub(super) fn margin(&self, point: &[f32]) -> f32 {
+        let margin = projected_dot(&self.normal, point, self.offset);
+        if margin.is_finite() {
+            margin
+        } else if self.angular {
+            angular_margin(self.left, self.right, point)
+        } else {
+            // Imbalanced tree splits sort margins with total_cmp. Keep the
+            // original arithmetic path for non-finite values in that order.
+            prepared_margin(self.left, self.right, point)
+        }
+    }
+}
+
 #[inline]
+fn projected_dot(normal: &[f32], point: &[f32], offset: f32) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("avx") && std::is_x86_feature_detected!("fma") {
+        // SAFETY: the runtime checks cover both enabled target features.
+        return unsafe { projected_dot_fma(normal, point, offset) };
+    }
+    projected_dot_portable(normal, point, offset)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx,fma")]
+fn projected_dot_fma(normal: &[f32], point: &[f32], offset: f32) -> f32 {
+    if let (Ok(normal), Ok(point)) = (
+        <&[f32; 32]>::try_from(normal),
+        <&[f32; 32]>::try_from(point),
+    ) {
+        let lanes =
+            std::array::from_fn(|i| normal[i].mul_add(point[i], if i == 0 { offset } else { 0.0 }));
+        return reduce_32_lanes(&lanes);
+    }
+    projected_dot_portable(normal, point, offset)
+}
+
+#[inline(always)]
+fn projected_dot_portable(normal: &[f32], point: &[f32], offset: f32) -> f32 {
+    accumulate_projection(point.len(), offset, |i, sum| {
+        normal[i].mul_add(point[i], sum)
+    })
+}
+
+#[inline(always)]
 pub(super) fn accumulate_projection(
     width: usize,
     mut sum: f32,

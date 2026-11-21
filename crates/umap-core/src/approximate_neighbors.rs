@@ -400,6 +400,13 @@ fn seed_forest(
         } else {
             tree_count.min(64)
         };
+        #[cfg(target_arch = "x86_64")]
+        let mut cutoffs = (metric == DistanceMetric::Euclidean
+            && data.n_features == 32
+            && data.n_rows >= SMALL_DATA_LIMIT
+            && std::is_x86_feature_detected!("avx")
+            && std::is_x86_feature_detected!("fma"))
+        .then(|| vec![f32::INFINITY; n_rows]);
         for ordinal in 0..tree_count {
             for leaf in projection::training_leaves(
                 data,
@@ -409,6 +416,13 @@ fn seed_forest(
                 64,
                 metric.is_angular(),
             ) {
+                #[cfg(target_arch = "x86_64")]
+                if let Some(cutoffs) = cutoffs.as_mut() {
+                    // SAFETY: allocating the cutoffs required both CPU features
+                    // and the fixed row width used by the leaf kernel.
+                    unsafe { seed_euclidean_leaf_32(data, &leaf, &mut ranks, cutoffs, k)? };
+                    continue;
+                }
                 Tree::Leaf(leaf).seed(data, metric, &mut ranks, k)?;
             }
         }
@@ -590,7 +604,57 @@ fn approximate_squared_euclidean(left: &[f32], right: &[f32]) -> f32 {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx,fma")]
 fn approximate_squared_euclidean_fma(left: &[f32], right: &[f32]) -> f32 {
+    if let (Ok(left), Ok(right)) = (<&[f32; 32]>::try_from(left), <&[f32; 32]>::try_from(right)) {
+        return squared_euclidean_32(left, right);
+    }
     approximate_squared_euclidean_portable(left, right)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn squared_euclidean_32(left: &[f32; 32], right: &[f32; 32]) -> f32 {
+    let lanes = std::array::from_fn(|coordinate| {
+        let difference = left[coordinate] - right[coordinate];
+        difference * difference
+    });
+    reduce_32_lanes(&lanes)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn checked_euclidean_32(
+    a: &[f32; 32],
+    b: &[f32; 32],
+    row: usize,
+    candidate: usize,
+) -> Result<f32, ApproximateSearchError> {
+    let distance = squared_euclidean_32(a, b).sqrt();
+    if distance.is_finite() {
+        Ok(distance)
+    } else {
+        Err(ApproximateSearchError::NonFiniteDistance { row, candidate })
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx,fma")]
+fn seed_euclidean_leaf_32(
+    data: DenseRows<'_>,
+    rows: &[usize],
+    ranks: &mut [Vec<TrainingNeighbor>],
+    cutoffs: &mut [f32],
+    k: usize,
+) -> Result<(), ApproximateSearchError> {
+    for (position, &left) in rows.iter().enumerate() {
+        let a: &[f32; 32] = data.row(left).try_into().expect("32 training features");
+        for &right in &rows[position + 1..] {
+            let b: &[f32; 32] = data.row(right).try_into().expect("32 training features");
+            let distance = checked_euclidean_32(a, b, left, right)?;
+            offer_below_cutoff(&mut ranks[left], &mut cutoffs[left], right, distance, k);
+            offer_below_cutoff(&mut ranks[right], &mut cutoffs[right], left, distance, k);
+        }
+    }
+    Ok(())
 }
 
 #[inline(always)]
@@ -680,7 +744,7 @@ impl RankedNeighbors {
         self.distances.push(0.0);
         for neighbor in rank
             .iter()
-            .map(|entry| entry.point)
+            .map(|entry| entry.point())
             .filter(|neighbor| neighbor.index != row)
             .take(k - 1)
         {
@@ -717,16 +781,28 @@ fn offer<T>(row: &mut Vec<T>, candidate: T, k: usize, point: impl Fn(&T) -> Neig
 
 #[derive(Clone, Copy)]
 struct TrainingNeighbor {
-    point: Neighbor,
+    // Training row IDs fit in i32. The vacant row uses -1.
+    row: i32,
+    distance: f32,
     fresh: bool,
 }
 
 impl TrainingNeighbor {
+    #[inline]
+    fn index(self) -> usize {
+        self.row as isize as usize
+    }
+    #[inline]
+    fn point(self) -> Neighbor {
+        Neighbor {
+            index: self.index(),
+            distance: self.distance,
+        }
+    }
+
     const VACANT: Self = Self {
-        point: Neighbor {
-            index: usize::MAX,
-            distance: f32::INFINITY,
-        },
+        row: -1,
+        distance: f32::INFINITY,
         fresh: false,
     };
 }
@@ -735,32 +811,34 @@ fn offer_training(row: &mut Vec<TrainingNeighbor>, index: usize, distance: f32, 
     offer(
         row,
         TrainingNeighbor {
-            point: Neighbor { index, distance },
+            row: index as i32,
+            distance,
             fresh: true,
         },
         k,
-        |entry| entry.point,
+        |entry| entry.point(),
     )
 }
 
 fn offer_training_heap(row: &mut [TrainingNeighbor], index: usize, distance: f32) -> bool {
-    if distance >= row[0].point.distance || row.iter().any(|entry| entry.point.index == index) {
+    if distance >= row[0].distance || row.iter().any(|entry| entry.index() == index) {
         return false;
     }
     let mut place = 0;
     while 2 * place + 1 < row.len() {
         let mut child = 2 * place + 1;
-        if child + 1 < row.len() && row[child + 1].point.distance > row[child].point.distance {
+        if child + 1 < row.len() && row[child + 1].distance > row[child].distance {
             child += 1;
         }
-        if row[child].point.distance <= distance {
+        if row[child].distance <= distance {
             break;
         }
         row[place] = row[child];
         place = child;
     }
     row[place] = TrainingNeighbor {
-        point: Neighbor { index, distance },
+        row: index as i32,
+        distance,
         fresh: true,
     };
     true
@@ -777,7 +855,7 @@ fn fill_missing(
         let mut missing = if data.batches_cosine() {
             neighbors
                 .iter()
-                .filter(|entry| entry.point.index == usize::MAX)
+                .filter(|entry| entry.index() == usize::MAX)
                 .count()
         } else {
             k - neighbors.len()
@@ -807,7 +885,7 @@ fn incident(ranks: &[Vec<TrainingNeighbor>]) -> Vec<Vec<usize>> {
     let mut edges = vec![Vec::new(); ranks.len()];
     for (row, neighbors) in ranks.iter().enumerate() {
         for entry in neighbors {
-            let neighbor = entry.point;
+            let neighbor = entry.point();
             if row != neighbor.index {
                 edges[row].push(neighbor.index);
                 edges[neighbor.index].push(row);
@@ -860,12 +938,18 @@ fn refine(
     rounds: usize,
     update_limit: usize,
 ) -> Result<(), ApproximateSearchError> {
+    let mut euclidean = (metric == DistanceMetric::Euclidean && data.n_rows >= SMALL_DATA_LIMIT)
+        .then(|| EuclideanRefinement {
+            distances: vec![(0, 0.0); 32_768],
+            cutoffs: ranks.iter().map(|row| training_cutoff(row, k)).collect(),
+        });
+    let compare_euclidean = euclidean_comparator(data.n_features);
     let mut fresh = vec![Vec::new(); ranks.len()];
     let mut retained = vec![Vec::new(); ranks.len()];
     for _ in 0..rounds {
         for (row, neighbors) in ranks.iter_mut().enumerate() {
             for entry in neighbors {
-                let other = entry.point.index;
+                let other = entry.index();
                 if row != other {
                     let candidates = if entry.fresh {
                         &mut fresh
@@ -885,7 +969,12 @@ fn refine(
                 candidates.dedup();
                 candidates.truncate(MAX_CANDIDATES);
             }
-            changes += compare_candidates(data, metric, ranks, new, old, k)?;
+            changes += if let Some(refinement) = &mut euclidean {
+                // SAFETY: the selected kernel matches this width and CPU.
+                unsafe { compare_euclidean(data, ranks, new, old, k, refinement)? }
+            } else {
+                compare_candidates(data, metric, ranks, new, old, k)?
+            };
             new.clear();
             old.clear();
         }
@@ -894,6 +983,34 @@ fn refine(
         }
     }
     Ok(())
+}
+
+struct EuclideanRefinement {
+    distances: Vec<(u64, f32)>,
+    cutoffs: Vec<f32>,
+}
+
+fn training_cutoff(row: &[TrainingNeighbor], k: usize) -> f32 {
+    if row.len() == k {
+        row[k - 1].distance
+    } else {
+        f32::INFINITY
+    }
+}
+
+#[inline]
+fn offer_below_cutoff(
+    row: &mut Vec<TrainingNeighbor>,
+    cutoff: &mut f32,
+    index: usize,
+    distance: f32,
+    k: usize,
+) -> bool {
+    if distance >= *cutoff || !offer_training(row, index, distance, k) {
+        return false;
+    }
+    *cutoff = training_cutoff(row, k);
+    true
 }
 
 fn compare_candidates(
@@ -916,6 +1033,101 @@ fn compare_candidates(
         }
     }
     Ok(changes)
+}
+
+type EuclideanComparator = unsafe fn(
+    DenseRows<'_>,
+    &mut [Vec<TrainingNeighbor>],
+    &[usize],
+    &[usize],
+    usize,
+    &mut EuclideanRefinement,
+) -> Result<usize, ApproximateSearchError>;
+
+fn euclidean_comparator(width: usize) -> EuclideanComparator {
+    #[cfg(target_arch = "x86_64")]
+    if width == 32 && std::is_x86_feature_detected!("avx") && std::is_x86_feature_detected!("fma") {
+        return compare_euclidean_32;
+    }
+    let _ = width;
+    compare_euclidean_portable
+}
+
+fn compare_euclidean_portable(
+    data: DenseRows<'_>,
+    ranks: &mut [Vec<TrainingNeighbor>],
+    new: &[usize],
+    old: &[usize],
+    k: usize,
+    refinement: &mut EuclideanRefinement,
+) -> Result<usize, ApproximateSearchError> {
+    refinement.compare(ranks, new, old, k, |left, right| {
+        data.distance(DistanceMetric::Euclidean, left, right)
+    })
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx,fma")]
+fn compare_euclidean_32(
+    data: DenseRows<'_>,
+    ranks: &mut [Vec<TrainingNeighbor>],
+    new: &[usize],
+    old: &[usize],
+    k: usize,
+    refinement: &mut EuclideanRefinement,
+) -> Result<usize, ApproximateSearchError> {
+    refinement.compare(ranks, new, old, k, |left, right| {
+        let a: &[f32; 32] = data.row(left).try_into().expect("32 training features");
+        let b: &[f32; 32] = data.row(right).try_into().expect("32 training features");
+        checked_euclidean_32(a, b, left, right)
+    })
+}
+
+impl EuclideanRefinement {
+    #[inline(always)]
+    fn compare(
+        &mut self,
+        ranks: &mut [Vec<TrainingNeighbor>],
+        new: &[usize],
+        old: &[usize],
+        k: usize,
+        compute: impl Fn(usize, usize) -> Result<f32, ApproximateSearchError>,
+    ) -> Result<usize, ApproximateSearchError> {
+        let mut changes = 0;
+        for (position, &left) in new.iter().enumerate() {
+            for &right in new[position + 1..].iter().chain(old) {
+                if left == right {
+                    continue;
+                }
+                // Euclidean candidate distances are symmetric and features
+                // are fixed during refinement. Keep offer order unchanged.
+                let key = ((left.min(right) as u64) << 32) | right.max(left) as u64;
+                let slot = ((key ^ (key >> 32)).wrapping_mul(0xd6e8_feb8_6659_fd93)
+                    ^ key.wrapping_mul(0x9e37_79b9_7f4a_7c15))
+                    >> 49;
+                let entry = &mut self.distances[slot as usize];
+                if entry.0 != key {
+                    *entry = (key, compute(left, right)?);
+                }
+                let distance = entry.1;
+                changes += usize::from(offer_below_cutoff(
+                    &mut ranks[left],
+                    &mut self.cutoffs[left],
+                    right,
+                    distance,
+                    k,
+                ));
+                changes += usize::from(offer_below_cutoff(
+                    &mut ranks[right],
+                    &mut self.cutoffs[right],
+                    left,
+                    distance,
+                    k,
+                ));
+            }
+        }
+        Ok(changes)
+    }
 }
 
 fn draw(rng: &mut Mt19937, upper: usize) -> usize {
@@ -1043,6 +1255,54 @@ mod tests {
 
     use super::*;
 
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn fixed_width_leaf_offers_preserve_distance_bits_tie_order_and_overflow() {
+        if !std::is_x86_feature_detected!("avx") || !std::is_x86_feature_detected!("fma") {
+            return;
+        }
+        let data: Vec<f32> = [-3.0, 2.0, -1.0, 1.0, 1.0, 0.0, 5.0]
+            .into_iter()
+            .flat_map(|value| [value; 32])
+            .collect();
+        let input = DenseRows::training(&data, 7, 32).unwrap();
+        let groups = [vec![3, 2, 0, 6, 1, 4], vec![5, 4, 3, 0, 6, 2]];
+        let mut expected = vec![Vec::new(); 7];
+        let mut actual = vec![Vec::new(); 7];
+        let mut cutoffs = vec![f32::INFINITY; 7];
+        for group in groups {
+            // SAFETY: both target features and the fixed width were checked.
+            unsafe { seed_euclidean_leaf_32(input, &group, &mut actual, &mut cutoffs, 3) }.unwrap();
+            Tree::Leaf(group)
+                .seed(input, DistanceMetric::Euclidean, &mut expected, 3)
+                .unwrap();
+        }
+        for (actual, expected) in actual.iter().zip(&expected) {
+            let bits = |row: &[TrainingNeighbor]| {
+                row.iter()
+                    .map(|entry| (entry.index(), entry.distance.to_bits(), entry.fresh))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(bits(actual), bits(expected));
+        }
+
+        let data = [[f32::MAX; 32], [-f32::MAX; 32]].concat();
+        let input = DenseRows::training(&data, 2, 32).unwrap();
+        let mut ranks = vec![Vec::new(); 2];
+        // SAFETY: both target features and the fixed width were checked.
+        let error = unsafe {
+            seed_euclidean_leaf_32(input, &[0, 1], &mut ranks, &mut [f32::INFINITY; 2], 1)
+        }
+        .unwrap_err();
+        assert_eq!(
+            error,
+            ApproximateSearchError::NonFiniteDistance {
+                row: 0,
+                candidate: 1
+            }
+        );
+    }
+
     #[test]
     fn approximate_euclidean_preserves_the_four_lane_reduction() {
         let left = [0x3f14_0085, 0x3f9a_cf41, 0xbe46_3ac3, 0x3e0e_f583].map(f32::from_bits);
@@ -1061,7 +1321,10 @@ mod tests {
         fill_missing(data, DistanceMetric::Euclidean, &mut rows, 1, &mut [0; 3]).unwrap();
         assert!(rows[0].is_empty());
         assert_eq!(
-            rows[1].iter().map(|entry| entry.point).collect::<Vec<_>>(),
+            rows[1]
+                .iter()
+                .map(|entry| entry.point())
+                .collect::<Vec<_>>(),
             [Neighbor {
                 index: 0,
                 distance: 1.0

@@ -11,9 +11,13 @@ use crate::densmap::DensityOptimizer;
 use crate::fuzzy_graph::CsrGraph;
 use crate::layout::{
     DistanceReduction, LayoutError, attractive_update_with_distance,
-    negative_example_update_with_distance, validate_csr_inputs, validate_repulsion_strength,
+    negative_example_update_with_distance, negative_update_fixed_tail, validate_csr_inputs,
+    validate_repulsion_strength,
 };
 use crate::sampling::{EdgeSamplingCursor, SamplingError, seeded_train_positive_interval};
+
+mod seeded_2d;
+use seeded_2d::SeededLayout2d;
 
 #[derive(Clone, Copy)]
 pub(crate) enum OptimizeMode {
@@ -252,6 +256,20 @@ pub(crate) fn optimize_csr_with_density(
         OptimizeMode::Injected => DistanceReduction::Sequential,
         OptimizeMode::SeededCompatibility => DistanceReduction::SeededCompatibility,
     };
+    // Initial coordinates were validated above and ordinary updates check
+    // their output. Density updates can deliberately write NaNs.
+    let validated_compatibility =
+        density.is_none() && matches!(mode, OptimizeMode::SeededCompatibility);
+    let packed_layout = if validated_compatibility && n_components == 2 {
+        SeededLayout2d::new(a, b, repulsion_strength)
+    } else {
+        None
+    };
+    let bounded_schedule = packed_layout.is_some()
+        && n_epochs <= 1 << 20
+        && cursors.iter().flatten().all(|cursor| {
+            cursor.positive_interval() >= 1.0 && cursor.negative_interval() >= 1.0 / 1024.0
+        });
     let mut alpha = learning_rate;
     for epoch in 0..n_epochs {
         let epoch_as_f64 = epoch as f64;
@@ -268,11 +286,19 @@ pub(crate) fn optimize_csr_with_density(
                 let entry = start + offset;
                 let index = graph.indices[entry];
 
-                let positive_due = cursor.positive_due(epoch_as_f64)?;
-                let negative_count = if positive_due {
-                    cursor.take_negative_samples(epoch_as_f64)?
+                let (positive_due, negative_count) = if bounded_schedule {
+                    let Some(count) = cursor.advance_bounded(epoch_as_f64) else {
+                        continue;
+                    };
+                    (true, count)
                 } else {
-                    0
+                    let positive_due = cursor.positive_due(epoch_as_f64)?;
+                    let count = if positive_due {
+                        cursor.take_negative_samples(epoch_as_f64)?
+                    } else {
+                        0
+                    };
+                    (positive_due, count)
                 };
 
                 let undefined_density = if positive_due {
@@ -290,7 +316,10 @@ pub(crate) fn optimize_csr_with_density(
                         embedding[endpoint * n_components..(endpoint + 1) * n_components]
                             .fill(value);
                     }
-                } else if positive_due {
+                } else if positive_due
+                    && !packed_layout
+                        .is_some_and(|layout| layout.attract(embedding, row, index, alpha))
+                {
                     attractive_update_with_distance(
                         embedding,
                         n_components,
@@ -329,6 +358,11 @@ pub(crate) fn optimize_csr_with_density(
                     if vertex == row || undefined_density {
                         continue;
                     }
+                    if packed_layout
+                        .is_some_and(|layout| layout.repel(embedding, row, vertex, alpha))
+                    {
+                        continue;
+                    }
                     negative_update_rows(
                         embedding,
                         n_components,
@@ -339,6 +373,7 @@ pub(crate) fn optimize_csr_with_density(
                         repulsion_strength,
                         alpha,
                         distance_reduction,
+                        validated_compatibility,
                     )?;
                 }
             }
@@ -369,6 +404,7 @@ fn negative_update_rows(
     repulsion_strength: f64,
     learning_rate: f64,
     distance_reduction: DistanceReduction,
+    validated_compatibility: bool,
 ) -> Result<(), LayoutError> {
     let source_start = source * n_components;
     let vertex_start = vertex * n_components;
@@ -383,6 +419,9 @@ fn negative_update_rows(
         let current = &mut after_source[..n_components];
         (current, other)
     };
+    if validated_compatibility {
+        return negative_update_fixed_tail(current, other, a, b, repulsion_strength, learning_rate);
+    }
     negative_example_update_with_distance(
         current,
         other,

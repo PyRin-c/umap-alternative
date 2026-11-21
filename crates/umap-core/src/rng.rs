@@ -8,6 +8,7 @@
 //! RNG after initialization.
 
 use std::fmt;
+use std::num::NonZeroUsize;
 
 const STATE_WORDS: usize = 624;
 const PERIOD_OFFSET: usize = 397;
@@ -225,6 +226,23 @@ impl std::error::Error for NegativeSamplerError {}
 #[derive(Clone, Debug)]
 pub struct SerialNegativeSampler {
     heads: Vec<[i64; 3]>,
+    vertex_reciprocal: u64,
+}
+
+/// A transform's fixed fitted-row count, prepared once for all query draws.
+#[derive(Clone, Copy)]
+pub(crate) struct NegativeVertexModulo {
+    divisor: u64,
+    reciprocal: u64,
+}
+
+impl NegativeVertexModulo {
+    pub(crate) fn new(n_vertices: NonZeroUsize) -> Self {
+        Self {
+            divisor: n_vertices.get() as u64,
+            reciprocal: vertex_reciprocal(n_vertices.get()),
+        }
+    }
 }
 
 impl SerialNegativeSampler {
@@ -250,16 +268,19 @@ impl SerialNegativeSampler {
     /// Returns `None` for an out-of-range head. A valid draw can select any
     /// vertex, including `head` itself.
     pub fn sample(&mut self, head: usize) -> Option<usize> {
-        self.sample_from(head, self.heads.len())
+        let word = self.next_word(head)?;
+        Some(signed_word_modulo(word, self.heads.len() as u64, self.vertex_reciprocal) as usize)
     }
 
     // For a held-out embedding the heads and the sampled vertices belong
     // to different matrices. The caller supplies the positive tail count.
-    pub(crate) fn sample_from(&mut self, head: usize, n_vertices: usize) -> Option<usize> {
-        // The validated input slice held at least one f32 per vertex, so the
-        // vertex count fits in i64 on Rust's supported pointer widths.
+    pub(crate) fn sample_from(
+        &mut self,
+        head: usize,
+        modulo: NegativeVertexModulo,
+    ) -> Option<usize> {
         let word = self.next_word(head)?;
-        Some(i64::from(word).rem_euclid(n_vertices as i64) as usize)
+        Some(signed_word_modulo(word, modulo.divisor, modulo.reciprocal) as usize)
     }
 
     fn from_raw_words(
@@ -300,18 +321,48 @@ impl SerialNegativeSampler {
         next_raw_word: impl FnMut() -> u32,
     ) -> Self {
         let seed = draw_negative_seed(next_raw_word);
-        let heads = coordinates
+        let heads: Vec<_> = coordinates
             .map(|coordinate| {
                 // Promote the coordinate before reinterpreting its binary64 bits.
                 let coordinate_bits = f64::from(coordinate).to_bits() as i64;
                 seed.map(|lane| coordinate_bits.wrapping_add(lane))
             })
             .collect();
-        Self { heads }
+        let vertex_reciprocal = vertex_reciprocal(heads.len());
+        Self {
+            heads,
+            vertex_reciprocal,
+        }
     }
 
     fn next_word(&mut self, head: usize) -> Option<i32> {
         self.heads.get_mut(head).map(next_negative_word)
+    }
+}
+
+#[inline]
+fn vertex_reciprocal(n_vertices: usize) -> u64 {
+    (1_u64 << i32::BITS) / n_vertices.max(1) as u64
+}
+
+#[inline]
+fn signed_word_modulo(word: i32, divisor: u64, reciprocal: u64) -> u64 {
+    // Complement negative words before reducing. For word = -m - 1 the
+    // Euclidean remainder is divisor - 1 - (m % divisor).
+    let magnitude = u64::from((word ^ (word >> 31)) as u32);
+    // The reciprocal is floor(2^32 / divisor). Multiplying a value below
+    // 2^32 underestimates the exact quotient by at most one.
+    let quotient = (magnitude * reciprocal) >> i32::BITS;
+    let remainder = magnitude - quotient * divisor;
+    let remainder = if remainder >= divisor {
+        remainder - divisor
+    } else {
+        remainder
+    };
+    if word < 0 {
+        divisor - 1 - remainder
+    } else {
+        remainder
     }
 }
 
@@ -373,7 +424,46 @@ mod negative_sampler_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::Mt19937;
+    use super::{
+        Mt19937, NegativeVertexModulo, NonZeroUsize, SerialNegativeSampler, signed_word_modulo,
+    };
+
+    #[test]
+    fn held_out_stream_uses_the_fitted_count_instead_of_the_number_of_queries() {
+        let sampler =
+            SerialNegativeSampler::new(&mut Mt19937::new(19), &[0.0, -0.5, 2.0], 3, 1).unwrap();
+        for vertices in [1, 31, 1024, 6000] {
+            let mut actual = sampler.clone();
+            let mut reference = sampler.clone();
+            let modulo = NegativeVertexModulo::new(NonZeroUsize::new(vertices).unwrap());
+            assert_eq!(actual.sample_from(3, modulo), None);
+            for head in (0..3).cycle().take(700) {
+                let word = i64::from(reference.next_word(head).unwrap());
+                assert_eq!(
+                    actual.sample_from(head, modulo),
+                    Some(word.rem_euclid(vertices as i64) as usize)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_modulo_matches_signed_division_at_boundaries_and_across_stream_words() {
+        let mut rng = Mt19937::new(42);
+        for divisor in [1, 2, 3, 15, 6000, 1 << 31, 1 << 32, i64::MAX as u64] {
+            let reciprocal = (1_u64 << i32::BITS) / divisor;
+            for word in [i32::MIN, i32::MIN + 1, -1, 0, 1, i32::MAX]
+                .into_iter()
+                .chain((0..1024).map(|_| rng.next_u32() as i32))
+            {
+                assert_eq!(
+                    signed_word_modulo(word, divisor, reciprocal),
+                    i64::from(word).rem_euclid(divisor as i64) as u64,
+                    "{word}, {divisor}",
+                );
+            }
+        }
+    }
 
     #[test]
     fn matches_published_reference_sequence_for_seed_5489() {

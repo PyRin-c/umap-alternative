@@ -239,6 +239,9 @@ pub(crate) enum DistanceReduction {
 
 impl DistanceReduction {
     pub(crate) fn squared(self, left: &[f32], right: &[f32]) -> f32 {
+        if let ([lx, ly], [rx, ry]) = (left, right) {
+            return squared_delta_2d(lx - rx, ly - ry);
+        }
         let (initial, left, right) = match self {
             Self::Sequential => (0.0, left, right),
             Self::SeededCompatibility => compatibility_distance_prefix(left, right),
@@ -250,6 +253,13 @@ impl DistanceReduction {
                 difference.mul_add(difference, sum)
             })
     }
+}
+
+#[inline(always)]
+pub(crate) fn squared_delta_2d(dx: f32, dy: f32) -> f32 {
+    // The first coordinate starts from zero, so its square has the same
+    // rounding as a fused multiply-add with a zero accumulator.
+    dy.mul_add(dy, dx * dx)
 }
 
 // This order reproduces isolated-edge compatibility fits from the Windows
@@ -565,6 +575,8 @@ pub(crate) fn negative_example_update_with_distance(
     )
 }
 
+// The caller has checked the shape, coordinates and parameters. The kernel
+// still checks the arithmetic and validates every new coordinate before writing.
 pub(crate) fn negative_update_fixed_tail(
     current: &mut [f32],
     other: &[f32],
@@ -653,6 +665,22 @@ fn apply_negative_update(
     };
     // Validate every candidate before mutating any coordinate, preserving the
     // attractive kernel's all-or-nothing behavior for a single update.
+    if let ([current_x, current_y], [other_x, other_y]) = (&mut *current, other) {
+        let new_x = updated_coordinate(*current_x, *other_x);
+        let new_y = updated_coordinate(*current_y, *other_y);
+        for (component, value) in [(0, new_x), (1, new_y)] {
+            if !value.is_finite() {
+                return Err(LayoutError::NonFiniteUpdate {
+                    endpoint: "current",
+                    component,
+                    value,
+                });
+            }
+        }
+        *current_x = new_x;
+        *current_y = new_y;
+        return Ok(());
+    }
     for (component, (&current_value, &other_value)) in current.iter().zip(other.iter()).enumerate()
     {
         let new_current = updated_coordinate(current_value, other_value);
@@ -1052,10 +1080,33 @@ fn validate_endpoint(endpoint: &[f32], name: &'static str) -> Result<(), LayoutE
 #[cfg(test)]
 mod tests {
     use super::{
-        LayoutError, attractive_optimize_csr, attractive_update, attractive_update_pair,
-        negative_example_update,
+        DistanceReduction, LayoutError, attractive_optimize_csr, attractive_update,
+        attractive_update_pair, negative_example_update,
     };
     use crate::fuzzy_graph::CsrGraph;
+
+    #[test]
+    fn two_coordinate_distance_matches_the_fused_reduction() {
+        let rows = [
+            [-0.0, 0.0],
+            [f32::from_bits(1), f32::MIN_POSITIVE],
+            [1.000_000_1, -2.222_222],
+            [16_384.0, -16_384.0],
+            [f32::MAX, -f32::MAX],
+        ];
+        for left in rows {
+            for right in rows {
+                let [dx, dy] = [left[0] - right[0], left[1] - right[1]];
+                let expected = dy.mul_add(dy, dx.mul_add(dx, 0.0)).to_bits();
+                for reduction in [
+                    DistanceReduction::Sequential,
+                    DistanceReduction::SeededCompatibility,
+                ] {
+                    assert_eq!(reduction.squared(&left, &right).to_bits(), expected);
+                }
+            }
+        }
+    }
 
     #[test]
     fn analytic_two_dimensional_update_is_symmetric() {

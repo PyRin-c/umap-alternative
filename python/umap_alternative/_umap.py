@@ -130,6 +130,10 @@ def _is_supplied_search_index(search_index):
 
 def _csr_graph(components):
     shape, indptr, indices, data = components
+    if isinstance(data, bytes):
+        data = np.frombuffer(data, dtype=np.float32).copy()
+        indices = np.frombuffer(indices, dtype=np.uintp)
+        indptr = np.frombuffer(indptr, dtype=np.uintp)
     return csr_matrix(
         (
             np.asarray(data, dtype=np.float32),
@@ -205,7 +209,12 @@ def _fit_graph_embedding(
         densmap, _density_input(features, graph, metric),
     )
     shape, coordinates, (words, cursor), snapshots = _native._fit_graph_embedding_with_rng(
-        (graph.shape, graph.indptr.tolist(), graph.indices.tolist(), graph.data.tolist()),
+        (
+            graph.shape,
+            graph.indptr.astype(np.uintp, copy=False).tobytes(),
+            graph.indices.astype(np.uintp, copy=False).tobytes(),
+            graph.data.astype(np.float32, copy=False).tobytes(),
+        ),
         initial,
         (words.tolist(), cursor),
         n_epochs=n_epochs,
@@ -1022,12 +1031,15 @@ class UMAP(BaseEstimator, TransformerMixin):
             )
             if embedding_mode:
                 embedding_options["seed"] = rng
-            indices, distances = feature_search_index.training_ranks()
-            cut = (indices >= 0) & (distances >= cutoff)
-            removed = np.count_nonzero(cut)
-            indices[cut] = -1
-            distances[cut] = np.inf
-            components = _fit_neighbor_arrays(indices, distances, n_neighbors, graph_options)
+            if cutoff == np.inf:
+                components = feature_search_index.training_graph(graph_options)
+            else:
+                indices, distances = feature_search_index.training_ranks()
+                cut = (indices >= 0) & (distances >= cutoff)
+                removed = np.count_nonzero(cut)
+                indices[cut] = -1
+                distances[cut] = np.inf
+                components = _fit_neighbor_arrays(indices, distances, n_neighbors, graph_options)
             transform_cutoff = cutoff
         elif packed_metric:
             transform_cutoff = cutoff

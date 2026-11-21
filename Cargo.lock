@@ -175,14 +175,14 @@ checksum = "8c447be3a2abfa84b2d91680c56600bd6b2873866de27b36ec911be705e291da"
 
 [[package]]
 name = "umap-capi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "umap-core",
 ]
 
 [[package]]
 name = "umap-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -190,7 +190,7 @@ dependencies = [
 
 [[package]]
 name = "umap-python"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pyo3",
  "umap-core",

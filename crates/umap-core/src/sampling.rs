@@ -236,6 +236,22 @@ impl EdgeSamplingCursor {
         self.next_negative
     }
 
+    // The seeded optimizer checks these bounds once: epoch <= 2^20 with a
+    // positive interval >= 1 and a negative interval >= 2^-10. An advancing
+    // cursor then stays below 2^21, the count fits within 2^30, and any
+    // nonzero increment exceeds the floating-point spacing at those times.
+    #[inline(always)]
+    pub(crate) fn advance_bounded(&mut self, epoch: f64) -> Option<usize> {
+        if epoch < self.next_positive {
+            return None;
+        }
+        self.next_positive += self.positive_interval;
+        // The cast truncates positive ratios and saturates negative ones to zero.
+        let count = ((epoch - self.next_negative) / self.negative_interval) as usize;
+        self.next_negative += self.negative_interval * count as f64;
+        Some(count)
+    }
+
     /// Report whether one positive update is due at `epoch`.
     ///
     /// At most one positive update is consumed per call.  This preserves the
@@ -335,6 +351,33 @@ fn exceeds_usize(value: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{EdgeSamplingCursor, SamplingError, seeded_train_positive_interval};
+
+    #[test]
+    fn bounded_advance_matches_checked_scheduling_and_time_bits() {
+        for interval in [1.0, 1.25, 15.0 / 7.0, 43.2, 1.0e100] {
+            for rate in [0.001, 1.0, 5.0, 1024.0] {
+                let mut checked =
+                    EdgeSamplingCursor::from_positive_interval(interval, rate).unwrap();
+                let mut bounded = checked.clone();
+                for epoch in (0..=100).chain([1 << 20]) {
+                    let epoch = f64::from(epoch);
+                    let expected = checked
+                        .positive_due(epoch)
+                        .unwrap()
+                        .then(|| checked.take_negative_samples(epoch).unwrap());
+                    assert_eq!(bounded.advance_bounded(epoch), expected);
+                    assert_eq!(
+                        bounded.next_positive_epoch().to_bits(),
+                        checked.next_positive_epoch().to_bits()
+                    );
+                    assert_eq!(
+                        bounded.next_negative_epoch().to_bits(),
+                        checked.next_negative_epoch().to_bits()
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn seeded_training_intervals_match_public_rounding_at_integer_boundaries() {

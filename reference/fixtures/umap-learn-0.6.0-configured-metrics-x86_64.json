@@ -1,0 +1,1239 @@
+{
+  "distances": [
+    {
+      "id": "minkowski-0-float32",
+      "metric": "minkowski",
+      "dtype": "float32",
+      "left": [
+        0.1,
+        0.2
+      ],
+      "right": [
+        0.4,
+        0.3
+      ],
+      "kwds": {},
+      "bits": "3fd43d136b230188"
+    },
+    {
+      "id": "minkowski-0-float64",
+      "metric": "minkowski",
+      "dtype": "float64",
+      "left": [
+        0.1,
+        0.2
+      ],
+      "right": [
+        0.4,
+        0.3
+      ],
+      "kwds": {},
+      "bits": "3fd43d136248490f"
+    },
+    {
+      "id": "minkowski-1-float32",
+      "metric": "minkowski",
+      "dtype": "float32",
+      "left": [
+        0.1,
+        0.2,
+        0.6
+      ],
+      "right": [
+        0.4,
+        0.3,
+        0.1
+      ],
+      "kwds": {
+        "p": 3.0
+      },
+      "bits": "3fe11d79d25c7ac6"
+    },
+    {
+      "id": "minkowski-1-float64",
+      "metric": "minkowski",
+      "dtype": "float64",
+      "left": [
+        0.1,
+        0.2,
+        0.6
+      ],
+      "right": [
+        0.4,
+        0.3,
+        0.1
+      ],
+      "kwds": {
+        "p": 3.0
+      },
+      "bits": "3fe11d79d02e0e61"
+    },
+    {
+      "id": "minkowski-2-float32",
+      "metric": "minkowski",
+      "dtype": "float32",
+      "left": [
+        0,
+        0
+      ],
+      "right": [
+        1,
+        4
+      ],
+      "kwds": {
+        "p": 0.5
+      },
+      "bits": "4022000000000000"
+    },
+    {
+      "id": "minkowski-2-float64",
+      "metric": "minkowski",
+      "dtype": "float64",
+      "left": [
+        0,
+        0
+      ],
+      "right": [
+        1,
+        4
+      ],
+      "kwds": {
+        "p": 0.5
+      },
+      "bits": "4022000000000000"
+    },
+    {
+      "id": "wminkowski-3-float32",
+      "metric": "wminkowski",
+      "dtype": "float32",
+      "left": [
+        0.1,
+        0.2
+      ],
+      "right": [
+        0.4,
+        0.3
+      ],
+      "kwds": {},
+      "bits": "3fd43d136b230188"
+    },
+    {
+      "id": "wminkowski-3-float64",
+      "metric": "wminkowski",
+      "dtype": "float64",
+      "left": [
+        0.1,
+        0.2
+      ],
+      "right": [
+        0.4,
+        0.3
+      ],
+      "kwds": {},
+      "bits": "3fd43d136248490f"
+    },
+    {
+      "id": "weighted_minkowski-4-float32",
+      "metric": "weighted_minkowski",
+      "dtype": "float32",
+      "left": [
+        0.1,
+        0.2,
+        0.6
+      ],
+      "right": [
+        0.4,
+        0.3,
+        0.1
+      ],
+      "kwds": {
+        "w": [
+          2.0,
+          3.0,
+          0.0
+        ],
+        "p": 3.0
+      },
+      "bits": "3fd8a1626fefd704"
+    },
+    {
+      "id": "weighted_minkowski-4-float64",
+      "metric": "weighted_minkowski",
+      "dtype": "float64",
+      "left": [
+        0.1,
+        0.2,
+        0.6
+      ],
+      "right": [
+        0.4,
+        0.3,
+        0.1
+      ],
+      "kwds": {
+        "w": [
+          2.0,
+          3.0,
+          0.0
+        ],
+        "p": 3.0
+      },
+      "bits": "3fd8a1625e6fb2ce"
+    },
+    {
+      "id": "wminkowski-5-float32",
+      "metric": "wminkowski",
+      "dtype": "float32",
+      "left": [
+        1,
+        2
+      ],
+      "right": [
+        3,
+        4
+      ],
+      "kwds": {
+        "w": [
+          0.0,
+          0.0
+        ],
+        "p": 2.0
+      },
+      "bits": "0000000000000000"
+    },
+    {
+      "id": "wminkowski-5-float64",
+      "metric": "wminkowski",
+      "dtype": "float64",
+      "left": [
+        1,
+        2
+      ],
+      "right": [
+        3,
+        4
+      ],
+      "kwds": {
+        "w": [
+          0.0,
+          0.0
+        ],
+        "p": 2.0
+      },
+      "bits": "0000000000000000"
+    },
+    {
+      "id": "seuclidean-6-float32",
+      "metric": "seuclidean",
+      "dtype": "float32",
+      "left": [
+        0.1,
+        0.2
+      ],
+      "right": [
+        0.4,
+        0.3
+      ],
+      "kwds": {},
+      "bits": "3fd43d136b230188"
+    },
+    {
+      "id": "seuclidean-6-float64",
+      "metric": "seuclidean",
+      "dtype": "float64",
+      "left": [
+        0.1,
+        0.2
+      ],
+      "right": [
+        0.4,
+        0.3
+      ],
+      "kwds": {},
+      "bits": "3fd43d136248490f"
+    },
+    {
+      "id": "standardised_euclidean-7-float32",
+      "metric": "standardised_euclidean",
+      "dtype": "float32",
+      "left": [
+        0.1,
+        0.2,
+        0.6
+      ],
+      "right": [
+        0.4,
+        0.3,
+        0.1
+      ],
+      "kwds": {
+        "sigma": [
+          4.0,
+          9.0,
+          1.0
+        ]
+      },
+      "bits": "3fe0bd0f1cca1eb3"
+    },
+    {
+      "id": "standardised_euclidean-7-float64",
+      "metric": "standardised_euclidean",
+      "dtype": "float64",
+      "left": [
+        0.1,
+        0.2,
+        0.6
+      ],
+      "right": [
+        0.4,
+        0.3,
+        0.1
+      ],
+      "kwds": {
+        "sigma": [
+          4.0,
+          9.0,
+          1.0
+        ]
+      },
+      "bits": "3fe0bd0f1c3cbc17"
+    },
+    {
+      "id": "mahalanobis-8-float32",
+      "metric": "mahalanobis",
+      "dtype": "float32",
+      "left": [
+        0.1,
+        0.2
+      ],
+      "right": [
+        0.4,
+        0.3
+      ],
+      "kwds": {},
+      "bits": "3fd43d1371761799"
+    },
+    {
+      "id": "mahalanobis-8-float64",
+      "metric": "mahalanobis",
+      "dtype": "float64",
+      "left": [
+        0.1,
+        0.2
+      ],
+      "right": [
+        0.4,
+        0.3
+      ],
+      "kwds": {},
+      "bits": "3fd43d136eee752c"
+    },
+    {
+      "id": "mahalanobis-9-float32",
+      "metric": "mahalanobis",
+      "dtype": "float32",
+      "left": [
+        0.1,
+        0.2
+      ],
+      "right": [
+        0.4,
+        0.3
+      ],
+      "kwds": {
+        "vinv": [
+          [
+            4.0,
+            1.0
+          ],
+          [
+            1.0,
+            2.0
+          ]
+        ]
+      },
+      "bits": "3fe539f5535a5d97"
+    },
+    {
+      "id": "mahalanobis-9-float64",
+      "metric": "mahalanobis",
+      "dtype": "float64",
+      "left": [
+        0.1,
+        0.2
+      ],
+      "right": [
+        0.4,
+        0.3
+      ],
+      "kwds": {
+        "vinv": [
+          [
+            4.0,
+            1.0
+          ],
+          [
+            1.0,
+            2.0
+          ]
+        ]
+      },
+      "bits": "3fe539f550567f1d"
+    },
+    {
+      "id": "haversine-10-float32",
+      "metric": "haversine",
+      "dtype": "float32",
+      "left": [
+        0.1,
+        0.2
+      ],
+      "right": [
+        0.4,
+        0.3
+      ],
+      "kwds": {},
+      "bits": "3fd42afd2c899a7f"
+    },
+    {
+      "id": "haversine-10-float64",
+      "metric": "haversine",
+      "dtype": "float64",
+      "left": [
+        0.1,
+        0.2
+      ],
+      "right": [
+        0.4,
+        0.3
+      ],
+      "kwds": {},
+      "bits": "3fd42afd1ded3a77"
+    },
+    {
+      "id": "haversine-11-float32",
+      "metric": "haversine",
+      "dtype": "float32",
+      "left": [
+        0,
+        0
+      ],
+      "right": [
+        0,
+        3.141592653589793
+      ],
+      "kwds": {},
+      "bits": "400921fb48442d18"
+    },
+    {
+      "id": "haversine-11-float64",
+      "metric": "haversine",
+      "dtype": "float64",
+      "left": [
+        0,
+        0
+      ],
+      "right": [
+        0,
+        3.141592653589793
+      ],
+      "kwds": {},
+      "bits": "400921fb54442d18"
+    },
+    {
+      "id": "poincare-12-float32",
+      "metric": "poincare",
+      "dtype": "float32",
+      "left": [
+        0.1,
+        0.2
+      ],
+      "right": [
+        0.4,
+        0.3
+      ],
+      "kwds": {},
+      "bits": "3fe772ce5beb0f28"
+    },
+    {
+      "id": "poincare-12-float64",
+      "metric": "poincare",
+      "dtype": "float64",
+      "left": [
+        0.1,
+        0.2
+      ],
+      "right": [
+        0.4,
+        0.3
+      ],
+      "kwds": {},
+      "bits": "3fe772ce4a3140e1"
+    },
+    {
+      "id": "poincare-13-float32",
+      "metric": "poincare",
+      "dtype": "float32",
+      "left": [
+        0,
+        0
+      ],
+      "right": [
+        0.999,
+        0
+      ],
+      "kwds": {},
+      "bits": "401e66d4fe28a0fd"
+    },
+    {
+      "id": "poincare-13-float64",
+      "metric": "poincare",
+      "dtype": "float64",
+      "left": [
+        0,
+        0
+      ],
+      "right": [
+        0.999,
+        0
+      ],
+      "kwds": {},
+      "bits": "401e66cfde9c7c3e"
+    },
+    {
+      "id": "hellinger-14-float32",
+      "metric": "hellinger",
+      "dtype": "float32",
+      "left": [
+        0.1,
+        0.2
+      ],
+      "right": [
+        0.4,
+        0.3
+      ],
+      "kwds": {},
+      "bits": "3fc5d033e24d130e"
+    },
+    {
+      "id": "hellinger-14-float64",
+      "metric": "hellinger",
+      "dtype": "float64",
+      "left": [
+        0.1,
+        0.2
+      ],
+      "right": [
+        0.4,
+        0.3
+      ],
+      "kwds": {},
+      "bits": "3fc5d0340a1ef9f9"
+    },
+    {
+      "id": "hellinger-15-float32",
+      "metric": "hellinger",
+      "dtype": "float32",
+      "left": [
+        0,
+        0
+      ],
+      "right": [
+        0,
+        0
+      ],
+      "kwds": {},
+      "bits": "0000000000000000"
+    },
+    {
+      "id": "hellinger-15-float64",
+      "metric": "hellinger",
+      "dtype": "float64",
+      "left": [
+        0,
+        0
+      ],
+      "right": [
+        0,
+        0
+      ],
+      "kwds": {},
+      "bits": "0000000000000000"
+    },
+    {
+      "id": "hellinger-16-float32",
+      "metric": "hellinger",
+      "dtype": "float32",
+      "left": [
+        0,
+        0
+      ],
+      "right": [
+        0,
+        0.3
+      ],
+      "kwds": {},
+      "bits": "3ff0000000000000"
+    },
+    {
+      "id": "hellinger-16-float64",
+      "metric": "hellinger",
+      "dtype": "float64",
+      "left": [
+        0,
+        0
+      ],
+      "right": [
+        0,
+        0.3
+      ],
+      "kwds": {},
+      "bits": "3ff0000000000000"
+    },
+    {
+      "id": "hellinger-17-float32",
+      "metric": "hellinger",
+      "dtype": "float32",
+      "left": [
+        0.3,
+        0
+      ],
+      "right": [
+        0,
+        0.3
+      ],
+      "kwds": {},
+      "bits": "3ff0000000000000"
+    },
+    {
+      "id": "hellinger-17-float64",
+      "metric": "hellinger",
+      "dtype": "float64",
+      "left": [
+        0.3,
+        0
+      ],
+      "right": [
+        0,
+        0.3
+      ],
+      "kwds": {},
+      "bits": "3ff0000000000000"
+    },
+    {
+      "id": "softmax_hellinger-18-float32",
+      "metric": "softmax_hellinger",
+      "dtype": "float32",
+      "left": [
+        0.1,
+        0.2
+      ],
+      "right": [
+        0.4,
+        0.3
+      ],
+      "kwds": {},
+      "bits": "3fa217aec1e9999c"
+    },
+    {
+      "id": "softmax_hellinger-18-float64",
+      "metric": "softmax_hellinger",
+      "dtype": "float64",
+      "left": [
+        0.1,
+        0.2
+      ],
+      "right": [
+        0.4,
+        0.3
+      ],
+      "kwds": {},
+      "bits": "3fa217aee868b860"
+    },
+    {
+      "id": "softmax_hellinger-19-float32",
+      "metric": "softmax_hellinger",
+      "dtype": "float32",
+      "left": [
+        0,
+        0
+      ],
+      "right": [
+        0,
+        0
+      ],
+      "kwds": {},
+      "bits": "0000000000000000"
+    },
+    {
+      "id": "softmax_hellinger-19-float64",
+      "metric": "softmax_hellinger",
+      "dtype": "float64",
+      "left": [
+        0,
+        0
+      ],
+      "right": [
+        0,
+        0
+      ],
+      "kwds": {},
+      "bits": "0000000000000000"
+    },
+    {
+      "id": "symmetric_kl-20-float32",
+      "metric": "symmetric_kl",
+      "dtype": "float32",
+      "left": [
+        0.1,
+        0.2
+      ],
+      "right": [
+        0.4,
+        0.3
+      ],
+      "kwds": {},
+      "bits": "3fbde4560608ac64"
+    },
+    {
+      "id": "symmetric_kl-20-float64",
+      "metric": "symmetric_kl",
+      "dtype": "float64",
+      "left": [
+        0.1,
+        0.2
+      ],
+      "right": [
+        0.4,
+        0.3
+      ],
+      "kwds": {},
+      "bits": "3fbde4561f8b0a24"
+    },
+    {
+      "id": "symmetric_kl-21-float32",
+      "metric": "symmetric_kl",
+      "dtype": "float32",
+      "left": [
+        0.3,
+        0
+      ],
+      "right": [
+        0,
+        0.3
+      ],
+      "kwds": {
+        "z": 0.05
+      },
+      "bits": "3ff759d60d657fcc"
+    },
+    {
+      "id": "symmetric_kl-21-float64",
+      "metric": "symmetric_kl",
+      "dtype": "float64",
+      "left": [
+        0.3,
+        0
+      ],
+      "right": [
+        0,
+        0.3
+      ],
+      "kwds": {
+        "z": 0.05
+      },
+      "bits": "3ff759d602a5c3c1"
+    }
+  ],
+  "estimator": {
+    "graph": {
+      "fit_graph": {
+        "shape": [
+          9,
+          9
+        ],
+        "format": "csr",
+        "indptr": [
+          0,
+          3,
+          6,
+          10,
+          17,
+          21,
+          25,
+          28,
+          31,
+          34
+        ],
+        "indices": [
+          1,
+          2,
+          3,
+          0,
+          2,
+          3,
+          0,
+          1,
+          3,
+          4,
+          0,
+          1,
+          2,
+          4,
+          5,
+          6,
+          7,
+          2,
+          3,
+          5,
+          8,
+          3,
+          4,
+          6,
+          8,
+          3,
+          5,
+          7,
+          3,
+          6,
+          8,
+          4,
+          5,
+          7
+        ],
+        "bits": [
+          1065353216,
+          1062359036,
+          1052164389,
+          1065353216,
+          1065353215,
+          1050846544,
+          1062359036,
+          1065353215,
+          1065353216,
+          1065353216,
+          1052164389,
+          1050846544,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1054621017,
+          1065353216,
+          1065353216,
+          1065353216,
+          1054621017,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1054621017,
+          1065353216,
+          1062248751,
+          1054621017,
+          1065353216,
+          1062248751
+        ]
+      },
+      "transform": {
+        "shape": [
+          2,
+          9
+        ],
+        "format": "coo",
+        "row": [
+          0,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          1
+        ],
+        "col": [
+          2,
+          1,
+          0,
+          3,
+          6,
+          5,
+          3,
+          7
+        ],
+        "bits": [
+          1063378673,
+          1061636518,
+          1060099401,
+          1057546593,
+          1060706830,
+          1060706830,
+          1059554889,
+          1059020612
+        ]
+      }
+    },
+    "embedding": {
+      "fit_graph": {
+        "shape": [
+          9,
+          9
+        ],
+        "format": "csr",
+        "indptr": [
+          0,
+          3,
+          6,
+          10,
+          17,
+          21,
+          25,
+          28,
+          31,
+          34
+        ],
+        "indices": [
+          1,
+          2,
+          3,
+          0,
+          2,
+          3,
+          0,
+          1,
+          3,
+          4,
+          0,
+          1,
+          2,
+          4,
+          5,
+          6,
+          7,
+          2,
+          3,
+          5,
+          8,
+          3,
+          4,
+          6,
+          8,
+          3,
+          5,
+          7,
+          3,
+          6,
+          8,
+          4,
+          5,
+          7
+        ],
+        "bits": [
+          1065353216,
+          1062359036,
+          1052164389,
+          1065353216,
+          1065353215,
+          1050846544,
+          1062359036,
+          1065353215,
+          1065353216,
+          1065353216,
+          1052164389,
+          1050846544,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1054621017,
+          1065353216,
+          1065353216,
+          1065353216,
+          1054621017,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1054621017,
+          1065353216,
+          1062248751,
+          1054621017,
+          1065353216,
+          1062248751
+        ]
+      },
+      "transform": [
+        [
+          1079629632,
+          1084627086
+        ],
+        [
+          1083396933,
+          1085631951
+        ]
+      ],
+      "embedding": [
+        [
+          1080556984,
+          1082481611
+        ],
+        [
+          1079195725,
+          1082738377
+        ],
+        [
+          1076412359,
+          1085423725
+        ],
+        [
+          1080512504,
+          1088422131
+        ],
+        [
+          1074834547,
+          1087354591
+        ],
+        [
+          1076724420,
+          1089098258
+        ],
+        [
+          1082616649,
+          1089592619
+        ],
+        [
+          1083301046,
+          1087377064
+        ],
+        [
+          1078534564,
+          1087145419
+        ]
+      ],
+      "updated_graph": {
+        "shape": [
+          11,
+          11
+        ],
+        "format": "csr",
+        "indptr": [
+          0,
+          3,
+          6,
+          11,
+          16,
+          19,
+          24,
+          28,
+          31,
+          34,
+          37,
+          42
+        ],
+        "indices": [
+          1,
+          2,
+          9,
+          0,
+          2,
+          9,
+          0,
+          1,
+          3,
+          4,
+          9,
+          2,
+          4,
+          5,
+          6,
+          10,
+          2,
+          3,
+          5,
+          3,
+          4,
+          6,
+          8,
+          10,
+          3,
+          5,
+          7,
+          10,
+          6,
+          8,
+          10,
+          5,
+          7,
+          10,
+          0,
+          1,
+          2,
+          3,
+          5,
+          6,
+          7,
+          8
+        ],
+        "bits": [
+          1065353216,
+          1059905273,
+          1060892870,
+          1065353216,
+          1060892870,
+          1062905412,
+          1059905273,
+          1060892870,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1056964614,
+          0,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216,
+          1056964614,
+          1062405515,
+          1065353216,
+          1056964614,
+          1056964614,
+          1062405515,
+          1065353216,
+          1062405515,
+          1050942844,
+          1065353216,
+          1062405515,
+          1050942844,
+          1065353216,
+          1060892870,
+          1062905412,
+          1065353216,
+          0,
+          1065353216,
+          1065353216,
+          1065353216,
+          1065353216
+        ]
+      },
+      "updated_embedding": [
+        [
+          1075736468,
+          1086010743
+        ],
+        [
+          1076776870,
+          1086511964
+        ],
+        [
+          1082825506,
+          1089079766
+        ],
+        [
+          1084993567,
+          1091272563
+        ],
+        [
+          1083888901,
+          1090699805
+        ],
+        [
+          1085239372,
+          1092164515
+        ],
+        [
+          1087412361,
+          1091615956
+        ],
+        [
+          1088152778,
+          1092353836
+        ],
+        [
+          1086946583,
+          1093027903
+        ],
+        [
+          1079844409,
+          1087717474
+        ],
+        [
+          1086748254,
+          1092015810
+        ]
+      ]
+    }
+  },
+  "training": [
+    [
+      0,
+      0
+    ],
+    [
+      0,
+      1
+    ],
+    [
+      1,
+      3
+    ],
+    [
+      4,
+      4
+    ],
+    [
+      2,
+      7
+    ],
+    [
+      6,
+      6
+    ],
+    [
+      7,
+      2
+    ],
+    [
+      11,
+      3
+    ],
+    [
+      9,
+      8
+    ]
+  ],
+  "queries": [
+    [
+      0.25,
+      2.75
+    ],
+    [
+      7.75,
+      4.5
+    ]
+  ],
+  "options": {
+    "metric": "minkowski",
+    "metric_kwds": {
+      "p": 1.0
+    },
+    "n_neighbors": 4,
+    "random_state": 19,
+    "transform_seed": 31,
+    "n_jobs": 1,
+    "n_epochs": 24,
+    "init": "random",
+    "compatibility_layout": true,
+    "a": 1.57694346,
+    "b": 0.895060879
+  }
+}

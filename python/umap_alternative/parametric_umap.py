@@ -72,6 +72,8 @@ class ParametricUMAP(UMAP):
         transform_seed=42,
         precomputed_knn=_DEFAULT_PRECOMPUTED_KNN,
         disconnection_distance=None,
+        metric_kwds=None,
+        force_approximation_algorithm=False,
     ):
         super().__init__(
             n_components=n_components,
@@ -96,6 +98,8 @@ class ParametricUMAP(UMAP):
             transform_seed=transform_seed,
             precomputed_knn=precomputed_knn,
             disconnection_distance=disconnection_distance,
+            metric_kwds=metric_kwds,
+            force_approximation_algorithm=force_approximation_algorithm,
         )
         self.batch_size = batch_size
         self.dims = dims

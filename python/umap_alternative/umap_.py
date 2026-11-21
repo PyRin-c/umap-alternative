@@ -3,11 +3,13 @@
 from operator import index
 
 import numpy as np
-from scipy.sparse import coo_matrix, diags
+from scipy.sparse import coo_matrix, diags, issparse
 from sklearn.preprocessing import normalize
+from sklearn.utils.validation import check_array
 
 from . import _native
 from ._curve import find_ab_params
+from ._feature_search import ExactFeatureIndex, FeatureSearch
 from ._umap import UMAP
 from .distances import named_distances
 from .sparse import general_sset_intersection, general_sset_union
@@ -58,14 +60,19 @@ def nearest_neighbors(
     use_pynndescent=True, n_jobs=-1, compatibility_layout=True, verbose=False,
     nearest_neighbor_backend="auto", graph_only=False,
 ):
-    """Return neighbor arrays for a precomputed dense distance matrix."""
-    if metric != "precomputed":
-        raise NotImplementedError("nearest_neighbors currently requires precomputed distances")
-    matrix = np.asarray(X)
-    indices = fast_knn_indices(matrix, n_neighbors)
-    distances = submatrix(matrix, indices, n_neighbors)
-    indices[distances == np.inf] = -1
-    return indices, distances, None
+    """Return training neighbors and an exact index for feature queries."""
+    if metric == "precomputed":
+        matrix = np.asarray(X)
+        indices = fast_knn_indices(matrix, n_neighbors)
+        distances = submatrix(matrix, indices, n_neighbors)
+        indices[distances == np.inf] = -1
+        return indices, distances, None
+    search = FeatureSearch(metric, metric_kwds)
+    training = check_array(X, dtype=np.float32, accept_sparse="csr")
+    if issparse(training) and (search.name is not None or callable(search.function)):
+        raise NotImplementedError("configured feature distances require dense input")
+    indices, distances, _ = search.rank(training, n_neighbors)
+    return indices, distances, None if graph_only else ExactFeatureIndex(training, search)
 
 
 def fuzzy_simplicial_set(

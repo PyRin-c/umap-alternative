@@ -164,8 +164,7 @@ class AlignedUMAP(BaseEstimator):
         if self.compatibility_layout is None:
             warnings.warn(_COMPATIBILITY_WARNING, FutureWarning, stacklevel=3)
         if (
-            self.metric_kwds or self.target_metric_kwds or self.unique
-            or self.force_approximation_algorithm or self.angular_rp_forest
+            self.target_metric_kwds or self.unique or self.angular_rp_forest
             or self.nearest_neighbor_backend != "auto" or self.target_n_neighbors != -1
             or self.metric == "precomputed"
         ):
@@ -195,6 +194,7 @@ class AlignedUMAP(BaseEstimator):
             raise ValueError("negative_sample_rate must be positive")
         mapper = UMAP(
             **params, n_components=n_components, metric=self.metric, init=self.init,
+            metric_kwds=self.metric_kwds, force_approximation_algorithm=self.force_approximation_algorithm,
             random_state=self.random_state, a=self.a, b=self.b,
             compatibility_layout=self.compatibility_layout, target_metric=self.target_metric,
             target_weight=self.target_weight, transform_mode="graph", transform_seed=self.transform_seed,

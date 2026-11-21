@@ -6,6 +6,7 @@ use pyo3::types::PyBytes;
 use pyo3::wrap_pyfunction;
 
 use umap_core::aligned::{AlignedLayoutConfig, optimize_aligned_layout};
+use umap_core::approximate_neighbors::DenseApproximateIndex;
 use umap_core::density::{
     DensityError, OriginalRadiusInput, embedding_radius_log_inputs_euclidean,
     original_radius_log_inputs,
@@ -16,6 +17,7 @@ use umap_core::embedding::{
     DenseEmbedding, DenseEmbeddingConfig, DenseEmbeddingInit, EmbeddingLayoutConfig,
     fit_dense_embedding_seeded_with_graph_options, fit_graph_embedding_with_rng,
 };
+use umap_core::feature_metrics::{FeatureMetric, rank_feature_rows_with_tie_ranking};
 use umap_core::fit::{
     DenseContinuousTarget, apply_categorical_target, apply_continuous_target,
     fit_dense_categorical_graph_with_diagnostics, fit_dense_continuous_graph,
@@ -43,6 +45,7 @@ use umap_core::packed::{
 };
 use umap_core::parametric::prepare_parametric_edges;
 use umap_core::rng::{Mt19937, recursive_part_labels};
+use umap_core::row_distances::{MetricRow, row_distance};
 use umap_core::sampling::{ModernSampledLayout, ModernSamplingConfig};
 use umap_core::sparse::{
     CsrFeatures, SparseTieDistances, fit_sparse_euclidean_graph_with_cutoff,
@@ -561,6 +564,215 @@ fn _discrete_magnitude_distance(
         _ => Err(PyValueError::new_err(
             "unsupported magnitude distance dtype",
         )),
+    }
+}
+
+#[pyfunction]
+fn _support_distance(
+    py: Python<'_>,
+    x: &Bound<'_, PyBytes>,
+    y: &Bound<'_, PyBytes>,
+    name: &str,
+) -> PyResult<f64> {
+    let metric = parse_metric(name)?;
+    let (x, y) = (x.as_bytes(), y.as_bytes());
+    py.detach(|| {
+        let x: Vec<_> = x.iter().map(|&value| value != 0).collect();
+        let y: Vec<_> = y.iter().map(|&value| value != 0).collect();
+        metric.support_distance(&x, &y)
+    })
+    .ok_or_else(|| {
+        PyValueError::new_err("support distance requires a boolean metric and equal widths")
+    })
+}
+
+fn metric_row_words<T, const N: usize>(
+    values: &[u8],
+    decode: fn([u8; N]) -> T,
+) -> PyResult<Vec<T>> {
+    let (words, trailing) = values.as_chunks::<N>();
+    if !trailing.is_empty() {
+        return Err(PyValueError::new_err("invalid metric row byte width"));
+    }
+    Ok(words.iter().copied().map(decode).collect())
+}
+
+fn with_metric_row(
+    values: &[u8],
+    dtype: &str,
+    evaluate: impl FnOnce(MetricRow<'_>) -> PyResult<f64>,
+) -> PyResult<f64> {
+    match dtype {
+        "f32" => evaluate(MetricRow::F32(&metric_row_words(
+            values,
+            f32::from_ne_bytes,
+        )?)),
+        "f64" => evaluate(MetricRow::F64(&metric_row_words(
+            values,
+            f64::from_ne_bytes,
+        )?)),
+        "i64" => evaluate(MetricRow::Signed(&metric_row_words(
+            values,
+            i64::from_ne_bytes,
+        )?)),
+        "u64" => evaluate(MetricRow::Unsigned(&metric_row_words(
+            values,
+            u64::from_ne_bytes,
+        )?)),
+        _ => Err(PyValueError::new_err("unsupported metric row dtype")),
+    }
+}
+
+#[pyfunction]
+fn _numeric_row_distance(
+    py: Python<'_>,
+    x: &Bound<'_, PyBytes>,
+    y: &Bound<'_, PyBytes>,
+    metric: &str,
+    x_dtype: &str,
+    y_dtype: &str,
+) -> PyResult<f64> {
+    let metric = parse_metric(metric)?;
+    let (x, y) = (x.as_bytes(), y.as_bytes());
+    py.detach(|| {
+        with_metric_row(x, x_dtype, |left| {
+            with_metric_row(y, y_dtype, |right| {
+                row_distance(metric, left, right)
+                    .ok_or_else(|| PyValueError::new_err("unsupported metric or invalid row width"))
+            })
+        })
+    })
+}
+
+fn parse_feature_metric<'a>(
+    name: &str,
+    parameter: f64,
+    values: &'a [f64],
+) -> PyResult<FeatureMetric<'a>> {
+    Ok(match name {
+        "minkowski" => FeatureMetric::Minkowski(parameter),
+        "weighted_minkowski" => FeatureMetric::WeightedMinkowski(parameter, values),
+        "standardised_euclidean" => FeatureMetric::StandardizedEuclidean(values),
+        "mahalanobis" => FeatureMetric::Mahalanobis(values),
+        "haversine" => FeatureMetric::Haversine,
+        "poincare" => FeatureMetric::Poincare,
+        "hellinger" => FeatureMetric::Hellinger,
+        "softmax_hellinger" => FeatureMetric::SoftmaxHellinger,
+        "symmetric_kl" => FeatureMetric::SymmetricKl(parameter),
+        _ => {
+            return Err(PyValueError::new_err(format!(
+                "unsupported feature metric {name:?}"
+            )));
+        }
+    })
+}
+
+#[pyfunction]
+fn _feature_metric_distance(
+    py: Python<'_>,
+    name: &str,
+    parameter: f64,
+    values: Vec<f64>,
+    x: Vec<f64>,
+    y: Vec<f64>,
+) -> PyResult<f64> {
+    let metric = parse_feature_metric(name, parameter, &values)?;
+    py.detach(|| metric.distance(&x, &y))
+        .map_err(PyValueError::new_err)
+}
+
+#[pyfunction]
+#[pyo3(signature = (name, parameter, values, training, queries, width, k, cutoff, rank_ties=None))]
+#[allow(clippy::too_many_arguments)]
+fn _rank_configured_features(
+    py: Python<'_>,
+    name: &str,
+    parameter: f64,
+    values: Vec<f64>,
+    training: &Bound<'_, PyBytes>,
+    queries: Option<&Bound<'_, PyBytes>>,
+    width: usize,
+    k: usize,
+    cutoff: f64,
+    rank_ties: Option<Py<PyAny>>,
+) -> PyResult<(Vec<i32>, Vec<f32>, usize)> {
+    let metric = parse_feature_metric(name, parameter, &values)?;
+    let training = training.as_bytes();
+    let queries = queries.map(|rows| rows.as_bytes());
+    let ranked = py.detach(|| {
+        let training = metric_row_words(training, f64::from_ne_bytes)?;
+        let queries = queries
+            .map(|data| metric_row_words(data, f64::from_ne_bytes))
+            .transpose()?;
+        let mut callback_error = None;
+        let rank_ties = rank_ties.as_ref().map(|callback| {
+            |distances: &[f32], width| {
+                python_rank_ties(callback, distances, width, &mut callback_error)
+            }
+        });
+        let ranked = rank_feature_rows_with_tie_ranking(
+            metric,
+            &training,
+            queries.as_deref(),
+            width,
+            k,
+            cutoff,
+            rank_ties,
+        );
+        if let Some(error) = callback_error {
+            return Err(error);
+        }
+        ranked.map_err(PyValueError::new_err)
+    })?;
+    Ok((ranked.columns, ranked.distances, ranked.removed))
+}
+
+#[pyclass(module = "umap_alternative._native")]
+struct NativeApproximateIndex {
+    index: DenseApproximateIndex<'static>,
+}
+
+#[pymethods]
+impl NativeApproximateIndex {
+    #[new]
+    fn new(
+        py: Python<'_>,
+        training: &Bound<'_, PyBytes>,
+        shape: (usize, usize),
+        k: usize,
+        metric: &str,
+        seed: u32,
+    ) -> PyResult<Self> {
+        let metric = parse_metric(metric)?;
+        let data = training.as_bytes();
+        let index = py.detach(|| {
+            let data = metric_row_words(data, f32::from_ne_bytes)?;
+            DenseApproximateIndex::build(&data, shape.0, shape.1, k, metric, seed)
+                .map(DenseApproximateIndex::into_owned)
+                .map_err(|error| PyValueError::new_err(error.to_string()))
+        })?;
+        Ok(Self { index })
+    }
+
+    fn training_ranks(&self) -> (Vec<i32>, Vec<f32>) {
+        let ranks = self.index.training_ranks();
+        (ranks.indices.clone(), ranks.distances.clone())
+    }
+
+    fn query(
+        &self,
+        py: Python<'_>,
+        queries: &Bound<'_, PyBytes>,
+        n_rows: usize,
+    ) -> PyResult<(Vec<i32>, Vec<f32>)> {
+        let bytes = queries.as_bytes();
+        let ranks = py.detach(|| {
+            let queries = metric_row_words(bytes, f32::from_ne_bytes)?;
+            self.index
+                .query(&queries, n_rows)
+                .map_err(|error| PyValueError::new_err(error.to_string()))
+        })?;
+        Ok((ranks.indices, ranks.distances))
     }
 }
 
@@ -2007,6 +2219,11 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_discrete_count_distance, module)?)?;
     module.add_function(wrap_pyfunction!(_discrete_edit_distance, module)?)?;
     module.add_function(wrap_pyfunction!(_discrete_magnitude_distance, module)?)?;
+    module.add_function(wrap_pyfunction!(_support_distance, module)?)?;
+    module.add_function(wrap_pyfunction!(_numeric_row_distance, module)?)?;
+    module.add_function(wrap_pyfunction!(_feature_metric_distance, module)?)?;
+    module.add_function(wrap_pyfunction!(_rank_configured_features, module)?)?;
+    module.add_class::<NativeApproximateIndex>()?;
     module.add_function(wrap_pyfunction!(_optimize_aligned_layout, module)?)?;
     module.add_function(wrap_pyfunction!(_prepare_parametric_edges, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_graph, module)?)?;

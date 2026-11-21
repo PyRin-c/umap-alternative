@@ -116,25 +116,216 @@ def chebyshev(x, y):
     return _magnitude(x, y, "chebyshev")
 
 
-def hamming(x, y):
+def _feature_pair(x, y):
     x, y = np.asarray(x), np.asarray(y)
-    if x.ndim != 1 or x.shape != y.shape:
-        raise TypeError("Hamming inputs must be equally sized vectors")
-    return np.count_nonzero(x != y) / len(x)
+    if x.ndim != 1 or y.ndim != 1:
+        raise TypeError("distance inputs must be one-dimensional vectors")
+    if y.size < x.size:
+        raise ValueError("the second distance vector is shorter than the first")
+    for row in (x, y):
+        if row.dtype.kind not in "biuf":
+            raise TypeError("distance vectors must have real numeric dtypes")
+        if row.dtype.kind == "f" and row.dtype.itemsize not in (4, 8):
+            raise NotImplementedError(row.dtype.name)
+    return x, y[:x.size]
+
+
+def _metric_row(row):
+    dtype = row.dtype.newbyteorder("=")
+    if dtype.kind != "f":
+        dtype = np.dtype(np.uint64 if dtype.kind == "u" else np.int64)
+    return row.astype(dtype, copy=False).tobytes(), f"{dtype.kind}{8 * dtype.itemsize}"
+
+
+def _numeric_distance(x, y, name):
+    x, y = _feature_pair(x, y)
+    if name == "correlation" and not x.size:
+        raise ZeroDivisionError("correlation of empty vectors")
+    if name in ("canberra", "braycurtis"):
+        dtype = np.result_type(x.dtype, y.dtype)
+        if "f" in (x.dtype.kind, y.dtype.kind):
+            x, y = x.astype(dtype, copy=False), y.astype(dtype, copy=False)
+    left, left_dtype = _metric_row(x)
+    right, right_dtype = _metric_row(y)
+    return _native._numeric_row_distance(left, right, name, left_dtype, right_dtype)
+
+
+def canberra(x, y):
+    """Sum the absolute differences divided by the pairwise absolute sums."""
+    return _numeric_distance(x, y, "canberra")
+
+
+def bray_curtis(x, y):
+    """Divide the sum of absolute differences by the sum of absolute pair sums."""
+    return _numeric_distance(x, y, "braycurtis")
+
+
+def cosine(x, y):
+    """Return one minus the cosine similarity of the two feature vectors."""
+    return _numeric_distance(x, y, "cosine")
+
+
+def correlation(x, y):
+    """Return cosine distance after centering each feature vector."""
+    return _numeric_distance(x, y, "correlation")
+
+
+def hamming(x, y):
+    """Return the fraction of coordinates with different numeric values."""
+    x, y = _feature_pair(x, y)
+    if not x.size:
+        raise ZeroDivisionError("Hamming distance of empty vectors")
+    if {x.dtype.kind, y.dtype.kind} == {"i", "u"}:
+        x, y = x.astype(np.float64), y.astype(np.float64)
+    return int(np.count_nonzero(x != y)) / len(x)
+
+
+def _support_distance(x, y, name):
+    x, y = _feature_pair(x, y)
+    if not x.size and name in ("matching", "rogerstanimoto", "sokalmichener"):
+        raise ZeroDivisionError("support distance denominator is zero")
+    return _native._support_distance((x != 0).tobytes(), (y != 0).tobytes(), name)
+
+
+def matching(x, y):
+    return _support_distance(x, y, "matching")
+
+
+def jaccard(x, y):
+    return _support_distance(x, y, "jaccard")
+
+
+def dice(x, y):
+    return _support_distance(x, y, "dice")
+
+
+def kulsinski(x, y):
+    return _support_distance(x, y, "kulsinski")
+
+
+def rogers_tanimoto(x, y):
+    return _support_distance(x, y, "rogerstanimoto")
+
+
+def russellrao(x, y):
+    return _support_distance(x, y, "russellrao")
+
+
+def sokal_sneath(x, y):
+    return _support_distance(x, y, "sokalsneath")
+
+
+def sokal_michener(x, y):
+    return _support_distance(x, y, "sokalmichener")
+
+
+def yule(x, y):
+    return _support_distance(x, y, "yule")
+
+
+_CONFIGURABLE_METRICS = {
+    "minkowski": "minkowski",
+    "poincare": "poincare",
+    "seuclidean": "standardised_euclidean",
+    "standardised_euclidean": "standardised_euclidean",
+    "wminkowski": "weighted_minkowski",
+    "weighted_minkowski": "weighted_minkowski",
+    "mahalanobis": "mahalanobis",
+    "hellinger": "hellinger",
+    "softmax_hellinger": "softmax_hellinger",
+    "haversine": "haversine",
+    "symmetric_kl": "symmetric_kl",
+}
+
+
+def _metric_parameters(name, width, kwargs):
+    kwargs = dict(kwargs)
+    parameter, values = 0.0, []
+    if name in ("minkowski", "weighted_minkowski"):
+        parameter = float(kwargs.pop("p", 2))
+    if name == "symmetric_kl":
+        parameter = float(kwargs.pop("z", 1e-11))
+    if name in ("weighted_minkowski", "standardised_euclidean", "mahalanobis"):
+        key = {"weighted_minkowski": "w", "standardised_euclidean": "sigma", "mahalanobis": "vinv"}[name]
+        values = kwargs.pop(key, None)
+        if values is None:
+            values = np.eye(width) if name == "mahalanobis" else np.ones(width)
+        shape = (width, width) if name == "mahalanobis" else (width,)
+        values = np.asarray(values, dtype=np.float64)
+        if values.shape != shape:
+            raise ValueError(f"{key} must have shape {shape}")
+        values = values.ravel().tolist()
+    if kwargs:
+        raise TypeError(f"{name} got an unexpected metric parameter {next(iter(kwargs))!r}")
+    return parameter, values
+
+
+def _configured_distance(x, y, name, kwargs):
+    x, y = _feature_pair(x, y)
+    parameter, values = _metric_parameters(name, len(x), kwargs)
+    return _native._feature_metric_distance(name, parameter, values, x.tolist(), y.tolist())
+
+
+def minkowski(x, y, p=2):
+    return _configured_distance(x, y, "minkowski", {"p": p})
+
+
+def weighted_minkowski(x, y, w=None, p=2):
+    return _configured_distance(x, y, "weighted_minkowski", {"w": w, "p": p})
+
+
+def standardised_euclidean(x, y, sigma=None):
+    return _configured_distance(x, y, "standardised_euclidean", {"sigma": sigma})
+
+
+def mahalanobis(x, y, vinv=None):
+    return _configured_distance(x, y, "mahalanobis", {"vinv": vinv})
+
+
+def haversine(x, y):
+    return _configured_distance(x, y, "haversine", {})
+
+
+def poincare(u, v):
+    return _configured_distance(u, v, "poincare", {})
+
+
+def hellinger(x, y):
+    return _configured_distance(x, y, "hellinger", {})
+
+
+def softmax_hellinger(x, y):
+    return _configured_distance(x, y, "softmax_hellinger", {})
+
+
+def symmetric_kl(x, y, z=1e-11):
+    return _configured_distance(x, y, "symmetric_kl", {"z": z})
 
 
 named_distances = {
-    "categorical": categorical_distance, "hierarchical_categorical": hierarchical_categorical_distance,
-    "ordinal": ordinal_distance, "count": count_distance, "string": levenshtein,
-    "myers": levenshtein_myers_ascii,
     "euclidean": euclidean, "l2": euclidean,
     "manhattan": manhattan, "taxicab": manhattan, "l1": manhattan,
     "chebyshev": chebyshev, "linfinity": chebyshev, "linfty": chebyshev, "linf": chebyshev,
-    "hamming": hamming,
+    "minkowski": minkowski, "poincare": poincare,
+    "seuclidean": standardised_euclidean, "standardised_euclidean": standardised_euclidean,
+    "wminkowski": weighted_minkowski, "weighted_minkowski": weighted_minkowski,
+    "mahalanobis": mahalanobis, "canberra": canberra, "cosine": cosine, "correlation": correlation,
+    "hellinger": hellinger, "softmax_hellinger": softmax_hellinger, "haversine": haversine,
+    "braycurtis": bray_curtis, "symmetric_kl": symmetric_kl,
+    "hamming": hamming, "jaccard": jaccard, "dice": dice, "matching": matching,
+    "kulsinski": kulsinski, "rogerstanimoto": rogers_tanimoto, "russellrao": russellrao,
+    "sokalsneath": sokal_sneath, "sokalmichener": sokal_michener, "yule": yule,
+    "categorical": categorical_distance, "ordinal": ordinal_distance,
+    "hierarchical_categorical": hierarchical_categorical_distance, "count": count_distance,
+    "string": levenshtein, "myers": levenshtein_myers_ascii,
 }
 
 __all__ = [
-    "DISCRETE_METRICS", "categorical_distance", "chebyshev", "count_distance", "euclidean",
-    "get_discrete_params", "hamming", "hierarchical_categorical_distance", "levenshtein",
-    "levenshtein_myers_ascii", "manhattan", "named_distances", "ordinal_distance",
+    "DISCRETE_METRICS", "bray_curtis", "canberra", "categorical_distance", "chebyshev",
+    "correlation", "cosine", "count_distance", "dice", "euclidean", "get_discrete_params",
+    "hamming", "haversine", "hellinger", "hierarchical_categorical_distance", "jaccard", "kulsinski",
+    "levenshtein", "levenshtein_myers_ascii", "mahalanobis", "manhattan", "matching", "minkowski",
+    "named_distances", "ordinal_distance", "poincare", "rogers_tanimoto", "russellrao",
+    "softmax_hellinger", "sokal_michener", "sokal_sneath", "standardised_euclidean", "symmetric_kl",
+    "weighted_minkowski", "yule",
 ]

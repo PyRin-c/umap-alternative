@@ -4,6 +4,7 @@
 //! held-out queries to be measured independently of tree construction.
 //! Exhaustive search remains available through `neighbors`.
 
+use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fmt;
@@ -113,7 +114,9 @@ impl std::error::Error for ApproximateSearchError {}
 /// Queries descend a retained tree and walk the refined graph. The caller
 /// selects exhaustive search explicitly.
 pub struct DenseApproximateIndex<'a> {
-    data: DenseRows<'a>,
+    data: Cow<'a, [f32]>,
+    n_rows: usize,
+    n_features: usize,
     metric: DistanceMetric,
     seed: u32,
     fit_ranks: RankedNeighbors,
@@ -149,7 +152,9 @@ impl<'a> DenseApproximateIndex<'a> {
             fit_ranks.extend_training(row, rank, k);
         }
         Ok(Self {
-            data,
+            data: Cow::Borrowed(data.data),
+            n_rows,
+            n_features,
             metric,
             seed,
             fit_ranks,
@@ -165,7 +170,21 @@ impl<'a> DenseApproximateIndex<'a> {
 
     /// Effective fitted count for `transform_ranked_neighbors_graph`.
     pub fn query_scale_neighbors(&self) -> usize {
-        self.fit_ranks.width.min(self.data.n_rows - 1)
+        self.fit_ranks.width.min(self.n_rows - 1)
+    }
+
+    /// Retain the feature matrix and fitted search data independently of the caller's buffer.
+    pub fn into_owned(self) -> DenseApproximateIndex<'static> {
+        DenseApproximateIndex {
+            data: Cow::Owned(self.data.into_owned()),
+            n_rows: self.n_rows,
+            n_features: self.n_features,
+            metric: self.metric,
+            seed: self.seed,
+            fit_ranks: self.fit_ranks,
+            edges: self.edges,
+            tree: self.tree,
+        }
     }
 
     /// Search each query independently, returning the requested width.
@@ -178,11 +197,16 @@ impl<'a> DenseApproximateIndex<'a> {
         queries: &[f32],
         n_query_rows: usize,
     ) -> Result<RankedNeighbors, ApproximateSearchError> {
-        let queries = DenseRows::new(queries, n_query_rows, self.data.n_features)?;
+        let data = DenseRows {
+            data: self.data.as_ref(),
+            n_rows: self.n_rows,
+            n_features: self.n_features,
+        };
+        let queries = DenseRows::new(queries, n_query_rows, data.n_features)?;
         let mut result = RankedNeighbors::with_capacity(n_query_rows, self.fit_ranks.width)?;
-        let k = self.fit_ranks.width.min(self.data.n_rows);
+        let k = self.fit_ranks.width.min(data.n_rows);
         let factor = if self.metric.is_angular() { 1.24 } else { 1.12 };
-        let mut visited = vec![usize::MAX; self.data.n_rows];
+        let mut visited = vec![usize::MAX; data.n_rows];
         for (row, query) in queries.data.chunks_exact(queries.n_features).enumerate() {
             let mut best = Vec::with_capacity(k);
             let mut frontier = BinaryHeap::new();
@@ -191,7 +215,7 @@ impl<'a> DenseApproximateIndex<'a> {
                     if visited[index] != row {
                         visited[index] = row;
                         let distance =
-                            checked_distance(self.metric, query, self.data.row(index), row, index)?;
+                            checked_distance(self.metric, query, data.row(index), row, index)?;
                         if distance <= bound(best, k, factor) {
                             frontier.push(Reverse((distance.to_bits(), index)));
                             offer(best, index, distance, k);
@@ -199,16 +223,13 @@ impl<'a> DenseApproximateIndex<'a> {
                     }
                     Ok(())
                 };
-            for &index in self
-                .tree
-                .leaf(self.data, projection_metric(self.metric), query)
-            {
+            for &index in self.tree.leaf(data, projection_metric(self.metric), query) {
                 visit(index, &mut best, &mut frontier)?;
             }
             // Small leaves can need additional entry points.
             if best.len() < k {
                 let mut rng = Mt19937::new(self.seed);
-                for candidate in sample_rows(self.data.n_rows, &mut rng) {
+                for candidate in sample_rows(data.n_rows, &mut rng) {
                     visit(candidate, &mut best, &mut frontier)?;
                     if best.len() == k {
                         break;

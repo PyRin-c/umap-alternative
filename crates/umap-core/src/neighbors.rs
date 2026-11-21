@@ -426,6 +426,19 @@ fn compare_neighbors(left: &Neighbor, right: &Neighbor) -> Ordering {
 }
 
 impl DistanceMetric {
+    /// Distance between equally sized support masks, with a binary64 result.
+    ///
+    /// Returns `None` for a non-boolean metric or unequal widths. For the
+    /// Hamming metric the two masks are compared as binary feature vectors.
+    pub fn support_distance(self, left: &[bool], right: &[bool]) -> Option<f64> {
+        if !self.is_boolean() || left.len() != right.len() {
+            return None;
+        }
+        let width = left.len();
+        let pairs = left.iter().copied().zip(right.iter().copied());
+        Some(support_distance_pairs(self, pairs, width))
+    }
+
     pub(crate) fn is_angular(self) -> bool {
         matches!(self, Self::Cosine | Self::Correlation)
     }
@@ -488,17 +501,27 @@ pub(crate) fn boolean_distance_pairs(
     pairs: impl Iterator<Item = (f32, f32)>,
     width: usize,
 ) -> f32 {
-    use DistanceMetric as Metric;
-    if width == 0 {
-        return 0.0;
-    }
-    if metric == Metric::Hamming {
+    if metric == DistanceMetric::Hamming {
         let unequal = pairs.filter(|(left, right)| left != right).count();
-        return (unequal as f64 / width as f64) as f32;
+        return if width == 0 {
+            0.0
+        } else {
+            (unequal as f64 / width as f64) as f32
+        };
     }
+    let support = pairs.map(|(left, right)| (left != 0.0, right != 0.0));
+    support_distance_pairs(metric, support, width) as f32
+}
+
+fn support_distance_pairs(
+    metric: DistanceMetric,
+    pairs: impl Iterator<Item = (bool, bool)>,
+    width: usize,
+) -> f64 {
+    use DistanceMetric as Metric;
     let (mut both, mut left_only, mut right_only) = (0, 0, 0);
-    for (left, right) in pairs {
-        match (left != 0.0, right != 0.0) {
+    for support in pairs {
+        match support {
             (true, true) => both += 1,
             (true, false) => left_only += 1,
             (false, true) => right_only += 1,
@@ -510,7 +533,7 @@ pub(crate) fn boolean_distance_pairs(
     let width = width as f64;
     let mismatch = left_only + right_only;
     let (numerator, denominator) = match metric {
-        Metric::Matching => (mismatch, width),
+        Metric::Hamming | Metric::Matching => (mismatch, width),
         Metric::Jaccard => (mismatch, both + mismatch),
         Metric::Dice => (mismatch, 2.0 * both + mismatch),
         Metric::RussellRao | Metric::Kulsinski if mismatch == 0.0 => return 0.0,
@@ -527,7 +550,7 @@ pub(crate) fn boolean_distance_pairs(
     if denominator == 0.0 {
         0.0
     } else {
-        (numerator / denominator) as f32
+        numerator / denominator
     }
 }
 
@@ -591,18 +614,21 @@ fn correlation_distance(left: &[f32], right: &[f32]) -> f32 {
     angular_distance(dot, left_squared, right_squared)
 }
 
-pub(crate) fn correlation_products(left: &[f32], right: &[f32]) -> ((f64, f64, f64), (f64, f64)) {
+pub(crate) fn correlation_products<T: Copy + Into<f64>>(
+    left: &[T],
+    right: &[T],
+) -> ((f64, f64, f64), (f64, f64)) {
     if left.is_empty() {
         return ((0.0, 0.0, 0.0), (0.0, 0.0));
     }
-    let left_mean = left.iter().map(|&x| f64::from(x)).sum::<f64>() / left.len() as f64;
-    let right_mean = right.iter().map(|&y| f64::from(y)).sum::<f64>() / right.len() as f64;
+    let left_mean = left.iter().copied().map(Into::into).sum::<f64>() / left.len() as f64;
+    let right_mean = right.iter().copied().map(Into::into).sum::<f64>() / right.len() as f64;
     let mut dot = 0.0_f64;
     let mut left_squared = 0.0_f64;
     let mut right_squared = 0.0_f64;
     for (&x, &y) in left.iter().zip(right) {
-        let x = f64::from(x) - left_mean;
-        let y = f64::from(y) - right_mean;
+        let x = x.into() - left_mean;
+        let y = y.into() - right_mean;
         dot += x * y;
         left_squared += x * x;
         right_squared += y * y;

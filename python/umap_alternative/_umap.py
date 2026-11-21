@@ -18,12 +18,17 @@ from sklearn.utils.validation import check_array, check_is_fitted
 
 from . import _native
 from ._curve import _finite_float, _resolve_curve_params
+from ._feature_search import (
+    ApproximateFeatureIndex, ExactFeatureIndex, FeatureSearch,
+    rank_tied_dense_distances as _rank_tied_dense_distances,
+)
 from ._recursive import _modern_recursive_initialization, _validate_recursive_initialization
 from ._spectral import (
     _disconnected_spectral_initialization,
     _modern_spectral_initialization,
     _spectral_initialization,
 )
+from .distances import _CONFIGURABLE_METRICS
 
 
 _METRIC_ALIASES = {
@@ -35,6 +40,7 @@ _METRIC_ALIASES = {
     "taxicab": "manhattan",
     "chebyshev": "chebyshev",
     "linfty": "chebyshev",
+    "linf": "chebyshev",
     "linfinity": "chebyshev",
     "max": "chebyshev",
     "canberra": "canberra",
@@ -114,6 +120,12 @@ _COMPATIBILITY_WARNING = (
 
 def _default_epochs(n_rows, densmap=False):
     return (500 if n_rows <= 10_000 else 200) + (200 if densmap else 0)
+
+
+def _is_supplied_search_index(search_index):
+    # A supplied NNDescent instance already has its public module loaded.
+    pynndescent = getattr(sys.modules.get("pynndescent"), "NNDescent", ())
+    return isinstance(search_index, (ExactFeatureIndex, ApproximateFeatureIndex)) or isinstance(search_index, pynndescent)
 
 
 def _csr_graph(components):
@@ -299,10 +311,6 @@ def _fit_modern_initialization(
         target_span = 3.0 * np.log10(n_rows) * np.log2(1.0 + repulsion_strength) * scale_factor
         coordinates *= np.asarray(target_span / span, dtype=np.float32)
     return coordinates
-
-
-def _rank_tied_dense_distances(distances, k):
-    return np.argsort(np.asarray(distances, dtype=np.float32))[:k].tolist()
 
 
 def _rank_tied_manhattan_distances(distances, k):
@@ -622,8 +630,8 @@ class UMAP(BaseEstimator, TransformerMixin):
     this estimator does not implement.
 
     For an embedding, use dense features, sparse Euclidean, Manhattan,
-    Chebyshev, or cosine features, or precomputed distances, with an integer ``random_state`` in
-    ``[0, 2**32 - 1]`` and ``compatibility_layout=True``.
+    Chebyshev, or cosine features, or precomputed distances. An integer
+    ``random_state`` in ``[0, 2**32 - 1]`` makes the serial layout repeatable.
     The default ``init="spectral"`` uses the sampled graph to place its connected components.
     For a connected graph the embedding dimension must be smaller than the
     number of samples. ``init`` can also be ``"random"`` or a finite
@@ -651,6 +659,8 @@ class UMAP(BaseEstimator, TransformerMixin):
     recursive_init_kwds = None
     coarse_layout_weights = "transition"
     coarsen_on_layout_weights = True
+    metric_kwds = None
+    force_approximation_algorithm = False
 
     def __init__(
         self,
@@ -693,10 +703,14 @@ class UMAP(BaseEstimator, TransformerMixin):
         recursive_init_kwds=None,
         coarse_layout_weights="transition",
         coarsen_on_layout_weights=True,
+        metric_kwds=None,
+        force_approximation_algorithm=False,
     ):
         self.n_components = n_components
         self.n_neighbors = n_neighbors
         self.metric = metric
+        self.metric_kwds = metric_kwds
+        self.force_approximation_algorithm = force_approximation_algorithm
         self.init = init
         self.random_state = random_state
         self.n_jobs = n_jobs
@@ -745,6 +759,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         densmap = density_options if getattr(self, "densmap", False) else None
         sparse = issparse(X)
         metric = self._validate_metric(sparse=sparse)
+        configured_metric = isinstance(metric, FeatureSearch)
         boolean_metric = metric in _BOOLEAN_METRICS
         packed_metric = metric in _PACKED_METRICS
         packed_supervised = packed_metric and y is not None
@@ -755,9 +770,10 @@ class UMAP(BaseEstimator, TransformerMixin):
                 self._graph_transform_fit = (X_checked, metric)
             if self.target_n_neighbors != -1 and self.target_n_neighbors < 2:
                 raise ValueError("target_n_neighbors must be -1 or greater than 1")
-        if boolean_metric or packed_metric:
+        if boolean_metric or packed_metric or configured_metric:
+            metric_name = metric.metric if configured_metric else metric
             warnings.warn(
-                f"gradient function is not yet implemented for {metric} distance metric; "
+                f"gradient function is not yet implemented for {metric_name} distance metric; "
                 "inverse_transform will be unavailable",
                 UserWarning, stacklevel=3,
             )
@@ -901,6 +917,8 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise NotImplementedError("density fitting with angular distances is not implemented")
         if embedding_mode and packed_metric and (densmap is not None or self.output_dens):
             raise NotImplementedError("density fitting with packed byte distances is not implemented")
+        if embedding_mode and configured_metric and (densmap is not None or self.output_dens):
+            raise NotImplementedError("density fitting with configured feature distances is not implemented")
         if sparse_embedding and (densmap is not None or self.output_dens):
             raise NotImplementedError("density fitting with sparse features is not implemented")
         if embedding_mode and sparse and precomputed and (
@@ -937,6 +955,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         embedding = None
         history = None
         transform_error = None
+        feature_search_index = None
         inverse_distances = None
         transform_cutoff = cutoff if angular else None
         removed = 0
@@ -944,16 +963,22 @@ class UMAP(BaseEstimator, TransformerMixin):
         ranked_sparse_graph = sparse_feature_layout and (
             embedding_mode or cutoff < np.inf or metric != "euclidean"
         )
+        approximate = self.force_approximation_algorithm and supplied is None
         graph_from_neighbors = (
             supplied is not None or cutoff < np.inf or (sparse and precomputed) or ranked_sparse_graph
-            or ranked_non_angular
+            or ranked_non_angular or configured_metric or approximate
         )
         if supplied is not None:
             if y is not None:
                 raise NotImplementedError("supervised fitting with precomputed_knn is not implemented")
             indices, distances, search_index = supplied
-            transform_error = _NO_SEARCH_INDEX if search_index is None else _EXTERNAL_SEARCH_UNAVAILABLE
+            if _is_supplied_search_index(search_index):
+                feature_search_index = search_index
+                transform_cutoff = cutoff
+            else:
+                transform_error = _NO_SEARCH_INDEX if search_index is None else _EXTERNAL_SEARCH_UNAVAILABLE
             self._supplied_transform_error = transform_error
+            self._feature_search_index = feature_search_index
             cut = distances >= cutoff
             # Assignment order matters if the second array is read-only.
             indices[cut] = -1
@@ -967,6 +992,23 @@ class UMAP(BaseEstimator, TransformerMixin):
                 )
             if precomputed:
                 transform_fit = (X_checked.copy(), metric)
+        elif approximate:
+            if (sparse or metric not in ("euclidean", "cosine", "correlation") or y is not None
+                    or densmap is not None or self.output_dens or n_neighbors < 2):
+                raise NotImplementedError(
+                    "native approximate fitting requires dense unsupervised Euclidean, cosine, "
+                    "or correlation features with at least two effective neighbors"
+                )
+            rng = check_random_state(self.random_state)
+            seed = int(rng.randint(0, 2**32, dtype=np.uint32))
+            feature_search_index = ApproximateFeatureIndex(X_checked, n_neighbors, metric, seed)
+            indices, distances = feature_search_index.training_ranks()
+            cut = (indices >= 0) & (distances >= cutoff)
+            removed = np.count_nonzero(cut)
+            indices[cut] = -1
+            distances[cut] = np.inf
+            components = _fit_neighbor_arrays(indices, distances, n_neighbors, graph_options)
+            transform_cutoff = cutoff
         elif packed_metric:
             transform_cutoff = cutoff
             components, removed = _native._fit_packed_graph(
@@ -979,7 +1021,16 @@ class UMAP(BaseEstimator, TransformerMixin):
                 self.n_neighbors_ = n_neighbors
                 self._transform_cutoff = cutoff
                 _warn_disconnected(np.count_nonzero(np.diff(self.graph_.indptr) == 0), n_rows, cutoff, removed)
-                components = self._apply_packed_supervision(components, y, n_rows, n_neighbors)
+                components = self._apply_supervision_to_graph(components, y, n_rows, n_neighbors)
+        elif configured_metric:
+            transform_cutoff = cutoff
+            indices, distances, removed = metric.rank(X_checked, n_neighbors, cutoff=cutoff)
+            components = _fit_neighbor_arrays(indices, distances, n_neighbors, graph_options)
+            if y is not None:
+                feature_isolated = np.count_nonzero(np.diff(components[1]) == 0)
+                components = self._apply_supervision_to_graph(
+                    components, y, n_rows, n_neighbors, feature_kind="configured features",
+                )
         elif (angular or ranked_non_angular or cutoff < np.inf) and not (precomputed or sparse) and y is None:
             transform_cutoff = cutoff
             components, removed = _native._fit_dense_graph_with_cutoff(
@@ -1041,7 +1092,8 @@ class UMAP(BaseEstimator, TransformerMixin):
             dense_args = (values, n_rows, n_features, n_neighbors, metric)
             if y is not None:
                 components, feature_isolated = self._fit_supervised_graph(dense_args, y, graph_options)
-            elif embedding_mode and not (spectral or modern) and densmap is None and checkpoint_epochs is None:
+            elif (embedding_mode and not (spectral or modern) and densmap is None and checkpoint_epochs is None
+                  and isinstance(embedding_options["seed"], int)):
                 components, embedding_shape, coordinates = _native._fit_dense_embedding(
                     *dense_args,
                     initial_coordinates=initial_coordinates,
@@ -1110,13 +1162,13 @@ class UMAP(BaseEstimator, TransformerMixin):
             )
             embedding[np.diff(graph.indptr) == 0] = np.nan
         elif spectral:
-            rng = np.random.RandomState(embedding_options.pop("seed"))
+            rng = check_random_state(embedding_options.pop("seed"))
             embedding, history = _fit_spectral_embedding(
                 graph, X_checked, metric, rng, checkpoint_epochs=checkpoint_epochs,
                 densmap=densmap, **embedding_options,
             )
         elif embedding_mode and embedding is None:
-            rng = np.random.RandomState(embedding_options.pop("seed"))
+            rng = check_random_state(embedding_options.pop("seed"))
             embedding, history = _fit_graph_embedding(
                 graph, X_checked, metric, rng, initial_coordinates, spectral=False,
                 checkpoint_epochs=checkpoint_epochs, densmap=densmap, **embedding_options,
@@ -1138,6 +1190,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             n_features, transform_fit, graph, n_neighbors, embedding,
             embedding_options=embedding_options if embedding_mode else None,
             transform_error=transform_error,
+            feature_search_index=feature_search_index,
             transform_cutoff=transform_cutoff,
             supervised=y is not None,
             exact_fit_input=fitted_input,
@@ -1246,6 +1299,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         if self._graph_transform_fit is None:
             raise NotImplementedError("transform with metric='precomputed' is not implemented")
         training, metric = self._graph_transform_fit
+        configured_metric = isinstance(metric, FeatureSearch)
         n_training_rows, n_features = training.shape
         if n_training_rows == 1:
             raise ValueError("Transform unavailable when model was fit with only a single data sample.")
@@ -1289,6 +1343,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         if (boolean_metric or packed_metric) and self.transform_mode == "graph":
             check_random_state(self.transform_seed)
         ranked_columns = None
+        external_index = getattr(self, "_feature_search_index", None)
         if metric == "precomputed":
             warnings.warn(_PRECOMPUTED_TRANSFORM_WARNING, UserWarning, stacklevel=2)
             if n_query_features != n_training_rows:
@@ -1302,12 +1357,29 @@ class UMAP(BaseEstimator, TransformerMixin):
             if queries.min() < 0.0:
                 raise AssertionError
             ranked_columns = order.ravel().tolist()
+        elif external_index is not None:
+            if n_query_features != n_features:
+                raise ValueError(f"expected {n_features} query features, got {n_query_features}")
+            order, distances = external_index.query(queries, k=self.n_neighbors_)
+            order = np.asarray(order)
+            distances = np.asarray(distances, dtype=np.float32)
+            if (order.shape != (n_query_rows, self.n_neighbors_) or distances.shape != order.shape
+                    or order.dtype.kind not in "iu"
+                    or np.any((order < -1) | (order >= min(n_training_rows, 2**31)))
+                    or np.isnan(distances).any() or np.any(distances < 0)):
+                raise ValueError("the supplied search index returned invalid neighbor ranks")
+            missing = (order == -1) | np.isposinf(distances)
+            ranked_columns = np.where(missing, -1, order.astype(np.int32, copy=False)).ravel().tolist()
+            queries = np.where(missing, np.float32(np.inf), distances)
         elif packed_metric:
             ranked_columns, distances = _native._rank_packed_queries(
                 (training.tobytes(), training.shape), (queries.tobytes(), queries.shape),
                 self.n_neighbors_, metric, _rank_tied_dense_distances,
             )
             queries = np.asarray(distances, dtype=np.float32).reshape(n_query_rows, self.n_neighbors_)
+        elif configured_metric:
+            order, queries, _ = metric.rank(training, self.n_neighbors_, queries=queries)
+            ranked_columns = order.ravel().tolist()
         elif sparse_features:
             if n_query_features > n_features or (boolean_metric and n_query_features != n_features):
                 raise ValueError(
@@ -1351,7 +1423,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             n_query_rows,
             n_features,
             self.n_neighbors_,
-            metric,
+            "euclidean" if configured_metric else metric,
             local_connectivity=self.local_connectivity,
             disconnection_distance=getattr(self, "_transform_cutoff", None),
             ranked_columns=ranked_columns,
@@ -1398,7 +1470,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             training.shape[1],
             fitted.ravel().tolist(),
             k=self.n_neighbors_,
-            metric=metric,
+            metric="euclidean" if isinstance(metric, FeatureSearch) else metric,
             n_components=n_components,
             fit_epochs=fit_epochs,
             repulsion_strength=repulsion,
@@ -1426,7 +1498,9 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise ValueError("Updating supervised models is not currently supported")
         training, metric = self._graph_transform_fit
         sparse = issparse(training)
-        if (sparse and metric not in _SPARSE_LAYOUT_METRICS) or self._supplied_transform_error is not None:
+        if ((sparse and metric not in _SPARSE_LAYOUT_METRICS)
+                or self._supplied_transform_error is not None
+                or getattr(self, "_feature_search_index", None) is not None):
             raise NotImplementedError("update requires dense features with computed neighbors")
         if sparse:
             return self._update_sparse_features(X, training, metric, ensure_all_finite)
@@ -1447,6 +1521,24 @@ class UMAP(BaseEstimator, TransformerMixin):
             X, dtype=np.float32, order="C", ensure_all_finite=ensure_all_finite
         )
         combined = np.concatenate((training, batch), axis=0)
+        if isinstance(metric, FeatureSearch):
+            n_existing, k = training.shape[0], self.n_neighbors_
+            indices, distances, _ = metric.rank(combined, k)
+            components = _fit_neighbor_arrays(indices, distances, k, self._graph_options())
+            if self.transform_mode == "graph":
+                return self._store_fit(
+                    combined.shape[1], (combined, metric), _csr_graph(components), k, None,
+                    transform_cutoff=self._transform_cutoff,
+                    fit_inverse_rows=getattr(self, "_fit_inverse_rows", None),
+                )
+            appended_ranks = indices[n_existing:]
+            # The layout initializer ignores ranks into appended rows.
+            appended_rows = np.arange(n_existing, len(combined))[:, None]
+            appended_ranks = np.where(appended_ranks < 0, appended_rows, appended_ranks)
+            return self._update_ranked_features(
+                combined, metric, n_existing, components, appended_ranks.ravel().tolist(),
+                self._embedding_transform_seed(),
+            )
         n_rows, n_features = combined.shape
         data = combined.ravel().tolist()
         graph_options = self._graph_options()
@@ -1590,7 +1682,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         training, metric = transform_fit
         if issparse(training):
             raise ValueError("Inverse transform not available for sparse input.")
-        if metric in _BOOLEAN_METRICS + _PACKED_METRICS:
+        if isinstance(metric, FeatureSearch) or metric in _BOOLEAN_METRICS + _PACKED_METRICS:
             raise ValueError("Inverse transform not available for given metric.")
         if self.transform_mode == "graph":
             raise ValueError("Inverse transform not available for transform_mode = 'graph'")
@@ -1686,9 +1778,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             raise ValueError("precomputed_knn[1] must be ndarray object.")
         if indices.shape != distances.shape:
             raise ValueError("precomputed_knn[0] and precomputed_knn[1] must be numpy arrays of the same size.")
-        # A supplied NNDescent instance already has its public module loaded.
-        search_type = getattr(sys.modules.get("pynndescent"), "NNDescent", ())
-        if not isinstance(search_index, search_type):
+        if not _is_supplied_search_index(search_index):
             warnings.warn(_KNN_SEARCH_WARNING, UserWarning, stacklevel=3)
         width = indices.shape[1]
         if width < n_neighbors:
@@ -1705,7 +1795,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         self, n_features, transform_fit, graph, n_neighbors, embedding, *,
         embedding_options=None, transform_error=None, transform_cutoff=None, supervised=False,
         exact_fit_input=None, inverse_cutoff=None, inverse_distances=None, inverse_unique_fit=None,
-        fit_inverse_rows=None,
+        fit_inverse_rows=None, feature_search_index=None,
     ):
         if graph is not None:
             self.graph_ = graph
@@ -1725,6 +1815,7 @@ class UMAP(BaseEstimator, TransformerMixin):
             if metric == "precomputed" or not issparse(training):
                 self._exact_fit_input = training
         self._supplied_transform_error = transform_error
+        self._feature_search_index = feature_search_index
         self._supervised_fit = supervised
         self._transform_cutoff = transform_cutoff
         self._inverse_local_connectivity = float(self.local_connectivity)
@@ -1784,11 +1875,11 @@ class UMAP(BaseEstimator, TransformerMixin):
             )
 
         seed = self.random_state
-        if seed is None and n_rows == 1:
-            seed = 0  # The singleton layout uses no random draws.
-        if not (modern and isinstance(seed, np.random.RandomState)):
+        if seed is None:
+            seed = 0 if n_rows == 1 else check_random_state(None)
+        if not isinstance(seed, np.random.RandomState):
             if isinstance(seed, bool) or not isinstance(seed, numbers.Integral):
-                raise ValueError("embedding requires random_state to be an integer seed")
+                raise ValueError("random_state must be None, an integer seed, or a NumPy RandomState")
             if not 0 <= seed <= 2**32 - 1:
                 raise ValueError("Seed must be between 0 and 2**32 - 1")
             seed = int(seed)
@@ -1878,16 +1969,22 @@ class UMAP(BaseEstimator, TransformerMixin):
 
     def _validate_metric(self, *, sparse):
         if callable(self.metric):
-            raise NotImplementedError(
-                "callable metrics are not implemented by the dense graph path"
-            )
+            if sparse:
+                raise NotImplementedError("callable feature distances require dense input")
+            return FeatureSearch(self.metric, self.metric_kwds)
         if not isinstance(self.metric, str):
             raise ValueError("metric is neither callable nor a recognised string")
+        name = self.metric.lower()
+        if name in _CONFIGURABLE_METRICS:
+            if sparse:
+                raise NotImplementedError("configured feature distances require dense input")
+            return FeatureSearch(name, self.metric_kwds)
+        if self.metric_kwds:
+            raise TypeError(f"metric {self.metric!r} does not accept metric_kwds")
         if self.metric == "precomputed":
             return self.metric
         if self.metric in _PACKED_METRICS:
             return self.metric
-        name = self.metric.lower()
         if name == "cosine" or (name == "correlation" and not sparse):
             return name
         if name in _BOOLEAN_METRICS:
@@ -1921,21 +2018,21 @@ class UMAP(BaseEstimator, TransformerMixin):
         target = self._continuous_target(y, n_neighbors, _METRIC_ALIASES[metric])
         return _native._fit_dense_continuous_graph(*dense_args, target, graph_options=graph_options)
 
-    def _apply_packed_supervision(self, graph, y, n_rows, n_neighbors):
+    def _apply_supervision_to_graph(self, graph, y, n_rows, n_neighbors, *, feature_kind="packed features"):
         if len(y) != n_rows:
             raise ValueError(f"Length of x = {n_rows}, length of y = {len(y)}, while it must be equal.")
         metric = self.target_metric
         if metric == "categorical":
             return _native._apply_categorical_target(graph, self._categorical_labels(y), self.target_weight)
         if callable(metric):
-            raise NotImplementedError("Callable target metrics are unavailable with packed features.")
+            raise NotImplementedError(f"Callable target metrics are unavailable with {feature_kind}.")
         native_metric = _METRIC_ALIASES.get(metric, metric)
         if native_metric not in (
             "euclidean", "manhattan", "chebyshev", "hamming", "jaccard",
             "cosine", "correlation", "precomputed",
         ):
             if metric in _BOOLEAN_METRICS or metric in _METRIC_ALIASES:
-                raise NotImplementedError(f"target_metric={metric!r} is unavailable with packed features")
+                raise NotImplementedError(f"target_metric={metric!r} is unavailable with {feature_kind}")
             raise KeyError(metric)
 
         labels = check_array(y, dtype="numeric", ensure_2d=False)
@@ -1947,8 +2044,7 @@ class UMAP(BaseEstimator, TransformerMixin):
         if k > n_rows:
             raise ValueError("target_n_neighbors exceeds the number of fitted rows")
         indices, distances = [], []
-        # Target distances retain the label dtype until after ranking. Packed
-        # feature bytes have already been consumed by the native feature fit.
+        # Target distances retain the label dtype until after ranking.
         for block in pairwise_distances_chunked(labels, metric=native_metric):
             order = np.argsort(block, axis=1, kind="stable")[:, :k]
             indices.extend(order.ravel().tolist())

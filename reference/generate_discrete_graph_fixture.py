@@ -111,7 +111,11 @@ def generate():
               metric_kws={"normalisation": 2.5, "max_distance": 2})
     for kind in (np.float32, np.float64):
         y = np.array([[0, 0], [3.2, 1.9], [2, .5], [-1.33, .25], [1.9, -1.33]], dtype=kind)
-        for metric in ("euclidean", "l1", "linfinity", "hamming"):
+        for metric in (
+            "euclidean", "l1", "linfinity", "hamming", "canberra", "cosine", "correlation", "braycurtis",
+            "jaccard", "dice", "matching", "kulsinski", "rogerstanimoto", "russellrao", "sokalsneath",
+            "sokalmichener", "yule",
+        ):
             graph(f"vector-{metric}-{kind.__name__}", source("csr_array", np.float64), y, metric=metric, metric_scale=.225)
     graph("unknown-metric", source(), labels, metric="unknown")
     graph("empty-graph", sparse.coo_matrix((5, 5), dtype=np.float32), labels)

@@ -62,8 +62,9 @@ vertex count, the pair probes at shifts 0, 0.1, 1 and 4 support
 
 ```text
 v = sum((r_i - m)^2) / n + dens_var_shift
+s = sqrt(v)
 c = sum(r_i * R_i) / (n - 1)
-w_i = R_i - c * (r_i - m) / v
+w_i = R_i - c * (r_i - m) / (s * s)
 ```
 
 The shift changes the variance term and the standard deviation
@@ -85,7 +86,7 @@ h(q) = a b q^(b-1) / (1 + a q^b)
 dr_i/dq = (p(q) / S_i) * ((1 - b * (1 - p(q))) / exp(r_i) + h(q))
 Z = sum of positive directed graph memberships
 density scale = 2 * lambda * Z * (w_i * dr_i/dq + w_j * dr_j/dq)
-                / (membership_ij * n * sqrt(v))
+                / ((membership_ij * s) * n)
 ```
 
 The scale multiplies `y_i - y_j` and that direction is reversed at the
@@ -95,17 +96,24 @@ component are clipped independently to `[-4, 4]` before addition and
 learning-rate scaling. The large-`lambda` pair fixture exposes the
 separate clipping. [Narayan, Berger & Cho, Methods](https://pmc.ncbi.nlm.nih.gov/articles/PMC8195812/)
 
-The embedding sweep stores both sums in float32. For the affinity sum,
-add the wide affinity to the stored value and round once. For the distance
-sum, round the weighted product before adding it. Divide the two sums in
-float32, widen the quotient for the offset and logarithm, then round the log
-radius to float32. The mean and population variance use float32 pairwise
-reductions. The variance shift and square root also round to float32.
-The covariance sums wide products of the float32 embedding log radii
-before mean subtraction and the standardized input radii. The
-per-vertex weights still use the centered embedding radii. The sum
-of positive memberships is half the float32 sum of the incident
-weights from the original radius pass.
+The embedding sweep adds each float64 affinity or weighted distance to
+the corresponding stored sum and rounds the update once to float32.
+Divide the two sums in float32, widen the quotient for the offset and
+logarithm, then round the log radius to float32. The mean and population
+variance use float32 pairwise reductions. The variance shift and square
+root also round to float32.
+
+The covariance uses NumPy's float32 dot of the uncentered embedding radii
+and the standardized input radii, then divides in float32. On the pinned
+x86-64 wheels the dot accumulates complete blocks of 32 in float32 FMA
+lanes, reduces those lanes in float32, and adds the remaining float32
+products in float64 before rounding. The per-vertex correlation correction,
+the square of the shifted standard deviation, and the product of the edge
+membership and shifted standard deviation are float32. The scale uses that
+rounded product. The sum of positive memberships is half the float32 sum
+of the incident weights from the original radius pass.
+[OpenBLAS dot](https://github.com/OpenMathLib/OpenBLAS/blob/develop/kernel/x86_64/sdot.c#L86-L122),
+[Haswell block reduction](https://github.com/OpenMathLib/OpenBLAS/blob/develop/kernel/x86_64/sdot_microk_haswell-2.c#L37-L73)
 
 The first-active probes include nine disjoint reciprocal pairs with distinct
 radii and three variance shifts. They isolate the log and covariance
@@ -117,7 +125,7 @@ coordinate by several tenths of the measured displacement. The replay
 uses a float32 exponential and adds the clipped forces in float64 before
 scaling and rounding the coordinate write.
 
-## Degeneracy and replay limits
+## Exact checkpoint replay and degeneracy
 
 Equal input log radii have zero standard deviation. The wheel returns
 NaN coordinates at the first active update in the equal-input probe and
@@ -131,40 +139,23 @@ available. The native test also supplies exactly coincident endpoints with
 zero variance and verifies that the zero-distance positives do not request
 a gradient.
 
-The current replay matches 2,285 of 2,437 finite coordinate values
-in the Windows capture and 2,283 of 2,437 in the Ubuntu capture.
-This counts each captured epoch key once, including the final key.
-All inactive checkpoints, plain controls and paired first-active
-cases agree bit for bit.
+The replay matches all 2,437 finite coordinate values in each of the
+Windows and Ubuntu captures. This counts each recorded epoch key once,
+including the final key. It includes every epoch of the eight-epoch
+3D case with effective negative updates and the weak-edge pruning cases.
+The Python tests compare every recorded coordinate and both output radii
+by float32 bits, including the dense 30-epoch fit with `dens_frac=1`.
 
-| Active probe | Previous max absolute difference | Current max absolute difference | Current max float32 steps |
-| --- | ---: | ---: | ---: |
-| Weighted, density active at key 1 | 9.54e-7 | 9.54e-7 | 2 |
-| Weighted, half or the predecessor of half | 2.38e-7 | 2.38e-7 | 1 |
-| Weighted with effective repulsion | 2.38e-7 | 9.54e-7 | 2 |
-| Weighted with `dens_lambda=0.2` | 3.73e-9 | 3.73e-9 | 1 |
-| Default density fraction | 0 | 5.96e-8 | 1 |
-| Weak edges, retained in the 3-epoch run | 1.19e-7 | 1.86e-9 | 5 |
-| Weak edges, pruned in the 16-epoch run | 3.34e-6 | 9.54e-7 | 10 |
-| Independent 1D run | 7.45e-9 | 7.45e-9 | 1 |
-| Independent 3D first-active run with no effective negatives | 1.91e-6 | 1.19e-7 | 1 |
-| Independent 3D first-active run with shift 1e-12 | 4.77e-7 | 0 | 0 |
-| Independent 3D run with effective negatives | 6.44e-5 | 4.77e-7 | 2 |
-
-The 3D run with effective negatives matches through epoch 2 before density
-activates. At epoch 3, the maximum difference decreased from 4.53e-5 to
-5.96e-8. Over all keys of that run, the exact count increased from 76 to
-147 out of 189. Its plain control matches for all eight epochs.
-
-For the dense Python fit with `dens_frac=1` and 30 epochs, the first
-difference is one coordinate at epoch 2 (one float32 step). The final
-maximum absolute difference increased from `1.91e-6` to `8.11e-6`.
-Adding the wide weighted distance to the stored radius sum before rounding
-reduced the 30-epoch error to `1.43e-6` and increased the 16-epoch weak-edge error to
-`6.06e-5`. Applying the float32 polynomial to the embedding radii caused
-differences in the previously exact zero-shift and tiny-shift pair controls.
-The implementation retains the existing embedding-radius calculation and
-the Python tests record separate bounds for the three affected cases.
+The dot reduction has exact controls at lengths 31, 32, 33, 63, 64,
+and 65. Independent fit probes at the same vertex counts matched all
+15,552 checkpoint coordinates per host and the training CSR graphs across
+dense and precomputed inputs on Windows and Ubuntu WSL. Each probe used
+NumPy `RandomState(735 + count)`,
+drew a `(count, 4)` normal feature array followed by a `(count, 3)` normal
+initial layout, and cast both to float32. Fit settings were five neighbors,
+eight epochs, seed 42, `a=.84`, `b=1.26`, learning rate `.12`, negative sample
+rate `3`, repulsion strength `.8`, and `dens_frac=.625, dens_lambda=1.1,
+dens_var_shift=.12`.
 
 ## Seeded fitting
 
@@ -191,9 +182,8 @@ For dense features, Rust callers can use
 and three density parameters, then returns the standard owning graph and
 embedding handle. The dense pair smoke test matches the public CSR and
 coordinate bits at zero, one, and two epochs. The Python adapter matches
-the precomputed training graph in the existing finite replay cases. Active
-coordinates retain the arithmetic residuals reported above. Inputs with
-undefined density statistics still produce a native arithmetic error.
+the precomputed training graph in the finite replay cases. Inputs with
+undefined density statistics produce a native arithmetic error.
 The Python adapter currently requires internally computed neighbors and an
 infinite distance cutoff. Density-preserving incremental updates remain
 open. A public Windows probe that fitted eight rows at four epochs and
@@ -217,17 +207,20 @@ A mean of one plus the offset rounds to one and yields a zero log radius.
 [NumPy float32 logarithm](https://github.com/numpy/numpy/blob/v2.5.5/numpy/_core/src/umath/loops_exponent_log.dispatch.c.src#L487-L498),
 [Polynomial coefficients](https://github.com/numpy/numpy/blob/v2.5.5/numpy/_core/src/umath/npy_simd_data.h#L104-L118)
 
-To isolate the per-edge gradient, run the public optimizer for two
-epochs with only the selected edge's interval set to `1`. Set the other
-intervals to `100` and keep all edges in the density sweep. At
-`a=.65, b=1.2, dens_lambda=1.3, dens_var_shift=.03` and learning rate
-`.31`, the maximum first-update error for the independent replay was
-`1.34e-5` in the 3D case and `1.49e-8` in the weighted case.
-Passing unit vectors in place of the standardized input radii exposed
-the covariance independently of the endpoint terms. Changing the radius
-at a third vertex followed the raw embedding log radius at that vertex.
-The uncentered cross product reduced the isolated 3D first-update error
-to `9.54e-7`.
+To observe the embedding statistics, wrap NumPy's `var` and `dot`
+during a warmed call to the public optimizer. The arguments to those
+operations expose the embedding log radii. The update with one rounding
+per contribution reproduces all 451 of these radii from 55 sweeps over
+the dense 30-epoch, weighted, weak-edge, and 3D cases.
+
+To isolate force arithmetic, run the public optimizer for two epochs
+with only the selected edge's interval set to `1`. Set the other
+intervals to `100` and keep all edges in the density sweep. Move the source
+row to the origin by translating the layout. Replacing the statistics
+at the NumPy call boundary with fixed float32 values distinguishes
+rounding of the edge denominator from the radius derivative. Controls
+with nine vertices separate the float32 membership-times-standard-deviation
+product from a rounded product involving the vertex count.
 
 ## Reproduction
 

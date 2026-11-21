@@ -166,48 +166,8 @@ fn bits(values: &[f32]) -> Vec<u32> {
     values.iter().map(|value| value.to_bits()).collect()
 }
 
-fn distance(got: u32, want: u32) -> (u32, f32) {
-    let ulp = if got >> 31 == want >> 31 {
-        got.abs_diff(want)
-    } else {
-        (got & 0x7fff_ffff).saturating_add(want & 0x7fff_ffff)
-    };
-    (ulp, (f32::from_bits(got) - f32::from_bits(want)).abs())
-}
-
 fn assert_checkpoint(platform: &str, name: &str, key: usize, actual: &[u32], expected: &[u32]) {
-    // Only the observed active residuals receive a tolerance. Inactive
-    // checkpoints and isolated cases with exact replay require identical bits.
-    let residual = match name {
-        "weighted_active" | "weighted_repel" | "frac_above_half" | "frac_below_one" if key >= 1 => {
-            Some((2, 1e-6))
-        }
-        "frac_below_half" | "frac_exact_half" if key >= 2 => Some((1, 2.4e-7)),
-        "frac_default" if key >= 9 => Some((1, 6e-8)),
-        "weighted_weak_density" if key == 1 => Some((1, 4e-9)),
-        "weak_edges_short" if key >= 1 => Some((5, 1.9e-9)),
-        "weak_edges_long" if key >= 3 => Some((10, 1e-6)),
-        "held_out_1d" if (4..=5).contains(&key) => Some((1, 7.5e-9)),
-        "held_out_3d_first_active" if key >= 1 => Some((1, 1.2e-7)),
-        "held_out_3d" if key >= 3 => Some((2, 4.8e-7)),
-        _ => None,
-    };
-    let Some((max_steps, max_error)) = residual else {
-        assert_eq!(actual, expected, "{platform} {name} epoch {key}");
-        return;
-    };
-    assert_eq!(
-        actual.len(),
-        expected.len(),
-        "{platform} {name} epoch {key}"
-    );
-    for (coordinate, (&got, &want)) in actual.iter().zip(expected).enumerate() {
-        let (steps, error) = distance(got, want);
-        assert!(
-            steps <= max_steps && error <= max_error,
-            "{platform} {name} epoch {key} coordinate {coordinate}: {steps} steps, {error:e}"
-        );
-    }
+    assert_eq!(actual, expected, "{platform} {name} epoch {key}");
 }
 
 #[test]
@@ -226,10 +186,7 @@ fn public_densmap_checkpoints() {
                     RadiusSpace::Original,
                 )
                 .unwrap();
-                assert_eq!(actual.len(), expected.len(), "{platform} {name}");
-                for (got, want) in bits(&actual).into_iter().zip(expected) {
-                    assert!(distance(got, *want).0 <= 2, "{platform} {name}");
-                }
+                assert_eq!(&bits(&actual), expected, "{platform} {name} original radii");
             }
             let mut seen = Vec::new();
             let actual = replay

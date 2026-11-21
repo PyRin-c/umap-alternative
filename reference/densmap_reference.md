@@ -128,10 +128,11 @@ embedding, and graph mode returns the CSR graph. For a single training row,
 the public fit creates a zero embedding and has no radius attributes.
 
 Rust calculates the graph refit, weighted reductions and offset. Python
-applies NumPy's float32 logarithm. On the recorded 128 embedding log inputs,
-this reproduces every reference bit. A float64 logarithm rounded to float32
-matches 110 values. The native scalar Rust radius functions can differ
-by one ULP at the final logarithm.
+applies NumPy's float32 logarithm. The standalone Rust radius functions
+use the same polynomial and match all 64 original and 128 embedding
+radius bits in the recorded cases. The native refit adds two tiny
+memberships at one tied neighborhood in layout 0. Those entries leave
+the final radii bit-identical in this fixture.
 
 The embedding refit uses the requested neighbor count in its fuzzy scale
 target. With eight rows, requests for 8, 9, and 15 use the available

@@ -121,28 +121,17 @@ pub fn radii_from_edge_distances(
     distances: &[f32],
     space: RadiusSpace,
 ) -> Result<Vec<f32>, DensityError> {
-    radii_and_weights_from_edge_distances(graph, distances, space).map(|(radii, _)| radii)
-}
-
-pub(crate) fn radii_and_weights_from_edge_distances(
-    graph: &CsrGraph,
-    distances: &[f32],
-    space: RadiusSpace,
-) -> Result<(Vec<f32>, Vec<f32>), DensityError> {
     if distances.len() != graph.data.len() {
         return Err(DensityError::InvalidDistanceCount {
             expected: graph.data.len(),
             actual: distances.len(),
         });
     }
-    let (values, weights) = reduce_radius_means(graph, space, |_, _, entry| distances[entry])?;
-    Ok((
-        values
-            .into_iter()
-            .map(|mean| (mean + LOG_OFFSET).ln())
-            .collect(),
-        weights,
-    ))
+    let (values, _) = reduce_radius_means(graph, space, |_, _, entry| distances[entry])?;
+    Ok(values
+        .into_iter()
+        .map(|mean| reference_log_radius(mean + LOG_OFFSET))
+        .collect())
 }
 
 /// Compute the input-space diagnostic logarithm arguments using the fitted graph.
@@ -153,7 +142,7 @@ pub fn original_radius_log_inputs(
     original_log_inputs_and_weights(graph, input).map(|(values, _)| values)
 }
 
-pub(crate) fn original_log_inputs_and_weights(
+fn original_log_inputs_and_weights(
     graph: &CsrGraph,
     input: OriginalRadiusInput<'_>,
 ) -> Result<(Vec<f32>, Vec<f32>), DensityError> {
@@ -170,14 +159,13 @@ pub(crate) fn original_radii_and_weights(
 ) -> Result<(Vec<f32>, Vec<f32>), DensityError> {
     let (values, weights) = original_log_inputs_and_weights(graph, input)?;
     Ok((
-        values.into_iter().map(optimizer_log_radius).collect(),
+        values.into_iter().map(reference_log_radius).collect(),
         weights,
     ))
 }
 
-fn optimizer_log_radius(value: f32) -> f32 {
-    // The reference standardizes NumPy float32 log outputs. Even a one-bit
-    // change to a radius can shift the density gradient after standardization.
+fn reference_log_radius(value: f32) -> f32 {
+    // Match NumPy's float32 logarithm for optimizer input and output_dens.
     // Remez coefficients from NumPy 2.5.5, numpy/_core/src/umath/npy_simd_data.h.
     const P: [u32; 6] = [
         0,
@@ -454,7 +442,7 @@ fn euclidean_radii(
     Ok(
         euclidean_radius_log_inputs(graph, coordinates, n_features, space)?
             .into_iter()
-            .map(f32::ln)
+            .map(reference_log_radius)
             .collect(),
     )
 }
@@ -548,9 +536,9 @@ mod tests {
     }
 
     #[test]
-    fn optimizer_log_radius_matches_observed_float32_rounding() {
+    fn log_radius_matches_observed_float32_rounding() {
         assert_eq!(
-            optimizer_log_radius(f32::from_bits(0x40b7_c6bf)).to_bits(),
+            reference_log_radius(f32::from_bits(0x40b7_c6bf)).to_bits(),
             0x3fdf_bded
         );
     }

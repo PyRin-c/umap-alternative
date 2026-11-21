@@ -15,32 +15,14 @@ LAYOUT = json.loads(
 DENSE = json.loads((FIXTURES / "umap-learn-0.6.0-densmap-windows-x86_64.json").read_bytes())
 FEATURES = np.asarray(DENSE["data_float32"], dtype=np.float32)
 INITIAL = np.asarray(DENSE["init_float32"], dtype=np.float32)
-LAYOUT_RESIDUALS = {
-    "weighted_active": 9.6e-7,
-    "weighted_weak_density": 3.8e-9,
-    "weighted_repel": 9.6e-7,
-    "frac_below_one": 9.6e-7,
-    "frac_below_half": 2.4e-7,
-    "frac_exact_half": 2.4e-7,
-    "frac_above_half": 9.6e-7,
-    "frac_default": 6e-8,
-    "weak_edges_short": 1.9e-9,
-    "weak_edges_long": 9.6e-7,
-    "held_out_3d": 4.8e-7,
-    "held_out_3d_first_active": 1.2e-7,
-    "held_out_1d": 7.5e-9,
-}
 
 
-def assert_values(actual, expected_bits, max_error=0.0):
+def assert_values(actual, expected_bits):
     assert actual.dtype == np.float32
     actual = actual.ravel()
     expected = np.asarray(expected_bits, dtype=np.uint32)
     assert actual.shape == expected.shape
-    if max_error:
-        np.testing.assert_allclose(actual, expected.view(np.float32), atol=max_error, rtol=0)
-    else:
-        np.testing.assert_array_equal(actual.view(np.uint32), expected)
+    np.testing.assert_array_equal(actual.view(np.uint32), expected)
 
 
 def precomputed_case(name, **overrides):
@@ -70,8 +52,7 @@ def test_precomputed_density_and_plain_checkpoints_match_public_graph(name):
     np.testing.assert_array_equal(model.graph_.indptr, expected_graph["indptr"])
     np.testing.assert_array_equal(model.graph_.indices, expected_graph["indices"])
     assert_values(model.graph_.data, expected_graph["weights"])
-    max_error = LAYOUT_RESIDUALS.get(name, 0.0)
-    assert_values(model.embedding_, case["final"], max_error)
+    assert_values(model.embedding_, case["final"])
     if "original_radii" in case:
         assert fitted[0] is model.embedding_
         assert_values(fitted[1], case["original_radii"])
@@ -82,7 +63,7 @@ def test_precomputed_density_and_plain_checkpoints_match_public_graph(name):
             model.embedding_list_, case["checkpoints"].values(), strict=True
         ):
             assert snapshot.shape == model.embedding_.shape
-            assert_values(snapshot, expected, max_error)
+            assert_values(snapshot, expected)
     else:
         assert not hasattr(model, "embedding_list_")
     assert model.transform(distances.copy()) is model.embedding_
@@ -95,15 +76,10 @@ def test_dense_densmap_fit_returns_embedding_and_radii_at_public_epochs(epochs, 
     model = UMAP(**config, init=INITIAL, n_epochs=epochs)
     outputs = model.fit_transform(FEATURES)
     record = DENSE["cases"][f"{epochs}-{mode}"]
-    active = epochs > 1 and mode not in {"dens_lambda_0", "dens_frac_0"}
-    # In this run density is active throughout, so first-update rounding
-    # differences have more epochs to affect later coordinates.
-    embedding_tolerance = 8.2e-6 if (epochs, mode) == (30, "dens_frac_1") else 5.1e-6
-    tolerances = (embedding_tolerance, 0.0, 4.5e-6)
-    for actual, index, tolerance in zip(outputs, record["outputs"], tolerances, strict=True):
+    for actual, index in zip(outputs, record["outputs"], strict=True):
         expected = DENSE["arrays"][index]
         assert actual.shape == tuple(expected["shape"])
-        assert_values(actual, expected["bits_uint32"], tolerance if active else 0.0)
+        assert_values(actual, expected["bits_uint32"])
     assert model.transform(FEATURES.copy()) is model.embedding_
     with pytest.raises(NotImplementedError, match="not supported for densMAP"):
         model.transform(FEATURES[:2])

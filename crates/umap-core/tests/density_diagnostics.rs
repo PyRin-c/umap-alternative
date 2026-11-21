@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 use umap_core::density::{
     DensityError, RadiusSpace, embedding_radii_euclidean, embedding_radii_from_refit_euclidean,
-    original_radii_euclidean, radii_from_edge_distances, refit_embedding_graph_euclidean,
+    euclidean_radius_log_inputs, original_radii_euclidean, radii_from_edge_distances,
+    refit_embedding_graph_euclidean,
 };
 use umap_core::fuzzy_graph::CsrGraph;
 use umap_core::neighbors::KnnError;
@@ -131,23 +132,8 @@ fn scaled_edge_distances(graph: &CsrGraph, data: &[Vec<f32>], scale: f64) -> Vec
     distances
 }
 
-fn assert_radius_bits(actual: &[f32], log_inputs: &[u32], expected: &[u32], label: &str) -> usize {
-    assert_eq!(actual.len(), expected.len());
-    assert_eq!(actual.len(), log_inputs.len());
-    let mut matches = 0;
-    for (index, ((value, &input), &reference)) in
-        actual.iter().zip(log_inputs).zip(expected).enumerate()
-    {
-        let value = value.to_bits();
-        let native_log = f32::from_bits(input).ln().to_bits();
-        assert_eq!(value, native_log, "{label}, row {index}: reduction differs");
-        assert!(
-            value.abs_diff(reference) <= 1,
-            "{label}, row {index}: public log differs by more than one ULP"
-        );
-        matches += usize::from(value == reference);
-    }
-    matches
+fn assert_radius_bits(actual: &[f32], expected: &[u32], label: &str) {
+    assert_eq!(bits(actual), expected, "{label}");
 }
 
 fn positive_edges(graph: &CsrGraph) -> BTreeMap<(usize, usize), f32> {
@@ -170,9 +156,13 @@ fn original_radii_replay_dense_and_precomputed_fits() {
     let input_graph = fixture_graph(&fixture.graphs[dense_case.graph]);
     let input = fixture.data_float32.concat();
     let radii = original_radii_euclidean(&input_graph, &input, 3).unwrap();
-    let mut exact = assert_radius_bits(
-        &radii,
+    assert_radius_bits(
+        &euclidean_radius_log_inputs(&input_graph, &input, 3, RadiusSpace::Original).unwrap(),
         &inputs["dense"],
+        "dense log inputs",
+    );
+    assert_radius_bits(
+        &radii,
         &fixture.arrays[dense_case.outputs[1]].bits_uint32,
         "dense",
     );
@@ -183,14 +173,17 @@ fn original_radii_replay_dense_and_precomputed_fits() {
         let distances =
             scaled_edge_distances(&graph, &fixture.data_float32, scale.parse().unwrap());
         let radii = radii_from_edge_distances(&graph, &distances, RadiusSpace::Original).unwrap();
-        exact += assert_radius_bits(
-            &radii,
+        assert_radius_bits(
+            &umap_core::density::original_radius_log_inputs(
+                &graph,
+                umap_core::density::OriginalRadiusInput::EdgeDistances(&distances),
+            )
+            .unwrap(),
             &inputs[scale],
-            &fixture.arrays[case.outputs[1]].bits_uint32,
             scale,
         );
+        assert_radius_bits(&radii, &fixture.arrays[case.outputs[1]].bits_uint32, scale);
     }
-    eprintln!("original exact: {exact}/64");
 }
 
 #[test]
@@ -210,12 +203,7 @@ fn embedding_radii_replay_verified_refits_and_compare_native_refits() {
     assert_eq!(refits.len(), 16);
     assert_eq!(actual_pairs, expected_pairs);
 
-    let mut exact = 0;
-    let mut native_exact = 0;
-    let mut native_matches_replay = 0;
     let mut native_support_matches = 0;
-    let mut max_native_weight_error = 0.0_f32;
-    let mut max_native_radius_error = 0.0_f32;
     let k = fixture.common_options.n_neighbors;
     for refit in refits {
         let embedding = &fixture.arrays[refit.embedding_id];
@@ -239,12 +227,18 @@ fn embedding_radii_replay_verified_refits_and_compare_native_refits() {
             "layout {}",
             refit.embedding_id
         );
-        exact += assert_radius_bits(
-            &replay,
+        assert_radius_bits(
+            &euclidean_radius_log_inputs(
+                &verified,
+                &coordinates,
+                n_components,
+                RadiusSpace::Embedding,
+            )
+            .unwrap(),
             &refit.log_inputs_bits,
-            expected,
-            &format!("layout {}", refit.embedding_id),
+            &format!("layout {} log inputs", refit.embedding_id),
         );
+        assert_radius_bits(&replay, expected, &format!("layout {}", refit.embedding_id));
 
         let native =
             refit_embedding_graph_euclidean(&coordinates, n_rows, n_components, k).unwrap();
@@ -252,8 +246,12 @@ fn embedding_radii_replay_verified_refits_and_compare_native_refits() {
         let verified_edges = positive_edges(&verified);
         for (edge, verified_weight) in &verified_edges {
             let native_weight = native_edges[edge];
-            max_native_weight_error =
-                max_native_weight_error.max((native_weight - verified_weight).abs());
+            assert_eq!(
+                native_weight.to_bits(),
+                verified_weight.to_bits(),
+                "layout {}, edge {edge:?}",
+                refit.embedding_id
+            );
         }
         native_support_matches += usize::from(native_edges.len() == verified_edges.len());
         for (&edge, &weight) in &native_edges {
@@ -266,21 +264,13 @@ fn embedding_radii_replay_verified_refits_and_compare_native_refits() {
         }
         let native_radii =
             embedding_radii_from_refit_euclidean(&native, &coordinates, n_components).unwrap();
-        for ((&native, &replay), &reference) in native_radii.iter().zip(&replay).zip(expected) {
-            native_exact += usize::from(native.to_bits() == reference);
-            native_matches_replay += usize::from(native.to_bits() == replay.to_bits());
-            max_native_radius_error =
-                max_native_radius_error.max((native - f32::from_bits(reference)).abs());
-        }
+        assert_radius_bits(
+            &native_radii,
+            expected,
+            &format!("native refit {}", refit.embedding_id),
+        );
     }
-    eprintln!(
-        "verified reduction {exact}/128 public bits; native refit: {native_exact}/128 public bits, \
-         {native_matches_replay}/128 verified-reduction bits, \
-         {native_support_matches}/16 supports, max shared-edge weight error {max_native_weight_error}, \
-         max radius error {max_native_radius_error}"
-    );
-    assert!(max_native_weight_error <= 2.0 * f32::EPSILON);
-    assert!(max_native_radius_error <= 5e-7);
+    assert_eq!(native_support_matches, 15);
 }
 
 #[test]
@@ -300,23 +290,45 @@ fn close_pairs_reproduce_the_offset_in_both_spaces() {
     )
     .unwrap();
 
-    assert_eq!(
-        assert_radius_bits(
-            &original,
-            &original_inputs,
-            &fixture.arrays[pairs.case.outputs[1]].bits_uint32,
-            "close original"
-        ),
-        6
+    assert_radius_bits(
+        &euclidean_radius_log_inputs(
+            &graph,
+            &pairs.data_and_init_float32.concat(),
+            2,
+            RadiusSpace::Original,
+        )
+        .unwrap(),
+        &original_inputs,
+        "close original log inputs",
     );
-    assert_eq!(
-        assert_radius_bits(
-            &radii,
-            &embedding_inputs,
-            &fixture.arrays[pairs.case.outputs[2]].bits_uint32,
-            "close embedding"
-        ),
-        6
+    assert_radius_bits(
+        &original,
+        &fixture.arrays[pairs.case.outputs[1]].bits_uint32,
+        "close original",
+    );
+    let coordinates = floats(&embedding.bits_uint32);
+    let refit = refit_embedding_graph_euclidean(
+        &coordinates,
+        embedding.shape[0],
+        embedding.shape[1],
+        pairs.options.n_neighbors,
+    )
+    .unwrap();
+    assert_radius_bits(
+        &euclidean_radius_log_inputs(
+            &refit,
+            &coordinates,
+            embedding.shape[1],
+            RadiusSpace::Embedding,
+        )
+        .unwrap(),
+        &embedding_inputs,
+        "close embedding log inputs",
+    );
+    assert_radius_bits(
+        &radii,
+        &fixture.arrays[pairs.case.outputs[2]].bits_uint32,
+        "close embedding",
     );
 }
 
@@ -325,11 +337,11 @@ fn directed_edges_contribute_to_both_endpoints_without_symmetrizing_distances() 
     let graph = graph(vec![0, 1, 3, 3, 3], vec![1, 0, 2], vec![0.25, 0.75, 0.5]);
     let distances = [2.0, 4.0, 1.0];
     let original = radii_from_edge_distances(&graph, &distances, RadiusSpace::Original).unwrap();
-    assert_eq!(&original[..3], &[13.0_f32.ln(), 9.0_f32.ln(), 0.0]);
+    assert_eq!(bits(&original[..3]), [0x4024_2821, 0x400c_9f54, 0]);
     assert!(original[3].is_nan());
 
     let embedding = radii_from_edge_distances(&graph, &distances, RadiusSpace::Embedding).unwrap();
-    assert_eq!(&embedding[..3], &[3.5_f32.ln(), (4.0_f32 / 1.5).ln(), 0.0]);
+    assert_eq!(bits(&embedding[..3]), [0x3fa0_5a8a, 0x3f7b_17a1, 0]);
     assert!(embedding[3].is_nan());
 }
 
@@ -338,7 +350,7 @@ fn zero_weight_is_undefined_and_zero_distance_uses_the_offset() {
     let graph = graph(vec![0, 1, 1, 2, 2], vec![1, 3], vec![1.0, 0.0]);
     for space in [RadiusSpace::Original, RadiusSpace::Embedding] {
         let radius = radii_from_edge_distances(&graph, &[0.0, 1.0], space).unwrap();
-        assert_eq!(&radius[..2], &[1e-8_f32.ln(); 2]);
+        assert_eq!(bits(&radius[..2]), [0xc193_5d8e; 2]);
         assert!(radius[2..].iter().all(|x| x.is_nan()));
     }
 }
@@ -351,7 +363,7 @@ fn refit_keeps_self_when_coordinates_coincide() {
     assert_eq!(graph.indices, [1, 2, 0, 0]);
     assert_eq!(graph.data, [1.0; 4]);
     let radius = embedding_radii_euclidean(&coordinates, 3, 2, 2).unwrap();
-    assert_eq!(radius, [1e-8_f32.ln(); 3]);
+    assert_eq!(bits(&radius), [0xc193_5d8e; 3]);
 }
 
 #[test]

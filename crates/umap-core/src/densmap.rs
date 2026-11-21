@@ -290,7 +290,8 @@ impl DensityOptimizer {
                 affinity_sums: vec![0.0; n_rows],
                 log_radii: vec![0.0; n_rows],
                 correlation_weights: vec![0.0; n_rows],
-                scale: 0.0,
+                scale_per_vertex: 0.0,
+                standard_deviation: 0.0,
             },
             squared_deviations,
         }
@@ -315,7 +316,8 @@ impl DensityOptimizer {
             affinity_sums,
             log_radii,
             correlation_weights,
-            scale,
+            scale_per_vertex,
+            standard_deviation,
         } = &mut self.epoch;
         affinity_sums.fill(0.0);
         log_radii.fill(0.0);
@@ -328,11 +330,12 @@ impl DensityOptimizer {
                 let tail = graph.indices[entry];
                 let q = DistanceReduction::SeededCompatibility.squared(point(head), point(tail));
                 let affinity = (1.0 + a * f64::from(q).powf(b)).recip();
-                let weighted_distance = (affinity * f64::from(q)) as f32;
+                let weighted_distance = affinity * f64::from(q);
                 for endpoint in [head, tail] {
                     affinity_sums[endpoint] =
                         (f64::from(affinity_sums[endpoint]) + affinity) as f32;
-                    log_radii[endpoint] += weighted_distance;
+                    log_radii[endpoint] =
+                        (f64::from(log_radii[endpoint]) + weighted_distance) as f32;
                 }
             }
         }
@@ -344,26 +347,21 @@ impl DensityOptimizer {
         let radius_mean = mean(log_radii);
         let shifted_var = variance(log_radii, radius_mean, &mut self.squared_deviations)
             + self.options.dens_var_shift as f32;
-        let standard_deviation = f64::from(shifted_var.sqrt());
+        *standard_deviation = shifted_var.sqrt();
+        let correlation_variance = *standard_deviation * *standard_deviation;
         // The input radii are standardized already. The public calculation
         // uses their dot product with the uncentered embedding log radii.
-        let cross_product: f64 = log_radii
-            .iter()
-            .zip(&self.original)
-            .map(|(&radius, &original)| f64::from(radius) * f64::from(original))
-            .sum();
-        let covariance = cross_product / (graph.n_rows as f64 - 1.0);
+        let covariance = radius_dot(log_radii, &self.original) / (graph.n_rows - 1) as f32;
         for ((weight, &radius), &original) in correlation_weights
             .iter_mut()
             .zip(log_radii.iter())
             .zip(&self.original)
         {
-            *weight = f64::from(original)
-                - covariance * (f64::from(radius) - f64::from(radius_mean))
-                    / f64::from(shifted_var);
+            *weight =
+                f64::from(original - covariance * (radius - radius_mean) / correlation_variance);
         }
-        *scale = 2.0 * self.options.dens_lambda * self.membership_sum
-            / (graph.n_rows as f64 * standard_deviation);
+        *scale_per_vertex =
+            2.0 * self.options.dens_lambda * self.membership_sum / graph.n_rows as f64;
         Some(&self.epoch)
     }
 }
@@ -372,7 +370,8 @@ pub(crate) struct DensityEpoch {
     affinity_sums: Vec<f32>,
     log_radii: Vec<f32>,
     correlation_weights: Vec<f64>,
-    scale: f64,
+    scale_per_vertex: f64,
+    standard_deviation: f32,
 }
 
 impl DensityEpoch {
@@ -391,7 +390,8 @@ impl DensityEpoch {
                 * ((1.0 - b * (1.0 - affinity)) / radius + negative_log_affinity_derivative);
             self.correlation_weights[row] * dr_dq
         };
-        let scale = self.scale * (contribution(head) + contribution(tail)) / f64::from(membership);
+        let scale = self.scale_per_vertex * (contribution(head) + contribution(tail))
+            / f64::from(membership * self.standard_deviation);
         if !scale.is_finite() {
             return Err(LayoutError::NonFiniteArithmetic {
                 quantity: "density correlation gradient",
@@ -406,10 +406,62 @@ fn mean(values: &[f32]) -> f32 {
     pairwise_sum(values) / values.len() as f32
 }
 
+fn radius_dot(left: &[f32], right: &[f32]) -> f32 {
+    // Match the float32 dot product used by the pinned NumPy x86-64 build.
+    let (blocks_left, tail_left) = left.as_chunks::<32>();
+    let (blocks_right, tail_right) = right.as_chunks::<32>();
+    let mut lanes = [0.0; 32];
+    for (left, right) in blocks_left.iter().zip(blocks_right) {
+        for lane in 0..32 {
+            lanes[lane] = left[lane].mul_add(right[lane], lanes[lane]);
+        }
+    }
+    let [a, b, c, d] = std::array::from_fn(|i| {
+        ((lanes[i] + lanes[i + 4]) + (lanes[i + 8] + lanes[i + 12]))
+            + ((lanes[i + 16] + lanes[i + 20]) + (lanes[i + 24] + lanes[i + 28]))
+    });
+    let tail: f64 = tail_left
+        .iter()
+        .zip(tail_right)
+        .map(|(&left, &right)| f64::from(left * right))
+        .sum();
+    (tail + f64::from((a + b) + (c + d))) as f32
+}
+
 fn variance(values: &[f32], mean: f32, squared_deviations: &mut [f32]) -> f32 {
     for (&value, squared) in values.iter().zip(squared_deviations.iter_mut()) {
         let centered = value - mean;
         *squared = centered * centered;
     }
     pairwise_sum(squared_deviations) / values.len() as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::radius_dot;
+
+    #[test]
+    fn radius_dot_matches_numpy_at_block_boundaries() {
+        let left: [f32; 65] = std::array::from_fn(|i| {
+            (((i * i * 127 + 13 * i + 558) % 65521) as f32 - 32760.0) / 673.0
+        });
+        let right: [f32; 65] = std::array::from_fn(|i| {
+            (((i * i * 913 + 173 * i + 337) % 65519) as f32 - 32759.0) / 797.0
+        });
+        // np.dot(left[:length], right[:length]) with the pinned NumPy wheel.
+        for (length, expected) in [
+            (31, 0x460b_729c),
+            (32, 0x460a_6e0e),
+            (33, 0x4601_9dff),
+            (63, 0x45cd_b5c3),
+            (64, 0x45cc_96ce),
+            (65, 0x45af_f5b0),
+        ] {
+            assert_eq!(
+                radius_dot(&left[..length], &right[..length]).to_bits(),
+                expected,
+                "length {length}"
+            );
+        }
+    }
 }

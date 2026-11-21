@@ -28,6 +28,7 @@ jobs:
       OMP_NUM_THREADS: '1'
       MKL_NUM_THREADS: '1'
       NUMBA_NUM_THREADS: '1'
+      NPY_DISABLE_CPU_FEATURES: ${{ matrix.os == 'ubuntu-24.04' && 'X86_V4,AVX512_ICL,AVX512_SPR' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -9,6 +9,7 @@ from sklearn.preprocessing import normalize
 from . import _native
 from ._curve import find_ab_params
 from ._umap import UMAP
+from .distances import named_distances
 from .sparse import general_sset_intersection, general_sset_union
 from .utils import fast_knn_indices, submatrix
 
@@ -151,6 +152,83 @@ def reset_local_connectivity(simplicial_set, reset_local_metric=False):
     return result
 
 
+def _edge_coordinates(rows, cols, values, target_size):
+    rows, cols = np.asarray(rows), np.asarray(cols)
+    if not isinstance(values, np.ndarray) or values.ndim != 1 or rows.shape != values.shape or cols.shape != values.shape:
+        raise ValueError("edge coordinate and weight arrays must have equal one-dimensional shapes")
+    indices = []
+    for axis in (rows, cols):
+        if axis.dtype.kind not in "iu":
+            raise TypeError("edge indices must be integers")
+        if np.any(axis >= target_size) or (axis.dtype.kind == "i" and np.any(axis < -target_size)):
+            raise IndexError("edge endpoint is outside the target array")
+        axis = axis.astype(np.intp, copy=False)
+        indices.append(np.where(axis < 0, axis + target_size, axis))
+    return indices
+
+
+def _distance_precision(value):
+    return float(value), np.asarray(value).dtype == np.float32
+
+
+def fast_intersection(rows, cols, values, target, unknown_dist=1.0, far_dist=5.0):
+    """Attenuate COO weights in place by categorical labels with -1 as unknown."""
+    labels = np.asarray(target)
+    if labels.ndim == 2 and labels.shape[1] == 1:
+        labels = labels[:, 0]
+    if labels.ndim != 1:
+        raise ValueError("categorical targets must have one label per row")
+    rows, cols = _edge_coordinates(rows, cols, values, len(labels))
+    _, encoded = np.unique(labels, return_inverse=True)
+    if labels.dtype.kind in "iufb":
+        encoded[labels == -1] = -1
+    if labels.dtype.kind == "f":
+        encoded[np.isnan(labels)] = np.iinfo(np.int64).min
+    with np.errstate(invalid="ignore", over="ignore"):
+        values[:] = _native._attenuate_categorical_edges(
+            (rows.tolist(), cols.tolist()), (values.tolist(), values.dtype == np.float32),
+            encoded.tolist(), _distance_precision(unknown_dist), _distance_precision(far_dist),
+        )
+
+
+def fast_metric_intersection(rows, cols, values, discrete_space, metric, metric_args, scale):
+    """Multiply COO weights by the exponential of the scaled target distances."""
+    rows, cols = _edge_coordinates(rows, cols, values, len(discrete_space))
+    metric_args = tuple(metric_args)
+    scale_dtype = np.asarray(scale).dtype
+    exponents = []
+    with np.errstate(invalid="ignore", over="ignore", under="ignore"):
+        try:
+            for row, column in zip(rows, cols):
+                distance = metric(discrete_space[row], discrete_space[column], *metric_args)
+                single = np.result_type(np.asarray(distance).dtype, scale_dtype) == np.float32
+                exponent = -np.float32(distance) * np.float32(scale) if single else -float(distance) * float(scale)
+                exponents.append((float(exponent), single))
+        finally:
+            if exponents:
+                prefix = values[:len(exponents)]
+                prefix[:] = _native._attenuate_metric_edges((prefix.tolist(), values.dtype == np.float32), exponents)
+
+
+def discrete_metric_simplicial_set_intersection(
+    simplicial_set, discrete_space, unknown_dist=1.0, far_dist=5.0,
+    metric=None, metric_kws={}, metric_scale=1.0,
+):
+    """Attenuate memberships using discrete targets, then reset local connectivity."""
+    graph = simplicial_set.tocoo()
+    if metric is None:
+        fast_intersection(graph.row, graph.col, graph.data, discrete_space, unknown_dist, far_dist)
+    else:
+        if metric not in named_distances:
+            raise ValueError("unknown named target distance")
+        fast_metric_intersection(
+            graph.row, graph.col, graph.data, discrete_space,
+            named_distances[metric], tuple(metric_kws.values()), metric_scale,
+        )
+    graph.eliminate_zeros()
+    return reset_local_connectivity(graph)
+
+
 def init_transform(indices, weights, embedding):
     """Sum fitted coordinates using the supplied weights in rank order."""
     indices, weights, embedding = map(np.asarray, (indices, weights, embedding))
@@ -222,7 +300,8 @@ def init_graph_transform(graph, embedding):
 
 
 __all__ = [
-    "UMAP", "compute_membership_strengths", "find_ab_params", "fuzzy_simplicial_set",
+    "UMAP", "compute_membership_strengths", "discrete_metric_simplicial_set_intersection",
+    "fast_intersection", "fast_metric_intersection", "find_ab_params", "fuzzy_simplicial_set",
     "general_simplicial_set_intersection", "general_simplicial_set_union", "init_graph_transform",
     "init_transform", "make_epochs_per_sample", "nearest_neighbors", "reset_local_connectivity",
     "smooth_knn_dist",

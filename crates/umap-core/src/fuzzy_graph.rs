@@ -8,10 +8,13 @@ use std::fmt;
 
 use crate::neighbors::Neighbor;
 
+mod attenuation;
 mod composition;
 mod primitives;
 pub(crate) mod supplied_neighbors;
 
+use attenuation::CategoricalAttenuation;
+pub use attenuation::{attenuate_categorical_edges, attenuate_metric_edges};
 pub use composition::{
     FuzzySetOperation, MembershipOperation, MembershipRows, combine_fuzzy_graphs,
     combine_memberships, reset_membership_scales,
@@ -446,13 +449,8 @@ pub(crate) fn categorical_intersection(
     labels: &[i64],
     target_weight: f64,
 ) -> CsrGraph {
-    const UNLABELED: i64 = -1;
-    let unlabeled_factor = (-1.0_f64).exp();
-    let cross_factor = if target_weight == 1.0 {
-        0.0
-    } else {
-        (-2.5 / (1.0 - target_weight)).exp()
-    };
+    let attenuation =
+        CategoricalAttenuation::new((1.0, false), (2.5 / (1.0 - target_weight), false));
 
     let mut row_maxima = vec![0.0_f32; graph.n_rows];
     for (row, row_max) in row_maxima.iter_mut().enumerate() {
@@ -460,12 +458,12 @@ pub(crate) fn categorical_intersection(
         for entry in graph.indptr[row]..graph.indptr[row + 1] {
             let column_label = labels[graph.indices[entry]];
             let weight = &mut graph.data[entry];
-            // Round the product once, after computing the attenuation in f64.
-            if row_label == UNLABELED || column_label == UNLABELED {
-                *weight = (f64::from(*weight) * unlabeled_factor) as f32;
-            } else if row_label != column_label {
-                *weight = (f64::from(*weight) * cross_factor) as f32;
-            }
+            *weight = attenuation.apply(
+                row_label == -1 || column_label == -1,
+                row_label != column_label,
+                f64::from(*weight),
+                true,
+            ) as f32;
             *row_max = row_max.max(*weight);
         }
     }

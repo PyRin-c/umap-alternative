@@ -11,6 +11,7 @@ use umap_core::density::{
     original_radius_log_inputs,
 };
 use umap_core::densmap::{DensmapOptions, fit_graph_with_checkpoints};
+use umap_core::discrete::{count_distance, levenshtein, myers};
 use umap_core::embedding::{
     DenseEmbedding, DenseEmbeddingConfig, DenseEmbeddingInit, EmbeddingLayoutConfig,
     fit_dense_embedding_seeded_with_graph_options, fit_graph_embedding_with_rng,
@@ -23,8 +24,8 @@ use umap_core::fit::{
 };
 use umap_core::fuzzy_graph::{
     CsrGraph, FuzzySetOperation, GraphOptions, KnnDistances, MembershipOperation, MembershipRows,
-    SmoothKnnConfig, combine_fuzzy_graphs, combine_memberships, compute_knn_memberships,
-    reset_membership_scales, smooth_knn_distances,
+    SmoothKnnConfig, attenuate_categorical_edges, attenuate_metric_edges, combine_fuzzy_graphs,
+    combine_memberships, compute_knn_memberships, reset_membership_scales, smooth_knn_distances,
 };
 use umap_core::inverse::{
     DenseInverseError, DenseInverseInput, DenseInverseLayout, InverseTriangulation,
@@ -471,6 +472,95 @@ fn _reset_membership_scales(
     py.detach(|| reset_membership_scales(&indptr, &mut values))
         .map_err(PyValueError::new_err)?;
     Ok(values)
+}
+
+#[pyfunction]
+fn _attenuate_categorical_edges(
+    py: Python<'_>,
+    coordinates: (Vec<usize>, Vec<usize>),
+    weights: FloatBuffer,
+    labels: Vec<i64>,
+    unknown: (f64, bool),
+    far: (f64, bool),
+) -> PyResult<Vec<f64>> {
+    let (rows, columns) = coordinates;
+    let (mut values, single) = weights;
+    py.detach(|| {
+        attenuate_categorical_edges(
+            (&rows, &columns),
+            &mut values,
+            &labels,
+            unknown,
+            far,
+            single,
+        )
+    })
+    .map_err(PyValueError::new_err)?;
+    Ok(values)
+}
+
+#[pyfunction]
+fn _attenuate_metric_edges(
+    py: Python<'_>,
+    weights: FloatBuffer,
+    exponents: Vec<(f64, bool)>,
+) -> PyResult<Vec<f64>> {
+    let (mut values, single) = weights;
+    py.detach(|| attenuate_metric_edges(&mut values, &exponents, single))
+        .map_err(PyValueError::new_err)?;
+    Ok(values)
+}
+
+#[pyfunction]
+fn _discrete_count_distance(py: Python<'_>, x: i64, y: i64, poisson_lambda: (f64, bool)) -> f64 {
+    py.detach(|| count_distance(x, y, poisson_lambda))
+}
+
+#[pyfunction]
+fn _discrete_edit_distance(py: Python<'_>, x: Vec<u32>, y: Vec<u32>, bound: f64, cap: bool) -> f64 {
+    py.detach(|| {
+        if cap {
+            myers(&x, &y, bound)
+        } else {
+            levenshtein(&x, &y, bound)
+        }
+    })
+}
+
+#[pyfunction]
+fn _discrete_magnitude_distance(
+    x: &Bound<'_, PyAny>,
+    y: &Bound<'_, PyAny>,
+    name: &str,
+    dtype: &str,
+) -> PyResult<f64> {
+    let metric = match name {
+        "euclidean" => TrustworthinessMetric::Euclidean,
+        "manhattan" => TrustworthinessMetric::Manhattan,
+        "chebyshev" => TrustworthinessMetric::Chebyshev,
+        _ => return Err(PyValueError::new_err("unknown magnitude distance")),
+    };
+    macro_rules! evaluate {
+        ($type:ty, $distance:ident) => {{
+            let x: Vec<$type> = x.extract()?;
+            let y: Vec<$type> = y.extract()?;
+            if x.len() != y.len() {
+                return Err(PyValueError::new_err(
+                    "distance vectors must have the same length",
+                ));
+            }
+            Ok(metric.$distance(&x, &y))
+        }};
+    }
+    match dtype {
+        "f32" => evaluate!(f32, distance_f32),
+        "f64" => evaluate!(f64, distance_f64),
+        "i64" => evaluate!(i64, distance_i64),
+        "u64" => evaluate!(u64, distance_u64),
+        _ => Err(PyValueError::new_err(
+            "unsupported magnitude distance dtype",
+        )),
+    }
 }
 
 #[pyfunction]
@@ -1871,6 +1961,11 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_combine_fuzzy_graphs, module)?)?;
     module.add_function(wrap_pyfunction!(_combine_memberships, module)?)?;
     module.add_function(wrap_pyfunction!(_reset_membership_scales, module)?)?;
+    module.add_function(wrap_pyfunction!(_attenuate_categorical_edges, module)?)?;
+    module.add_function(wrap_pyfunction!(_attenuate_metric_edges, module)?)?;
+    module.add_function(wrap_pyfunction!(_discrete_count_distance, module)?)?;
+    module.add_function(wrap_pyfunction!(_discrete_edit_distance, module)?)?;
+    module.add_function(wrap_pyfunction!(_discrete_magnitude_distance, module)?)?;
     module.add_function(wrap_pyfunction!(_optimize_aligned_layout, module)?)?;
     module.add_function(wrap_pyfunction!(_prepare_parametric_edges, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_graph, module)?)?;

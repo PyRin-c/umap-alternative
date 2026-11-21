@@ -4,6 +4,7 @@ pub mod aligned;
 pub mod approximate_neighbors;
 pub mod density;
 pub mod densmap;
+pub mod discrete;
 pub mod embedding;
 pub mod fit;
 pub mod fuzzy_graph;

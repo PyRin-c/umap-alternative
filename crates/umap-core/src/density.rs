@@ -37,6 +37,8 @@ pub enum OriginalRadiusInput<'a> {
     },
     /// Square row-major array of unsquared, possibly asymmetric distances.
     Precomputed(&'a [f32]),
+    /// Unsquared distances in the training graph's CSR storage order.
+    EdgeDistances(&'a [f32]),
 }
 
 /// Input or graph refit failures in the density diagnostics.
@@ -111,7 +113,7 @@ impl std::error::Error for DensityError {
 /// Distances may be asymmetric and must be finite and non-negative, including
 /// those at explicitly stored zero weights. The numerator update is evaluated
 /// in `f64` and rounded to `f32` after each contribution. The weight sums and
-/// `ln(numerator / weight_sum + 1e-8)` are computed in `f32`. A row with no
+/// diagnostic logarithm use `f32`. A row with no
 /// positive incident weight has an undefined radius (`NaN`). An overflowing
 /// numerator produces an infinite radius.
 pub fn radii_from_edge_distances(
@@ -133,8 +135,14 @@ pub(crate) fn radii_and_weights_from_edge_distances(
             actual: distances.len(),
         });
     }
-    let (values, weights) = reduce_radius_log_inputs(graph, space, |_, _, entry| distances[entry])?;
-    Ok((values.into_iter().map(f32::ln).collect(), weights))
+    let (values, weights) = reduce_radius_means(graph, space, |_, _, entry| distances[entry])?;
+    Ok((
+        values
+            .into_iter()
+            .map(|mean| (mean + LOG_OFFSET).ln())
+            .collect(),
+        weights,
+    ))
 }
 
 /// Compute the input-space diagnostic logarithm arguments using the fitted graph.
@@ -149,6 +157,31 @@ pub(crate) fn original_log_inputs_and_weights(
     graph: &CsrGraph,
     input: OriginalRadiusInput<'_>,
 ) -> Result<(Vec<f32>, Vec<f32>), DensityError> {
+    let (values, weights) = original_means_and_weights(graph, input)?;
+    Ok((
+        values.into_iter().map(|mean| mean + LOG_OFFSET).collect(),
+        weights,
+    ))
+}
+
+pub(crate) fn original_radii_and_weights(
+    graph: &CsrGraph,
+    input: OriginalRadiusInput<'_>,
+) -> Result<(Vec<f32>, Vec<f32>), DensityError> {
+    let (values, weights) = original_means_and_weights(graph, input)?;
+    Ok((
+        values
+            .into_iter()
+            .map(|mean| (f64::from(mean) + 1e-8).ln() as f32)
+            .collect(),
+        weights,
+    ))
+}
+
+fn original_means_and_weights(
+    graph: &CsrGraph,
+    input: OriginalRadiusInput<'_>,
+) -> Result<(Vec<f32>, Vec<f32>), DensityError> {
     let space = RadiusSpace::Original;
     match input {
         OriginalRadiusInput::Dense {
@@ -157,7 +190,7 @@ pub(crate) fn original_log_inputs_and_weights(
             metric,
         } => {
             validate_coordinates(values, graph.n_rows, n_features, space)?;
-            reduce_radius_log_inputs(graph, space, |row, column, _| {
+            reduce_radius_means(graph, space, |row, column, _| {
                 metric.distance(
                     coordinate_row(values, n_features, row),
                     coordinate_row(values, n_features, column),
@@ -166,9 +199,18 @@ pub(crate) fn original_log_inputs_and_weights(
         }
         OriginalRadiusInput::Precomputed(distances) => {
             validate_coordinates(distances, graph.n_rows, graph.n_rows, space)?;
-            reduce_radius_log_inputs(graph, space, |row, column, _| {
+            reduce_radius_means(graph, space, |row, column, _| {
                 distances[row * graph.n_rows + column]
             })
+        }
+        OriginalRadiusInput::EdgeDistances(distances) => {
+            if distances.len() != graph.data.len() {
+                return Err(DensityError::InvalidDistanceCount {
+                    expected: graph.data.len(),
+                    actual: distances.len(),
+                });
+            }
+            reduce_radius_means(graph, space, |_, _, entry| distances[entry])
         }
     }
 }
@@ -303,7 +345,7 @@ fn refit_embedding_graph(
     .map_err(DensityError::Refit)
 }
 
-fn reduce_radius_log_inputs(
+fn reduce_radius_means(
     graph: &CsrGraph,
     space: RadiusSpace,
     distance: impl Fn(usize, usize, usize) -> f32,
@@ -359,7 +401,7 @@ fn reduce_radius_log_inputs(
     }
 
     for (numerator, &weight) in numerators.iter_mut().zip(&weights) {
-        *numerator = *numerator / weight + LOG_OFFSET;
+        *numerator /= weight;
     }
     Ok((numerators, weights))
 }
@@ -391,7 +433,7 @@ pub fn euclidean_radius_log_inputs(
     space: RadiusSpace,
 ) -> Result<Vec<f32>, DensityError> {
     validate_coordinates(coordinates, graph.n_rows, n_features, space)?;
-    reduce_radius_log_inputs(graph, space, |row, column, _| {
+    reduce_radius_means(graph, space, |row, column, _| {
         let left = coordinate_row(coordinates, n_features, row);
         let right = coordinate_row(coordinates, n_features, column);
         match space {
@@ -399,7 +441,7 @@ pub fn euclidean_radius_log_inputs(
             RadiusSpace::Embedding => fused_euclidean_distance(left, right),
         }
     })
-    .map(|(values, _)| values)
+    .map(|(values, _)| values.into_iter().map(|mean| mean + LOG_OFFSET).collect())
 }
 
 fn validate_coordinates(
@@ -437,4 +479,25 @@ fn fused_euclidean_distance(left: &[f32], right: &[f32]) -> f32 {
         delta.mul_add(delta, sum)
     });
     squared.sqrt()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn original_optimizer_radii_keep_offset_at_one() {
+        let graph = CsrGraph {
+            n_rows: 2,
+            n_cols: 2,
+            indptr: vec![0, 1, 2],
+            indices: vec![1, 0],
+            data: vec![0.5, 0.5],
+        };
+        let (radii, weights) =
+            original_radii_and_weights(&graph, OriginalRadiusInput::EdgeDistances(&[1.0; 2]))
+                .unwrap();
+        assert_eq!(weights, [1.0; 2]);
+        assert_eq!(radii, [1e-8_f32; 2]);
+    }
 }

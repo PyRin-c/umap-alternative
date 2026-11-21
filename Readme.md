@@ -89,6 +89,8 @@ Euclidean、Manhattan、Chebyshev、cosine の互換レイアウトでは、CSR�
 
 距離の追加、`metric_kwds`、外部検索インデックス、近似探索など、実装を先行した項目と後から行う検証は [実装と検証の進捗](reference/implementation_status.md) にまとめています。
 
+ParametricUMAP の複数行モデルは `save` で保存し、`load_ParametricUMAP` で復元できます。`exclude_raw_data=True` を指定しても、保存したエンコーダーとデコーダーによる推論を利用できます。[ParametricUMAP の比較記録](reference/parametric_reference.md)
+
 既存の埋め込みから新しい行の初期座標を求めるには、順位と重みを受け取る `init_transform` と、疎グラフを受け取る `init_graph_transform` を利用できます。[初期化の比較記録](reference/public_transform_init_reference.md)
 
 `umap_alternative.validation.trustworthiness_vector` で、元データの近傍が埋め込みに保たれているかを、近傍数ごとのスコアで確認できます。近傍を計算済みの場合は `trustworthiness_vector_bulk` や `make_trustworthiness_calculator` を利用できます。[信頼度スコアの比較記録](reference/trustworthiness_reference.md)

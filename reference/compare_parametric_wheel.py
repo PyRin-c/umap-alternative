@@ -1,6 +1,7 @@
 """Verify the installed wheel against public Windows CPU ParametricUMAP probes."""
 
 import json
+from math import prod
 from pathlib import Path
 import runpy
 import sys
@@ -47,6 +48,19 @@ def check_stages():
                 inference_checks += 1
         for case, observed_save in observed["persistence"].items():
             reference_save = reference["persistence"][case]
+            if reference_save["save"]["status"] == "error":
+                assert observed_save["save"]["status"] == "ok", (name, case)
+                assert set(observed_save["files"]) == set(reference_save["files"]) | {"model.pkl"}, (name, case)
+                loaded = observed_save["load"]
+                assert loaded["status"] == "ok", (name, case)
+                for prediction in loaded["result"].values():
+                    assert prediction["status"] == "ok"
+                    result = prediction["result"]
+                    assert result["exact_bits"] == prod(result["shape"])
+                for artifact in ("keras_encoder", "keras_decoder"):
+                    if artifact in reference_save:
+                        assert values_only(observed_save[artifact]) == values_only(reference_save[artifact])
+                continue
             assert observed_save["files"] == reference_save["files"], (name, case)
             for artifact in observed_save.keys() - {"files"}:
                 assert values_only(observed_save[artifact]) == values_only(reference_save[artifact]), (name, case)
@@ -127,7 +141,13 @@ def report_full_training():
     actual = INFERENCE["capture"](use_wheel=True)
     for name, outputs in actual["cases"].items():
         for field, observed in outputs.items():
+            if field == "reload" and field not in expected["cases"][name]:
+                assert values_only(observed) == values_only(outputs["held_out"]), name
+                continue
             reference = expected["cases"][name][field]
+            if field == "save" and reference["status"] == "error":
+                assert observed["status"] == "ok", name
+                continue
             assert observed["status"] == reference["status"], (name, field)
             if observed["status"] == "error":
                 assert observed["type"] == reference["type"], (name, field)

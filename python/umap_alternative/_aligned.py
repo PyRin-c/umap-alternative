@@ -165,7 +165,7 @@ class AlignedUMAP(BaseEstimator):
             warnings.warn(_COMPATIBILITY_WARNING, FutureWarning, stacklevel=3)
         if (
             self.target_metric_kwds or self.unique or self.angular_rp_forest
-            or self.nearest_neighbor_backend != "auto" or self.target_n_neighbors != -1
+            or self.nearest_neighbor_backend != "auto"
             or self.metric == "precomputed"
         ):
             raise NotImplementedError("graph options outside the dense compatibility path")
@@ -197,6 +197,7 @@ class AlignedUMAP(BaseEstimator):
             metric_kwds=self.metric_kwds, force_approximation_algorithm=self.force_approximation_algorithm,
             random_state=self.random_state, a=self.a, b=self.b,
             compatibility_layout=self.compatibility_layout, target_metric=self.target_metric,
+            target_n_neighbors=_parameter_at(self.target_n_neighbors, index),
             target_weight=self.target_weight, transform_mode="graph", transform_seed=self.transform_seed,
         )
         if self.random_state is not None:

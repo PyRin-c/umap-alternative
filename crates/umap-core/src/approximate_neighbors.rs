@@ -8,6 +8,7 @@ use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fmt;
+use std::num::NonZeroUsize;
 
 use crate::neighbors::{DistanceMetric, KnnError, Neighbor};
 use crate::rng::{Mt19937, draw_negative_seed, sample_absolute_vertex};
@@ -274,9 +275,27 @@ fn seed_forest(
         )
     });
     let tree = trees.next().expect("positive tree count");
-    tree.seed(data, metric, &mut ranks, k)?;
-    for other in trees {
-        other.seed(data, metric, &mut ranks, k)?;
+    if metric == DistanceMetric::Euclidean && n_rows > leaf_size {
+        let scalar = draw_projection_scalar(&mut Mt19937::new(seed));
+        let leaf_size = NonZeroUsize::new(leaf_size).expect("positive leaf size");
+        for ordinal in 0..tree_count.min(64) {
+            for leaf in training_projection_leaves(
+                data.data,
+                n_rows,
+                data.n_features,
+                scalar,
+                ordinal,
+                leaf_size,
+                64,
+            )? {
+                Tree::Leaf(leaf).seed(data, metric, &mut ranks, k)?;
+            }
+        }
+    } else {
+        tree.seed(data, metric, &mut ranks, k)?;
+        for other in trees {
+            other.seed(data, metric, &mut ranks, k)?;
+        }
     }
     fill_missing(data, metric, &mut ranks, k, &mut fill_rng)?;
     Ok((tree, ranks))

@@ -131,7 +131,12 @@ def train(estimator, features, head, tail, counts, total, a, b):
     )
     feature_shape = (None, *estimator.dims_)
     model.build((feature_shape, feature_shape))
-    model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.001, clipvalue=4.0), jit_compile=False)
+    optimizer = estimator.optimizer
+    if optimizer is None:
+        optimizer = keras.optimizers.Adam(learning_rate=0.001, clipvalue=4.0)
+    else:
+        optimizer = keras.optimizers.get(optimizer)
+    model.compile(optimizer=optimizer, jit_compile=False)
 
     order = check_random_state(estimator.random_state).permutation(total)
     edges = tf.data.Dataset.from_tensor_slices(
@@ -139,11 +144,14 @@ def train(estimator, features, head, tail, counts, total, a, b):
     )
     edges = edges.repeat().shuffle(10_000)
     batch_size = estimator.batch_size_
-    if batch_size < 0:
+    if isinstance(batch_size, Integral) and batch_size < 0:
         raise ValueError(f"Dimension {batch_size} must be >= 0")
-    options = {"verbose": 0, "epochs": 10, **(estimator.keras_fit_kwargs or {})}
+    if not isinstance(batch_size, Integral):
+        raise ValueError("batch_size must be an integer")
+    reports = estimator.loss_report_frequency
+    options = {"verbose": 0, "epochs": estimator.n_training_epochs * reports, **(estimator.keras_fit_kwargs or {})}
     edges = edges.batch(batch_size, drop_remainder=True)
-    options.setdefault("steps_per_epoch", total // batch_size // 10 or None)
+    options.setdefault("steps_per_epoch", total // batch_size // reports or None)
     if options["steps_per_epoch"] is None:
         # Keras receives unknown steps with a full batch even when the pool is smaller than it.
         edges = edges.enumerate().take_while(lambda i, _: i < 1).map(lambda _, pair: pair)

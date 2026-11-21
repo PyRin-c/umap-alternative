@@ -6,7 +6,7 @@ use pyo3::types::PyBytes;
 use pyo3::wrap_pyfunction;
 
 use umap_core::aligned::{AlignedLayoutConfig, optimize_aligned_layout};
-use umap_core::approximate_neighbors::DenseApproximateIndex;
+use umap_core::approximate_neighbors::{DenseApproximateIndex, use_approximate_search};
 use umap_core::density::{
     DensityError, OriginalRadiusInput, embedding_radius_log_inputs_euclidean,
     original_radius_log_inputs,
@@ -33,7 +33,8 @@ use umap_core::fuzzy_graph::{
 use umap_core::inverse::{
     DenseInverseError, DenseInverseInput, DenseInverseLayout, InverseTriangulation,
     dense_inverse_epochs, fit_dense_inverse_scales_with_metric,
-    fit_inverse_scales_from_ranked_distances, inverse_transform_dense_with_metric,
+    fit_inverse_scales_from_ranked_distances, inverse_transform_dense_with_gradient,
+    inverse_transform_dense_with_metric,
 };
 use umap_core::modern_initialization::{
     ModernInit, ModernInitConfig, ModernInitRescale, initialize_modern_layout, recursive_hub_order,
@@ -304,14 +305,14 @@ fn parse_radius_input<'a>(
     n_features: usize,
     metric: &str,
 ) -> PyResult<OriginalRadiusInput<'a>> {
-    if metric == "precomputed" {
-        Ok(OriginalRadiusInput::Precomputed(data))
-    } else {
-        Ok(OriginalRadiusInput::Dense {
+    match metric {
+        "precomputed" => Ok(OriginalRadiusInput::Precomputed(data)),
+        "edge_distances" => Ok(OriginalRadiusInput::EdgeDistances(data)),
+        _ => Ok(OriginalRadiusInput::Dense {
             values: data,
             n_features,
             metric: parse_metric(metric)?,
-        })
+        }),
     }
 }
 
@@ -730,6 +731,11 @@ fn _rank_configured_features(
 #[pyclass(module = "umap_alternative._native")]
 struct NativeApproximateIndex {
     index: DenseApproximateIndex<'static>,
+}
+
+#[pyfunction]
+fn _uses_approximate_search(n_rows: usize, force: bool) -> bool {
+    use_approximate_search(n_rows, force)
 }
 
 #[pymethods]
@@ -2112,7 +2118,8 @@ fn _transform_dense_embedding(
     training, fitted_embedding, queries, simplices, query_simplices, *,
     n_features, n_components, k, a, b, learning_rate, fit_epochs,
     repulsion_strength, negative_sample_rate, transform_seed, local_connectivity,
-    use_computed_scales=true, metric="euclidean", cutoff=None, fitted_distances=None, unique_fit=None
+    use_computed_scales=true, metric="euclidean", cutoff=None, fitted_distances=None, unique_fit=None,
+    metric_gradient=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn _inverse_transform_dense_embedding(
@@ -2138,6 +2145,7 @@ fn _inverse_transform_dense_embedding(
     cutoff: Option<f32>,
     fitted_distances: Option<(Vec<f32>, usize, usize)>,
     unique_fit: Option<(Vec<f32>, Vec<usize>)>,
+    metric_gradient: Option<Py<PyAny>>,
 ) -> PyResult<Vec<f32>> {
     let metric = parse_metric(metric)?;
     let options = GraphOptions::new(local_connectivity, 1.0)
@@ -2166,7 +2174,8 @@ fn _inverse_transform_dense_embedding(
             query_simplices: &query_simplices,
         },
     };
-    py.detach(|| {
+    let mut callback_error = None;
+    let output = py.detach(|| {
         let scales = if needs_scales {
             if let Some((distances, width, target)) = &fitted_distances {
                 fit_inverse_scales_from_ranked_distances(distances, *width, *target, options)?
@@ -2194,10 +2203,43 @@ fn _inverse_transform_dense_embedding(
         } else {
             Vec::new()
         };
-        inverse_transform_dense_with_metric(&input, &scales, a, b, layout, metric)
-            .map(|result| result.coordinates)
-    })
-    .map_err(|error| PyValueError::new_err(error.to_string()))
+        if let Some(callback) = &metric_gradient {
+            inverse_transform_dense_with_gradient(
+                &input,
+                &scales,
+                a,
+                b,
+                layout,
+                |left, right, out| {
+                    let values = Python::attach(|py| {
+                        callback
+                            .call1(py, (left.to_vec(), right.to_vec()))?
+                            .extract::<(f64, Vec<f64>)>(py)
+                    });
+                    let (distance, gradient) = values.map_err(|error| {
+                        callback_error = Some(error);
+                        DenseInverseError::InvalidGradient
+                    })?;
+                    if !distance.is_finite()
+                        || distance < 0.0
+                        || gradient.len() != out.len()
+                        || gradient.iter().any(|value| !value.is_finite())
+                    {
+                        return Err(DenseInverseError::InvalidGradient);
+                    }
+                    out.copy_from_slice(&gradient);
+                    Ok(distance)
+                },
+            )
+        } else {
+            inverse_transform_dense_with_metric(&input, &scales, a, b, layout, metric)
+        }
+        .map(|result| result.coordinates)
+    });
+    if let Some(error) = callback_error {
+        return Err(error);
+    }
+    output.map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
 #[pymodule]
@@ -2224,6 +2266,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_feature_metric_distance, module)?)?;
     module.add_function(wrap_pyfunction!(_rank_configured_features, module)?)?;
     module.add_class::<NativeApproximateIndex>()?;
+    module.add_function(wrap_pyfunction!(_uses_approximate_search, module)?)?;
     module.add_function(wrap_pyfunction!(_optimize_aligned_layout, module)?)?;
     module.add_function(wrap_pyfunction!(_prepare_parametric_edges, module)?)?;
     module.add_function(wrap_pyfunction!(_fit_dense_graph, module)?)?;

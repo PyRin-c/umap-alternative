@@ -4,7 +4,7 @@ use std::fmt;
 
 use crate::density::{
     DensityError, OriginalRadiusInput, RadiusSpace, original_log_inputs_and_weights,
-    radii_and_weights_from_edge_distances,
+    original_radii_and_weights, radii_and_weights_from_edge_distances,
 };
 use crate::embedding::{
     DenseEmbedding, DenseEmbeddingConfig, DenseEmbeddingFitError, EmbeddingLayoutConfig,
@@ -200,8 +200,14 @@ fn fit_initialized_graph(
         .map_err(|error| DensmapError::Preparation(error.into()))?;
     let density = if let Some((input, options)) = density {
         prepare_density(layout.n_epochs, options, || {
-            original_log_inputs_and_weights(&graph, input)
-                .map(|(inputs, weights)| (inputs.into_iter().map(f32::ln).collect(), weights))
+            // Configured feature distances are supplied in graph storage order.
+            // Keep the established dense and precomputed optimizer checkpoints.
+            if matches!(input, OriginalRadiusInput::EdgeDistances(_)) {
+                original_radii_and_weights(&graph, input)
+            } else {
+                original_log_inputs_and_weights(&graph, input)
+                    .map(|(inputs, weights)| (inputs.into_iter().map(f32::ln).collect(), weights))
+            }
         })?
     } else {
         None

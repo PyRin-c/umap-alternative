@@ -258,8 +258,7 @@ def test_singleton_fit_leaves_supplied_rng_unadvanced():
     manual = np.random.RandomState(19)
     state = manual.get_state()
     model = UMAP(**(OPTIONS | {"random_state": manual}))
-    with pytest.warns(UserWarning, match="gradient"):
-        np.testing.assert_array_equal(model.fit_transform(TRAINING[:1]), [[0, 0]])
+    np.testing.assert_array_equal(model.fit_transform(TRAINING[:1]), [[0, 0]])
     np.testing.assert_array_equal(manual.get_state()[1], state[1])
     assert manual.get_state()[2:] == state[2:]
 

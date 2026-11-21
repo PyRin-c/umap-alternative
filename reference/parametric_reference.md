@@ -175,8 +175,11 @@ difference was 3.38e-5 for fitted coordinates and 2.22e-5 for the decoder
 inverse. Full training parity, landmark losses and large-data defaults
 remain open.
 
-The wheel reproduced the frozen inference and persistence observations above.
-Singleton saves can be loaded with `load_ParametricUMAP`. Multi-row saves
-write the Keras artifacts and raise `NotImplementedError`. Only singleton
-saves write the estimator's `model.pkl` file. The standalone Keras encoder
-and decoder files from either fit can be loaded with Keras.
+The frozen inference probes match the reference artifacts. This port saves
+the estimator state and Keras artifacts for both singleton and multi-row
+fits. The Windows CPU check trained a 19-row model with reconstruction for
+two reporting epochs and reloaded it with raw-data retention enabled and
+disabled. Both restores preserved the fitted layout and every tested
+encoder and decoder prediction bit. The Keras training model and its
+encoder and decoder are loaded for inference. Optimizer-state continuation
+across a save remains unverified.

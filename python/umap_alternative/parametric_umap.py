@@ -6,6 +6,7 @@ import pickle
 from math import prod
 from numbers import Integral
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 from scipy.sparse import csr_matrix
@@ -74,6 +75,9 @@ class ParametricUMAP(UMAP):
         disconnection_distance=None,
         metric_kwds=None,
         force_approximation_algorithm=False,
+        n_training_epochs=1,
+        loss_report_frequency=10,
+        optimizer=None,
     ):
         super().__init__(
             n_components=n_components,
@@ -110,6 +114,9 @@ class ParametricUMAP(UMAP):
         self.parametric_reconstruction_loss_weight = parametric_reconstruction_loss_weight
         self.autoencoder_loss = autoencoder_loss
         self.keras_fit_kwargs = keras_fit_kwargs
+        self.n_training_epochs = n_training_epochs
+        self.loss_report_frequency = loss_report_frequency
+        self.optimizer = optimizer
 
     def fit(self, X, y=None):
         """Build the native fuzzy graph, train on directed edges, and embed X."""
@@ -125,6 +132,10 @@ class ParametricUMAP(UMAP):
             raise ValueError("n_components must be a positive integer")
         if not isinstance(self.negative_sample_rate, Integral) or self.negative_sample_rate < 0:
             raise ValueError("negative_sample_rate must be a nonnegative integer")
+        for name in ("n_training_epochs", "loss_report_frequency"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, Integral) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
 
         n_rows, n_features = features.shape
         dims = (n_features,) if self.dims is None else tuple(self.dims)
@@ -189,37 +200,54 @@ class ParametricUMAP(UMAP):
             if self.decoder_ is None:
                 raise AttributeError("the singleton fit has no decoder")
             return _predict(self.decoder_, np.asarray(X, dtype=np.float32))
+        if self._graph_transform_fit[0].shape[0] == 0:
+            raise ValueError("Inverse transform requires the original training features or a decoder")
         return super().inverse_transform(X)
 
     def update(self, X, ensure_all_finite=True):
         raise NotImplementedError("incremental fitting is not supported for ParametricUMAP")
 
     def save(self, save_location, verbose=True, exclude_raw_data=False):
-        """Save Keras network artifacts and, for singleton fits, estimator state."""
+        """Save the estimator and its fitted Keras networks."""
 
         check_is_fitted(self, "embedding_")
         path = Path(save_location)
         path.mkdir(parents=True, exist_ok=True)
-        for name, model in (("encoder", self.encoder_), ("decoder", self.decoder_)):
-            if model is not None:
-                model.save(path / f"{name}.keras")
-        if self.parametric_model_ is not None:
-            self.parametric_model_.save(path / "parametric_model.keras")
-            raise NotImplementedError("saving a multi-row ParametricUMAP estimator is not supported")
-
         state = self.__dict__.copy()
-        for name in ("encoder", "decoder", "encoder_", "decoder_"):
+        networks = {
+            "encoder": self.encoder_, "decoder": self.decoder_,
+            "parametric_model": self.parametric_model_,
+        }
+        networks = {name: model for name, model in networks.items() if model is not None}
+        state["_saved_networks"] = tuple(networks)
+        for name in ("encoder", "decoder", "encoder_", "decoder_", "parametric_model_"):
             state.pop(name, None)
         if state["keras_fit_kwargs"] is not None:
             state["keras_fit_kwargs"] = state["keras_fit_kwargs"].copy()
             state["keras_fit_kwargs"].pop("callbacks", None)
+        if state["optimizer"] is not None and not isinstance(state["optimizer"], (str, dict)):
+            from ._parametric_keras import keras
+
+            state["optimizer"] = keras.optimizers.serialize(state["optimizer"])
         if exclude_raw_data:
             state["_exact_fit_input"] = None
+            state["_feature_search_index"] = None
+            state["_inverse_distances"] = None
+            state["_inverse_unique_fit"] = None
+            state["precomputed_knn"] = _DEFAULT_PRECOMPUTED_KNN
             if state["_graph_transform_fit"] is not None:
                 _, metric = state["_graph_transform_fit"]
                 state["_graph_transform_fit"] = (np.empty((0, self.n_features_in_), np.float32), metric)
-        with (path / "model.pkl").open("wb") as file:
-            pickle.dump(state, file)
+        with TemporaryDirectory(dir=path) as directory:
+            staging = Path(directory)
+            for name, model in networks.items():
+                model.save(staging / f"{name}.keras")
+            with (staging / "model.pkl").open("wb") as file:
+                pickle.dump(state, file)
+            for name in networks:
+                artifact = f"{name}.keras"
+                (staging / artifact).replace(path / artifact)
+            (staging / "model.pkl").replace(path / "model.pkl")
         if verbose:
             print(f"Saved ParametricUMAP to {path}")
 
@@ -230,15 +258,21 @@ def load_ParametricUMAP(save_location, verbose=True):
     path = Path(save_location)
     with (path / "model.pkl").open("rb") as file:
         state = pickle.load(file)
+    names = state.pop("_saved_networks", None)
+    if names is None:
+        names = [name for name in ("encoder", "decoder") if (path / f"{name}.keras").is_file()]
     estimator = ParametricUMAP()
     estimator.__dict__.update(state)
-    for name in ("encoder", "decoder"):
-        model_path = path / f"{name}.keras"
-        model = None
-        if model_path.is_file():
-            from ._parametric_keras import keras
+    networks = {}
+    if names:
+        from ._parametric_keras import keras
 
-            model = keras.models.load_model(model_path)
+        networks = {name: keras.models.load_model(path / f"{name}.keras", compile=False) for name in names}
+    estimator.parametric_model_ = networks.get("parametric_model")
+    for name in ("encoder", "decoder"):
+        model = getattr(estimator.parametric_model_, name, None)
+        if model is None:
+            model = networks.get(name)
         setattr(estimator, name, model)
         setattr(estimator, f"{name}_", model)
     if verbose:

@@ -3,7 +3,7 @@
 from operator import index
 
 import numpy as np
-from scipy.sparse import coo_matrix, diags, issparse
+from scipy.sparse import coo_matrix, diags
 from sklearn.preprocessing import normalize
 from sklearn.utils.validation import check_array
 
@@ -69,8 +69,6 @@ def nearest_neighbors(
         return indices, distances, None
     search = FeatureSearch(metric, metric_kwds)
     training = check_array(X, dtype=np.float32, accept_sparse="csr")
-    if issparse(training) and (search.name is not None or callable(search.function)):
-        raise NotImplementedError("configured feature distances require dense input")
     indices, distances, _ = search.rank(training, n_neighbors)
     return indices, distances, None if graph_only else ExactFeatureIndex(training, search)
 

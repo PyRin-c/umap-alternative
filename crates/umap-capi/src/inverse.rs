@@ -232,6 +232,7 @@ fn map_inverse_error(error: DenseInverseError) -> u32 {
         DenseInverseError::Triangulation => STATUS_INVALID_SHAPE,
         DenseInverseError::Neighbors(error) => map_knn_error(error),
         DenseInverseError::LocalScales
+        | DenseInverseError::InvalidGradient
         | DenseInverseError::UnsupportedMetric(_)
         | DenseInverseError::NoMembership { .. }
         | DenseInverseError::Sampling(_)

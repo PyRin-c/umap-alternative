@@ -37,11 +37,16 @@ def _recursive_base(coordinates, depth):
     return (coordinates * (target / spans.astype(np.float64))).astype(np.float32)
 
 
-def _sampled_pca_anchor(features, n_components, rng):
+def _sampled_pca_anchor(features, n_components, rng, *, graph=None, sample_size=None):
     # The projection draws one normal sketch with eight extra columns.
-    centered = (features - features.mean(axis=0, dtype=np.float32)).astype(np.float64)
+    sample_size = max(_ANCHOR_SAMPLE_SIZE if sample_size is None else sample_size, n_components)
+    sampled = len(features) > sample_size
+    anchors = rng.choice(len(features), size=sample_size, replace=False) if sampled else None
+    sample = features[anchors] if sampled else features
+    center = sample.mean(axis=0, dtype=np.float32)
     left, values, _ = randomized_svd(
-        centered, n_components=n_components, n_oversamples=8, n_iter=1, random_state=rng,
+        (sample - center).astype(np.float64),
+        n_components=n_components, n_oversamples=8, n_iter=1, random_state=rng,
     )
     scores = np.ascontiguousarray(left * values, dtype=np.float32)
     spans = np.ptp(scores, axis=0)
@@ -49,6 +54,13 @@ def _sampled_pca_anchor(features, n_components, rng):
     scores -= scores.min(axis=0)
     scores /= spans
     scores *= 10.0
+    if sampled:
+        links = graph[:, anchors]
+        masses = np.asarray(links.sum(axis=1)).ravel()
+        placed = np.broadcast_to(scores.mean(axis=0), (len(features), n_components)).copy()
+        np.divide(links @ scores, masses[:, None], out=placed, where=masses[:, None] > 0)
+        placed[anchors] = scores
+        return placed
     return scores
 
 
@@ -65,6 +77,7 @@ def _validate_recursive_initialization(ratio, weights, kwds):
         "base_init_threshold", "n_embedding_epochs", "anchor_method", "remove_coarse_diagonal",
         "recursive_negative_sample_rate", "recursive_repulsion_strength", "good_initialization_policy",
         "curve_schedule", "recursive_negative_selection_range_mode", "recursive_negative_selection_range_scale",
+        "anchor_sample_size",
     }
     unknown = kwds.keys() - supported
     if unknown:
@@ -74,6 +87,9 @@ def _validate_recursive_initialization(ratio, weights, kwds):
     threshold = kwds.get("base_init_threshold", _BASE_INIT_THRESHOLD)
     if not isinstance(threshold, numbers.Integral) or threshold < 2:
         raise ValueError("base_init_threshold must be an integer of at least two")
+    sample_size = kwds.get("anchor_sample_size", _ANCHOR_SAMPLE_SIZE)
+    if not isinstance(sample_size, numbers.Integral) or sample_size <= 0:
+        raise ValueError("anchor_sample_size must be a positive integer")
     validated = kwds.copy()
     budget = kwds.get("n_embedding_epochs")
     if budget is not None and (not isinstance(budget, numbers.Integral) or budget < 0):
@@ -201,14 +217,18 @@ def _modern_recursive_initialization(graph, features, n_components, rng, options
     threshold = options.get("base_init_threshold", _BASE_INIT_THRESHOLD)
     if n_components > min(features.shape):
         raise NotImplementedError("recursive initialization requires enough rows and features for n_components")
-    if len(features) > _ANCHOR_SAMPLE_SIZE:
-        raise NotImplementedError("recursive PCA anchor subsampling is not implemented")
     if not np.isfinite(features).all():
         raise ValueError("recursive PCA requires finite distances")
     coarse_epochs = options["n_embedding_epochs"]
     levels = []
     contraction_graph = graph
-    anchors = [_sampled_pca_anchor(features, n_components, rng)]
+    sample_size = options.get("anchor_sample_size", _ANCHOR_SAMPLE_SIZE)
+    anchor = (
+        _sampled_pca_anchor(features, n_components, rng, graph=graph, sample_size=sample_size)
+        if len(features) > max(sample_size, n_components)
+        else _sampled_pca_anchor(features, n_components, rng)
+    )
+    anchors = [anchor]
     while graph.shape[0] > threshold:
         size = graph.shape[0]
         target = min(threshold, size // 2) if not levels else 2

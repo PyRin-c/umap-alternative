@@ -73,6 +73,8 @@ pub struct DenseInverseOutput {
 /// Errors validating or reconstructing a dense inverse query batch.
 #[derive(Debug, PartialEq)]
 pub enum DenseInverseError {
+    /// A custom feature metric returned an invalid distance or gradient.
+    InvalidGradient,
     /// The training matrix shape or values are invalid.
     Training,
     /// The embedding matrix shape or values are invalid.
@@ -98,6 +100,7 @@ pub enum DenseInverseError {
 impl fmt::Display for DenseInverseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidGradient => f.write_str("invalid inverse metric distance or gradient"),
             Self::Training => f.write_str("invalid dense inverse training matrix"),
             Self::Embedding => f.write_str("invalid fitted embedding for dense inverse transform"),
             Self::Queries => f.write_str("invalid dense inverse query matrix"),
@@ -287,6 +290,20 @@ pub fn inverse_transform_dense_with_metric(
     if metric.is_boolean() {
         return Err(DenseInverseError::UnsupportedMetric(metric));
     }
+    inverse_transform_dense_with_gradient(input, scales, a, b, layout, |left, right, gradient| {
+        Ok(metric_gradient(metric, left, right, gradient))
+    })
+}
+
+/// Reconstruct features using a caller-provided original-space distance and gradient.
+pub fn inverse_transform_dense_with_gradient(
+    input: &DenseInverseInput<'_>,
+    scales: &[InverseLocalScale],
+    a: f64,
+    b: f64,
+    layout: DenseInverseLayout,
+    gradient: impl FnMut(&[f32], &[f32], &mut [f64]) -> Result<f64, DenseInverseError>,
+) -> Result<DenseInverseOutput, DenseInverseError> {
     validate_parameters(a, b, layout.initial_alpha).map_err(DenseInverseError::Layout)?;
     validate_repulsion_strength(layout.repulsion_strength).map_err(DenseInverseError::Layout)?;
     let (mut output, edges) = initialize(input, a, b)?;
@@ -316,7 +333,7 @@ pub fn inverse_transform_dense_with_metric(
         &edges,
         &mut output.coordinates,
         layout,
-        metric,
+        gradient,
     )?;
     Ok(output)
 }
@@ -502,7 +519,7 @@ fn optimize(
     edges: &[InverseEdge],
     coordinates: &mut [f32],
     layout: DenseInverseLayout,
-    metric: DistanceMetric,
+    mut metric: impl FnMut(&[f32], &[f32], &mut [f64]) -> Result<f64, DenseInverseError>,
 ) -> Result<(), DenseInverseError> {
     const EPSILON: f64 = 1e-6;
     EdgeSamplingCursor::from_positive_interval(1.0, layout.negative_sample_rate)?;
@@ -532,7 +549,7 @@ fn optimize(
             }
             let current = &mut coordinates[edge.row * input.n_features..][..input.n_features];
             let tail = features(edge.vertex);
-            metric_gradient(metric, current, tail, &mut gradient);
+            metric(current, tail, &mut gradient)?;
             let coefficient = -1.0 / (edge.weight * f64::from(scales[edge.vertex].sigma) + EPSILON);
             update_features(current, &gradient, coefficient, alpha);
             for _ in 0..cursor.take_negative_samples(time)? {
@@ -541,7 +558,7 @@ fn optimize(
                     continue;
                 }
                 let tail = features(vertex);
-                let dist = metric_gradient(metric, current, tail, &mut gradient);
+                let dist = metric(current, tail, &mut gradient)?;
                 let scale = scales[vertex];
                 let sigma = f64::from(scale.sigma);
                 let offset = (dist - f64::from(scale.rho)).max(0.0);

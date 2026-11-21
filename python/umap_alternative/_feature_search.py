@@ -1,6 +1,7 @@
 """Rank configured feature distances for the native graph and layout paths."""
 
 import numpy as np
+from scipy.sparse import issparse
 from sklearn.metrics import pairwise_distances_chunked
 from sklearn.utils.validation import check_array
 
@@ -43,8 +44,40 @@ class FeatureSearch:
             self.function = metric
 
     def __call__(self, x, y):
+        if issparse(x):
+            x = x.toarray().ravel()
+        if issparse(y):
+            y = y.toarray().ravel()
         value = self.function(x, y, **self.kwds)
         return float(value[0] if isinstance(value, tuple) else value)
+
+    def distance_gradient(self, x, y):
+        x, y = np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
+        value = self.function(x, y, **self.kwds)
+        if isinstance(value, tuple):
+            return float(value[0]), np.asarray(value[1], dtype=np.float64).tolist()
+        center = float(value)
+        gradient = np.zeros_like(x)
+        for axis in range(len(x)):
+            step = np.cbrt(np.finfo(np.float64).eps) * max(1.0, abs(x[axis]))
+            shifted = x.copy()
+            shifted[axis] += step
+            try:
+                upper = self(shifted, y)
+            except ValueError:
+                upper = np.nan
+            shifted[axis] = x[axis] - step
+            try:
+                lower = self(shifted, y)
+            except ValueError:
+                lower = np.nan
+            if np.isfinite(upper) and np.isfinite(lower):
+                gradient[axis] = (upper - lower) / (2 * step)
+            elif np.isfinite(upper):
+                gradient[axis] = (upper - center) / step
+            elif np.isfinite(lower):
+                gradient[axis] = (center - lower) / step
+        return center, gradient.tolist()
 
     def rank(self, training, k, *, queries=None, cutoff=np.inf):
         n_rows, width = training.shape
@@ -54,7 +87,7 @@ class FeatureSearch:
             raise ValueError(f"expected {width} query features, got {queries.shape[1]}")
         if np.isnan(cutoff) or cutoff < 0:
             raise ValueError("disconnection distance must be nonnegative")
-        if self.name is not None:
+        if self.name is not None and not (issparse(training) or issparse(queries)):
             parameter, values = _metric_parameters(self.name, width, self.kwds)
             training_bytes = np.asarray(training, dtype=np.float64, order="C").tobytes()
             query_bytes = None if queries is None else np.asarray(queries, dtype=np.float64, order="C").tobytes()
@@ -113,12 +146,13 @@ class ExactFeatureIndex:
 
 
 class ApproximateFeatureIndex:
-    def __init__(self, training, k, metric, seed):
+    def __init__(self, training, k, metric, seed, query_rows=None):
         self.training = training.astype(np.float32, copy=False).tobytes(order="C")
         self.shape = training.shape
         self.k = k
         self.metric = metric
         self.seed = seed
+        self.query_rows = query_rows
         self._index = None
 
     def __getstate__(self):
@@ -137,6 +171,9 @@ class ApproximateFeatureIndex:
         if queries.shape[1] != self.shape[1] or not 1 <= k <= self.k:
             raise ValueError("approximate query shape or neighbor count differs from the fitted index")
         indices, distances = self._as_arrays(*self._native_index().query(queries.tobytes(), len(queries)))
+        query_rows = getattr(self, "query_rows", None)
+        if query_rows is not None:
+            indices = np.where(indices >= 0, query_rows[indices], -1)
         return indices[:, :k], distances[:, :k]
 
     def _as_arrays(self, indices, distances):

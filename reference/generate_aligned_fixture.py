@@ -138,6 +138,10 @@ def capture():
         np.random.RandomState(seed).normal(size=(6, 3)).astype(np.float32)
         for seed in (19, 20, 21)
     ]
+    data["relation_extent_four_slices"] = [
+        *data["relation_extent"],
+        np.random.RandomState(22).normal(size=(6, 3)).astype(np.float32),
+    ]
     relation_groups = {
         "complete": [r_ab, r_bc],
         "identity": [{i: i for i in range(9)}, {i: i for i in range(8)}],
@@ -149,6 +153,7 @@ def capture():
         "holdout": holdout_groups,
         "all_but_last": [dict(enumerate(range(5))) for _ in range(2)],
         "include_last": [dict(enumerate(range(4))) | {5: 5} for _ in range(2)],
+        "all_but_two": [dict(enumerate([2, 3, 1, 0])), dict(enumerate([3, 0, 2, 1]))],
     }
     base_settings = dict(
         n_neighbors=4, n_components=2, a=1.7, b=0.9, random_state=42,
@@ -261,6 +266,18 @@ def capture():
             with patch.object(aligned_umap, "optimize_layout_aligned_euclidean",
                               optimize_with_explicit_relation_extent):
                 fit(f"{name}-padded", **options)
+    for epochs in (2, 8):
+        fit(
+            f"batch-all_but_two-window-2-epochs-{epochs}", group="all_but_two",
+            family_name="relation_extent", n_neighbors=3, transform_seed=37,
+            alignment_window_size=2, n_epochs=epochs,
+        )
+    relation_groups["all_but_two_four_slices"] = relation_groups["all_but_two"] + [{0: 0, 1: 1, 3: 2}]
+    fit(
+        "batch-all_but_two-four_slices-window-2-epochs-8", group="all_but_two_four_slices",
+        family_name="relation_extent_four_slices", n_neighbors=3, transform_seed=37,
+        alignment_window_size=2, n_epochs=8,
+    )
 
     # Replay from the captured adjacency, independently of the estimator.
     counts = {}

@@ -163,22 +163,35 @@ with a maximum difference of one float32 ULP (2.3841858e-7), and
 also retain small arithmetic differences. These differences persist
 in a replay using fused multiply-add for the final coordinate update.
 
-The six-row boundary fixture leaves row 5 beyond the highest index
-named by either relation. Window one matches 36/36 bits at 8 epochs.
-With window two, the differences occur in the last slice. The replay
-matches 29/36 bits at 2 epochs and 24/36 at 8 epochs, with maxima
-0.0801959 and 0.5040512 on both platforms. Linking row 5 while leaving
-row 4 unlinked restores 36/36 at 8 epochs.
+### Relation extent at window two
 
-The optimizer receives relation and weight arrays of shape `(3, 5, 5)`
-for the six-row input. The fixture generator calls the same public
-optimizer with the row axis extended to six, using `-1` for the missing
-relations and zero for their weights. The existing bounded Rust traversal
-then matches all 36 coordinates at two epochs and 35 of 36 at eight
-epochs, with the last coordinate within one float32 step. The tests
-cover this padded replay while preserving the unmodified wheel results
-in the fixture. Layouts for trailing rows use the explicit missing-relation
-semantics of the padded replay.
+The six-row fixture leaves row 5 beyond the largest relation index.
+The public optimizer receives relation and weight arrays of shape
+`(3, 5, 5)`. With the row dimension extended to six and filled with
+`-1` and zero, it produces a different layout. Copying the values
+at the original flattened offsets into an explicitly sized table
+reproduces the unmodified public output. In particular, row 5 can
+read row 0 of the next time offset. Four-slice controls confirm that
+the relation table includes the forward boundary slot even though
+the optimizer excludes that boundary from its update sweep.
+
+Rust resolves these offsets with checked indices. It uses the weight
+from the referenced slot and the temporal decay of the update's slice.
+An offset beyond the available table or a row outside the destination
+slice contributes no alignment force. The new tests compare with the
+unmodified public fit. The padded diagnostic remains in the fixture.
+
+| Time window two probe | Matching coordinates | Maximum absolute difference |
+| --- | ---: | ---: |
+| One trailing row, two epochs | 36 / 36 | 0 |
+| One trailing row, eight epochs | 33 / 36 | `3.58e-7` |
+| Two trailing rows, two epochs | 36 / 36 | 0 |
+| Two trailing rows, eight epochs | 36 / 36 | 0 |
+| Two trailing rows across four slices, eight epochs | 48 / 48 | 0 |
+
+The previous maximum for the one-row, eight-epoch fixture was
+`0.5040512`. The difference is within six float32 steps. The
+window-one and linked-last-row controls still match exactly.
 
 The public wheel returns a Numba typed list. This implementation uses a
 Python list of float32 NumPy arrays. Its graph-mode mappers expose the fuzzy

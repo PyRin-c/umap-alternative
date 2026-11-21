@@ -144,6 +144,20 @@ conversion. Seven Gaussian held-out rows from `RandomState(5)` match
 reference's default epsilon. Candidate selection and prepared query
 construction remain separate sources of rank differences.
 
+A follow-up on six Gaussian Euclidean configurations used 32 queries
+each at epsilon 0.12. Public `n_search_trees=0` matched all 1,280
+default ordered slots. Explicit `n_search_trees=1` with a search leaf
+size of 15 changed some slots. Disabling graph diversification also
+changed default ranks, including 27 of 160 slots on the 4,096-row,
+four-feature, width-five case where increasing the degree cap alone
+made no difference. Simple symmetric pruning and unpruned Rust walks
+did not reproduce those ranks.
+
+Against an independent exhaustive SciPy cKDTree on the latter case,
+the public fit matched 20,439 of 20,480 ordered training slots and
+Rust matched 20,456. All 17 slots where Rust and the public fit differ
+already match the exhaustive order on the Rust side.
+
 ## Training rank timing
 
 Windows x86-64 release measurements used a single Rust thread, eight

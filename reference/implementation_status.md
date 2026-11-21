@@ -41,5 +41,5 @@ cargo test -p umap-core --locked --test feature_metrics
 - 全行 PCA は列合計を float32 で求め、平均と中心化を float64 で行う。27行の PCA 単独ケースと、129行の悪条件2ケースで計828座標と RNG 状態が公開版に一致した。再帰収縮後の微小差は継続。 [PCA の記録](modern_recursive_rounding_reference.md)
 - ParametricUMAP の一括損失計算を修正し、Windows CPU の学習済みモデルで公開版の162出力とビット一致した。凍結モデルの30予測と、保存・復元も確認した。 [学習の記録](parametric_reference.md)
 - 近似探索は問い合わせ幅を Rust の候補探索に渡す。4,096行の Euclidean では、幅5で20,480順位中20,463が公開版と一致した。候補生成と問い合わせ順位には差が残る。 [順位比較](approximate_search_native_reference.md)
-- AlignedUMAP の時間窓2では、末尾を対応なしで埋めた公開オプティマイザーの結果を回帰テストに追加した。2エポックで全座標が一致し、8エポックでは1座標が1 ULP 以内だった。 [時間窓の記録](aligned_reference.md)
+- AlignedUMAP の時間窓2では、参照版の時間オフセットを境界チェック付きで再現した。末尾1行が未対応の8エポックケースの最大差は `0.5040512` から `3.58e-7` に縮小した。末尾2行が未対応の追加3ケースは全120座標が一致した。 [時間窓の記録](aligned_reference.md)
 - densMAP は入力半径の標準化まで47値が一致した。3次元の初回密度更新を1辺ずつ比較すると最大 `1.34e-5` の差があり、勾配の演算順を引き続き調べる。 [勾配の記録](densmap_layout_reference.md)

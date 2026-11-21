@@ -17,6 +17,8 @@ def main():
     for name, case in public["cases"].items():
         if not name.startswith(("epoch-2", "epoch-8", "zero-window", "single-window", "batch-")):
             continue
+        if name.endswith("-padded"):
+            continue
         data = [np.asarray(matrix, dtype=np.float32) for matrix in public["data"][case["family"]]]
         links = [dict(items) for items in public["relations"][case["relation_group"]]]
         model = AlignedUMAP(**(public["settings"] | case["overrides"]))

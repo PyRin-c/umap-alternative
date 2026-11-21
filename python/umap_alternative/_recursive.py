@@ -4,6 +4,7 @@ import numbers
 from math import sqrt
 
 import numpy as np
+from scipy.linalg import svd
 from scipy.sparse import csr_matrix
 from sklearn.utils.extmath import randomized_svd
 
@@ -16,9 +17,7 @@ _ANCHOR_SAMPLE_SIZE = 16384
 _COARSE_EPOCHS = 50
 
 
-def _recursive_base(coordinates, depth):
-    coordinates = np.array(coordinates, dtype=np.float32, copy=True, order="C")
-    coordinates -= coordinates.mean(axis=0)
+def _robust_spans(coordinates):
     ranks = (len(coordinates) - 1) * np.array([0.05, 0.95], dtype=np.float64)
     floor = np.floor(ranks).astype(np.intp)
     ceiling = np.ceil(ranks).astype(np.intp)
@@ -33,6 +32,13 @@ def _recursive_base(coordinates, depth):
     )
     spans = upper - lower
     spans[spans == 0] = 1.0
+    return spans
+
+
+def _recursive_base(coordinates, depth):
+    coordinates = np.array(coordinates, dtype=np.float32, copy=True, order="C")
+    coordinates -= coordinates.mean(axis=0)
+    spans = _robust_spans(coordinates)
     target = 3.0 * np.log10(len(coordinates)) * np.log2(depth + 1.0)
     return (coordinates * (target / spans.astype(np.float64))).astype(np.float32)
 
@@ -183,7 +189,7 @@ def _coarse_graphs(graph, labels, n_parts, weights, remove_diagonal):
         order = np.lexsort((target, source))
         source, target, values = source[order], target[order], values[order]
         starts = np.r_[0, np.flatnonzero((source[1:] != source[:-1]) | (target[1:] != target[:-1])) + 1]
-        complements = np.multiply.reduceat((1.0 - values).astype(np.float64), starts)
+        complements = np.multiply.reduceat(1.0 - values.astype(np.float64), starts)
         coarse = csr_matrix((1.0 - complements, (source[starts], target[starts])), shape=shape)
     else:
         coarse = csr_matrix(shape, dtype=np.float32)
@@ -191,6 +197,25 @@ def _coarse_graphs(graph, labels, n_parts, weights, remove_diagonal):
     coarse.sort_indices()
     coarse = coarse.astype(np.float32)
     return coarse, coarse
+
+
+def _aggregate_anchors(anchors, labels):
+    counts = np.bincount(labels)
+    means = np.zeros((len(counts), anchors.shape[1]), dtype=np.float64)
+    # Each member contributes its share of the part's mean before summing.
+    inverse_counts = 1.0 / counts
+    np.add.at(means, labels, anchors * inverse_counts[labels, None])
+    return means.astype(np.float32)
+
+
+def _procrustes_unit_rms(coordinates):
+    mean = coordinates.sum(axis=0, dtype=np.float32).astype(np.float64) / len(coordinates)
+    centered = (coordinates - mean).astype(np.float32)
+    squares = np.square(centered).ravel()
+    # The reference sums the squared entries in row order in float32.
+    np.add.accumulate(squares, out=squares)
+    rms = np.sqrt(squares[-1] / np.float32(squares.size))
+    return centered / rms if rms != 0 else np.zeros_like(centered)
 
 
 def _expand_layout(graph, labels, child, anchor):
@@ -208,10 +233,12 @@ def _expand_layout(graph, labels, child, anchor):
     expanded = 0.5 * (expanded + averages)
     expanded -= expanded.mean(axis=0)
     expanded = expanded.astype(np.float32)
-    left, _, right = np.linalg.svd(expanded.T @ (anchor - anchor.mean(axis=0)))
+    left, _, right = svd(
+        _procrustes_unit_rms(expanded).T @ _procrustes_unit_rms(anchor), lapack_driver="gesdd",
+    )
     if np.linalg.det(left @ right) < 0:
         left[:, -1] *= -1
-    return (expanded.astype(np.float64) @ (left @ right)).astype(np.float32)
+    return expanded @ (left @ right)
 
 
 def _modern_recursive_initialization(graph, features, n_components, rng, options, ratio, weights, refine):
@@ -237,11 +264,7 @@ def _modern_recursive_initialization(graph, features, n_components, rng, options
         n_parts = max(2, size // ratio, target)
         seed = rng.randint(-2**31 + 1, 2**31 - 2, 3)
         labels = _recursive_partition(contraction_graph, n_parts, seed, layout_graph=graph)
-        counts = np.bincount(labels)
-        means = np.zeros((len(counts), n_components), dtype=np.float64)
-        np.add.at(means, labels, anchors[-1])
-        means /= counts[:, None]
-        anchors.append(means.astype(np.float32))
+        anchors.append(_aggregate_anchors(anchors[-1], labels))
         child = None
         if n_parts > threshold or coarse_epochs:
             contraction_graph, child = _coarse_graphs(

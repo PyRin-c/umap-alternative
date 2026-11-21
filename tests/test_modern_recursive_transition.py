@@ -9,7 +9,7 @@ import pytest
 from scipy.sparse import csr_matrix
 
 from test_modern_recursive_coarse import CoarseRandomState
-from test_modern_recursive_fit import PLATFORM, check_graph, fit_case, recorded_layout, rng_checkpoint
+from test_modern_recursive_fit import PLATFORM, check_graph, check_layout_bits, fit_case, rng_checkpoint
 from umap_alternative import _recursive
 from umap_alternative._umap import _refine_recursive_level
 
@@ -42,16 +42,11 @@ def test_recursive_transition_stage(case, monkeypatch):
     assert rng.calls == case["rng_calls"]
     assert rng_checkpoint(rng) == {key: case["rng"][key] for key in ("cursor", "gaussian_bits")}
     assert rng.randint(0, 2**32, size=4, dtype=np.uint32).tolist() == case["rng"]["next_words"]
-    bound = 3e-5 if case["name"] == "untied-3-6-5-coarse_n" else 5e-6
-    np.testing.assert_allclose(layout, recorded_layout(case["layout_bits"], layout.shape), rtol=0, atol=bound)
+    check_layout_bits(layout, case["layout_bits"])
 
 
 @pytest.mark.parametrize("case", REFERENCE["fits"], ids=lambda case: case["name"])
 @pytest.mark.parametrize("method", ["fit", "fit_transform"])
 def test_recursive_transition_fit(case, method):
     model, _ = fit_case(case, method)
-    actual = model.embedding_list_[0]
-    bound = 5.1e-6 if case["name"] == "dense-2-2-1" else case["atol"]
-    np.testing.assert_allclose(
-        actual, recorded_layout(case["history_bits"][0], actual.shape), rtol=0, atol=bound,
-    )
+    check_layout_bits(model.embedding_list_[0], case["history_bits"][0])

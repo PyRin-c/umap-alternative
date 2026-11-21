@@ -22,7 +22,7 @@ from ._feature_search import (
     ApproximateFeatureIndex, ExactFeatureIndex, FeatureSearch,
     rank_tied_dense_distances as _rank_tied_dense_distances,
 )
-from ._recursive import _modern_recursive_initialization, _validate_recursive_initialization
+from ._recursive import _modern_recursive_initialization, _robust_spans, _validate_recursive_initialization
 from ._spectral import (
     _disconnected_spectral_initialization,
     _modern_spectral_initialization,
@@ -321,9 +321,7 @@ def _fit_modern_initialization(
     coordinates = np.asarray(coordinates, dtype=np.float32).reshape(n_rows, n_components)
     if rescale != "graph_edge":
         # NumPy's float32 log and exp can round differently from scalar libm.
-        lower, upper = np.percentile(coordinates, (5, 95), axis=0).astype(np.float32)
-        spans = upper - lower
-        spans[spans == 0] = 1.0
+        spans = _robust_spans(coordinates)
         span = np.exp(np.log(spans).mean()) if rescale == "isotropic" else spans.astype(np.float64)
         target_span = 3.0 * np.log10(n_rows) * np.log2(1.0 + repulsion_strength) * scale_factor
         coordinates *= np.asarray(target_span / span, dtype=np.float32)

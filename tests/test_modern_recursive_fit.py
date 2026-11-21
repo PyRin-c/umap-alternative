@@ -62,6 +62,12 @@ def recorded_layout(words, shape):
     return np.asarray(words, dtype=np.uint32).view(np.float32).reshape(shape)
 
 
+def check_layout_bits(layout, words):
+    assert layout.dtype == np.float32
+    expected = np.asarray(words, dtype=np.uint32).reshape(layout.shape)
+    np.testing.assert_array_equal(layout.view(np.uint32), expected)
+
+
 @pytest.mark.parametrize("case", REFERENCE["cases"], ids=lambda case: case["name"])
 @pytest.mark.parametrize("method", ["fit", "fit_transform"])
 def test_modern_recursive_fit(case, method):
@@ -76,11 +82,9 @@ def test_modern_recursive_fit(case, method):
             selected = np.linalg.qr(centered)[0]
             np.testing.assert_allclose(selected @ selected.T, basis @ basis.T, rtol=0, atol=2e-6)
         return
-    expected = recorded_layout(case["embedding_bits"], model.embedding_.shape)
-    np.testing.assert_allclose(model.embedding_, expected, rtol=0, atol=6e-6)
-    for epoch, actual, words in zip(model.n_epochs, model.embedding_list_, case["history_bits"], strict=True):
-        expected = recorded_layout(words, actual.shape)
-        np.testing.assert_allclose(actual, expected, rtol=0, atol=6e-6 if epoch == 0 else 3e-6)
+    check_layout_bits(model.embedding_, case["embedding_bits"])
+    for actual, words in zip(model.embedding_list_, case["history_bits"], strict=True):
+        check_layout_bits(actual, words)
 
 
 @pytest.mark.parametrize("ratio,weights,message", [

@@ -3,10 +3,9 @@
 import json
 from pathlib import Path
 
-import numpy as np
 import pytest
 
-from test_modern_recursive_fit import PLATFORM, TracedRandomState, fit_case, recorded_layout, rng_checkpoint
+from test_modern_recursive_fit import PLATFORM, TracedRandomState, check_layout_bits, fit_case, rng_checkpoint
 
 
 FIXTURE = (
@@ -14,16 +13,6 @@ FIXTURE = (
     / f"reference/fixtures/umap-learn-0.6.0-modern-recursive-coarse-{PLATFORM}-x86_64.json"
 )
 CASES = json.loads(FIXTURE.read_text(encoding="utf-8"))["cases"]
-COORDINATE_BOUNDS = {
-    "four-level-budget-2": 5.1e-6,
-    "four-level-budget-3": 3e-5,
-    "four-level-positive-only": 2e-5,
-    "ratio-three-stars-budget-None": 2e-5,
-    "two-level-strong_to_one": 2e-5,
-    "three-level-budget-4": 2e-5,
-    "three-level-budget-6": 1e-4,
-    "three-level-coarse-eleven": 4e-5,
-}
 
 
 class CoarseRandomState(TracedRandomState):
@@ -64,9 +53,6 @@ def test_recursive_coarse_rng_trace(case, method):
 @pytest.mark.parametrize("method", ["fit", "fit_transform"])
 def test_recursive_coarse_coordinates(case, method):
     model, _ = fit_case(case, method)
-    bound = COORDINATE_BOUNDS.get(case["name"], 5e-6)
-    expected = recorded_layout(case["embedding_bits"], model.embedding_.shape)
-    np.testing.assert_allclose(model.embedding_, expected, rtol=0, atol=bound)
+    check_layout_bits(model.embedding_, case["embedding_bits"])
     for actual, bits in zip(model.embedding_list_, case["history_bits"], strict=True):
-        expected = recorded_layout(bits, actual.shape)
-        np.testing.assert_allclose(actual, expected, rtol=0, atol=bound)
+        check_layout_bits(actual, bits)

@@ -9,7 +9,7 @@ import pytest
 from scipy.sparse import csr_matrix
 
 from test_modern_recursive_coarse import CoarseRandomState
-from test_modern_recursive_fit import PLATFORM, check_graph, recorded_layout, rng_checkpoint
+from test_modern_recursive_fit import PLATFORM, check_graph, check_layout_bits, recorded_layout, rng_checkpoint
 from umap_alternative import _recursive
 from umap_alternative._umap import _refine_recursive_level
 
@@ -61,12 +61,7 @@ def test_recursive_star_before_outer_normalization(case):
     archive = REFERENCE["archive"]
     values = recorded_layout(archive["input_bits"], (27, 27))
     actual = replay(archive["graph"], values, case, 42)
-    expected = recorded_layout(case["layout_bits"], actual.shape)
-    if case["threshold"] == len(values):
-        np.testing.assert_array_equal(actual.view(np.uint32), expected.view(np.uint32))
-        return
-    bound = 2e-7 if case["name"] == "star-raw-3-11" else 1e-6
-    np.testing.assert_allclose(actual, expected, rtol=0, atol=bound)
+    check_layout_bits(actual, case["layout_bits"])
 
 
 @pytest.mark.parametrize("case", REFERENCE["mixed_scale_pca"], ids=lambda case: str(case["seed"]))

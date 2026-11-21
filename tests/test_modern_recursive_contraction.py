@@ -7,9 +7,9 @@ import numpy as np
 import pytest
 from scipy.sparse import csr_matrix
 
-from test_modern_recursive_fit import PLATFORM, fit_case, make_data, recorded_layout, rng_checkpoint
+from test_modern_recursive_fit import PLATFORM, check_layout_bits, fit_case, make_data, rng_checkpoint
 from umap_alternative import UMAP
-from umap_alternative._recursive import _expand_layout, _recursive_base, _recursive_partition
+from umap_alternative._recursive import _aggregate_anchors, _expand_layout, _recursive_base, _recursive_partition
 
 
 FIXTURE = (
@@ -31,10 +31,9 @@ def test_recursive_contraction_placement(case):
     rng = np.random.RandomState(case["seed"])
     seed = rng.randint(-2**31 + 1, 2**31 - 2, 3)
     labels = _recursive_partition(graph, 3, seed)
-    means = np.asarray([anchor[labels == i].mean(axis=0) for i in range(3)], dtype=np.float32)
+    means = _aggregate_anchors(anchor, labels)
     actual = _expand_layout(graph, labels, _recursive_base(means, 2), anchor)
-    reference = recorded_layout(case["layout_bits"], anchor.shape)
-    np.testing.assert_allclose(actual, reference, rtol=0, atol=1e-6)
+    check_layout_bits(actual, case["layout_bits"])
     assert rng_checkpoint(rng) == {key: case["rng"][key] for key in ("cursor", "gaussian_bits")}
     assert rng.randint(0, 2**32, size=4, dtype=np.uint32).tolist() == case["rng"]["next_words"]
 
@@ -43,23 +42,9 @@ def test_recursive_contraction_placement(case):
 @pytest.mark.parametrize("method", ["fit", "fit_transform"])
 def test_recursive_contraction_fit(case, method):
     model, _ = fit_case(case, method)
-    # Near-coincident pairs in the two rank-one holdouts amplify PCA rounding
-    # during the outer optimizer's first nonzero updates.
-    refined_bound = {
-        "holdout-two-level-fuzzy": 1.2e-4,
-        "holdout-three-level-transition": 2.5e-4,
-        "holdout-two-coarse-epochs": 2e-5,
-    }.get(case["name"], 1.2e-5)
-    initial_bound = {
-        "holdout-two-level-fuzzy": 8e-6,
-        "holdout-three-level-transition": 3.5e-6,
-        "holdout-two-coarse-epochs": 2e-5,
-    }.get(case["name"], 3e-6)
-    expected = recorded_layout(case["embedding_bits"], model.embedding_.shape)
-    np.testing.assert_allclose(model.embedding_, expected, rtol=0, atol=refined_bound)
-    for epoch, actual, bits in zip(model.n_epochs, model.embedding_list_, case["history_bits"], strict=True):
-        expected = recorded_layout(bits, actual.shape)
-        np.testing.assert_allclose(actual, expected, rtol=0, atol=initial_bound if epoch == 0 else refined_bound)
+    check_layout_bits(model.embedding_, case["embedding_bits"])
+    for actual, bits in zip(model.embedding_list_, case["history_bits"], strict=True):
+        check_layout_bits(actual, bits)
 
 
 @pytest.mark.parametrize("budget", [-1, 3.5])

@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from scipy.sparse import csr_matrix
 
-from test_modern_recursive_fit import PLATFORM, fit_case, recorded_layout, rng_checkpoint
+from test_modern_recursive_fit import PLATFORM, check_layout_bits, fit_case, recorded_layout, rng_checkpoint
 from umap_alternative import _native
 from umap_alternative._recursive import _expand_layout
 from umap_alternative._umap import _modern_projector, _modern_rng_state
@@ -59,5 +59,4 @@ def test_recursive_star_frozen_adam(case):
 @pytest.mark.parametrize("method", ["fit", "fit_transform"])
 def test_recursive_star_fit(case, method):
     model, _ = fit_case(case, method)
-    layout = recorded_layout(case["embedding_bits"], model.embedding_.shape)
-    np.testing.assert_allclose(model.embedding_, layout, rtol=0, atol=3e-5)
+    check_layout_bits(model.embedding_, case["embedding_bits"])

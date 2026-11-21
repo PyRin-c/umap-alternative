@@ -57,7 +57,7 @@ Wheel は `target/wheels/` に生成されます。Python パッケージ名は 
 
 密な入力の現代レイアウトは、乱数シードを指定し、連結グラフでの `init="spectral"`、`init="random"`、または NumPy の初期座標で学習できます。`compatibility_layout=False` か `optimizer="adam"` または `"momentum"` で選択し、`init_rescale` と `init_scale_factor` で初期座標を調整できます。エポック番号のリストを指定すると、対応する座標を `embedding_list_` に格納します。[現代レイアウトの比較記録](reference/modern_fit_reference.md) [スペクトル初期化の比較記録](reference/modern_spectral_fit_reference.md)
 
-`init="recursive"` は、固定シードでグラフを縮約し、粗い段階を Adam で最適化してから元の解像度へ戻します。4段の縮約や事前計算距離による星型グラフの一部では、公開版と座標差が残ります。[再帰学習の比較記録](reference/modern_recursive_coarse_reference.md)
+`init="recursive"` は、固定シードでグラフを縮約し、粗い段階を Adam で最適化してから元の解像度へ戻します。4段の縮約と事前計算距離による星型グラフの検証ケースでは、縮約・展開後と学習後の座標が公開版にビット一致します。 [再帰学習の比較記録](reference/modern_recursive_rounding_reference.md#exact-contraction-expansion-and-fitted-checkpoints)
 
 Euclidean、Manhattan、Chebyshev、cosine の互換レイアウトでは、CSR、CSC、COO の特徴量を学習できます。有限の切断距離で孤立した行の座標は `NaN` になります。これらの距離で疎な特徴量を学習したモデルは、密な入力と CSR、CSC、COO の入力を変換できます。グラフモードは近傍順の COO グラフを、埋め込みモードは座標を返します。[疎な Manhattan と Chebyshev の比較記録](reference/sparse_graph_reference.md#sparse-manhattan-and-chebyshev)・[疎な cosine の比較記録](reference/sparse_graph_reference.md#sparse-cosine)
 

@@ -255,14 +255,15 @@ def capture():
         for epochs in (2, 8):
             fit(f"batch-{mode}-{epochs}", group=mode, n_epochs=epochs)
     for group, window, epochs in (
-        ("all_but_last", 1, 8), ("all_but_last", 2, 2), ("all_but_last", 2, 8),
+        ("all_but_last", 1, 8), ("all_but_last", 2, 2), ("all_but_last", 2, 4),
+        ("all_but_last", 2, 7), ("all_but_last", 2, 8),
         ("include_last", 2, 8),
     ):
         name = f"batch-{group}-window-{window}-epochs-{epochs}"
         options = dict(group=group, family_name="relation_extent", n_neighbors=3, transform_seed=37,
                        alignment_window_size=window, n_epochs=epochs)
         fit(name, **options)
-        if group == "all_but_last" and window == 2:
+        if group == "all_but_last" and window == 2 and epochs in (2, 8):
             with patch.object(aligned_umap, "optimize_layout_aligned_euclidean",
                               optimize_with_explicit_relation_extent):
                 fit(f"{name}-padded", **options)

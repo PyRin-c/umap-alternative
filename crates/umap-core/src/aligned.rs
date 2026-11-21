@@ -9,8 +9,8 @@ use crate::sampling::seeded_train_positive_interval;
 
 // The joint schedule has its own curve and sample rate. Mapper settings
 // determine the graphs but leave these fixed in the public wheel probes.
-const A: f64 = 1.576_943_460_196_219_6;
-const B: f64 = 0.895_060_878_125_481_2;
+const A: f64 = 1.576_943_460_405_378;
+const B: f64 = 0.895_060_878_122_785_9;
 const NEGATIVE_RATE: f64 = 5.0;
 
 /// Settings for the joint layout sweep.
@@ -114,7 +114,7 @@ fn weights_for_pair(
             rows[source_row].push(Anchor {
                 slice: target_index,
                 row: target_row,
-                weight: overlap,
+                weight: f64::from(overlap as f32),
             });
         }
     }
@@ -232,7 +232,9 @@ fn alignment_anchors(
             row.retain(|anchor| anchor.slice < slice.saturating_add(config.window));
             for anchor in row {
                 let distance = slice.abs_diff(anchor.slice);
-                anchor.weight = f64::from((decay[distance] * anchor.weight) as f32);
+                // The overlap comes from the float32 relation table.
+                // The temporal factor and its product stay wide.
+                anchor.weight *= decay[distance];
             }
         }
     }

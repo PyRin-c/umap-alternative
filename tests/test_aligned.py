@@ -94,12 +94,13 @@ def test_joint_optimisation_uses_the_window_and_regularisation():
 
 
 @pytest.mark.parametrize("name", [
-    "epoch-2-weight-0.0", "epoch-2-weight-0.01",
+    "epoch-2-weight-0.0", "epoch-2-weight-0.01", "epoch-2-weight-0.3",
     "epoch-8-weight-0.0", "epoch-8-weight-0.01", "epoch-8-weight-0.3",
     "zero-window-unweighted", "zero-window-weighted", "single-window-first-edge", "single-window",
     "batch-partial-2", "batch-partial-8", "batch-duplicate_target-2", "batch-duplicate_target-8",
     "batch-all_but_last-window-1-epochs-8", "batch-include_last-window-2-epochs-8",
-    "batch-all_but_last-window-2-epochs-2", "batch-all_but_last-window-2-epochs-8",
+    "batch-all_but_last-window-2-epochs-2", "batch-all_but_last-window-2-epochs-4",
+    "batch-all_but_last-window-2-epochs-7", "batch-all_but_last-window-2-epochs-8",
     "batch-all_but_two-window-2-epochs-2", "batch-all_but_two-window-2-epochs-8",
     "batch-all_but_two-four_slices-window-2-epochs-8",
 ])
@@ -109,12 +110,8 @@ def test_batch_trajectory(name):
     model = AlignedUMAP(**(PUBLIC["settings"] | expected["overrides"]))
     result = model.fit_transform(data, relations=links)
     assert_graphs(model, expected["graphs"])
-    for step, (actual, bits) in enumerate(zip(result, expected["embeddings"], strict=True)):
-        if name == "batch-all_but_last-window-2-epochs-8" and step == len(result) - 1:
-            reference = np.asarray(bits, dtype=np.uint32).view(np.float32)
-            np.testing.assert_array_max_ulp(actual, reference, maxulp=6)
-        else:
-            assert_layout(actual, bits)
+    for actual, bits in zip(result, expected["embeddings"], strict=True):
+        assert_layout(actual, bits)
 
 
 @pytest.mark.parametrize("name", ["update-0", "update-2", "update-8", "update-partial-0"])
@@ -152,9 +149,7 @@ def test_isolated_append_kernel(name):
         graph[2, probe["neighbors"]] = probe["membership"]
         model.mappers_[-1].graph_ = csr_matrix(graph)
     model.update(data, relations=identity, n_epochs=probe["epochs"])
-    expected = np.asarray(probe["layout"], dtype=np.uint32).view(np.float32)
-    assert model.embeddings_[-1].dtype == np.float32
-    np.testing.assert_array_max_ulp(model.embeddings_[-1], expected, maxulp=1)
+    assert_layout(model.embeddings_[-1], probe["layout"])
 
 
 def test_partial_append_uses_linked_neighbors_and_last_source():

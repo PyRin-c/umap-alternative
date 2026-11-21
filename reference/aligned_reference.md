@@ -121,8 +121,8 @@ coordinate bits and the locked mapper graph bits on each platform. Appending
 from the captured frozen layouts matched all new coordinate bits at 0, 2,
 and 8 epochs. The independent optimizer fixtures test alternate seeds,
 coordinate scales, neighborhood overlap, temporal decay, and both unlinked
-initialization paths. The isolated append arithmetic matched to one float32
-ULP. Partial and seeded unlinked append initialization matched exactly.
+initialization paths. The isolated append updates and the partial and seeded
+unlinked append initializations match bit for bit.
 
 ### Reconstructed batch checkpoints
 
@@ -155,13 +155,27 @@ memberships fixed while reversing the stored columns of each row.
 The other alternatives use public fits and layout checkpoints with
 the original graphs.
 
-### Remaining differences
+### Optimizer arithmetic
 
-At regularization 0.3 the base fit matches 53/54 bits at 2 epochs,
-with a maximum difference of one float32 ULP (2.3841858e-7), and
-54/54 at 8 epochs. Selected alternate seeds and identity relations
-also retain small arithmetic differences. These differences persist
-in a replay using fused multiply-add for the final coordinate update.
+The batch optimizer uses the curve defaults exposed by its public
+callable, `a=1.576943460405378` and `b=0.8950608781227859`.
+The relation table stores neighborhood overlap in float32. The
+optimizer multiplies that value by the temporal factor
+`exp(1 - |offset|)` in float64 and uses the full product for the
+coordinate update. Isolated one-edge probes distinguish this from
+narrowing the product to float32.
+
+An independent replay from the public optimizer's argument values
+matches the previously divergent fits once it uses both rules.
+At regularization 0.3 the base fit matches all 54 bits at both
+2 and 8 epochs. The one-trailing-row, window-two fixture now matches
+all coordinates at 4, 7, and 8 epochs. Every alignment and append
+checkpoint in the test suite uses exact float32-bit comparison.
+
+On Windows and Ubuntu WSL, a separate comparison matched all 1,800
+coordinates per host across 40 fits. It combined the identity and
+one-trailing-row fixtures with transform seeds 0, 1, 37, 42, and 95,
+regularization 0.01 and 0.3, and epoch counts 2 and 8.
 
 ### Relation extent at window two
 
@@ -181,17 +195,13 @@ An offset beyond the available table or a row outside the destination
 slice contributes no alignment force. The new tests compare with the
 unmodified public fit. The padded diagnostic remains in the fixture.
 
-| Time window two probe | Matching coordinates | Maximum absolute difference |
-| --- | ---: | ---: |
-| One trailing row, two epochs | 36 / 36 | 0 |
-| One trailing row, eight epochs | 33 / 36 | `3.58e-7` |
-| Two trailing rows, two epochs | 36 / 36 | 0 |
-| Two trailing rows, eight epochs | 36 / 36 | 0 |
-| Two trailing rows across four slices, eight epochs | 48 / 48 | 0 |
+| Time window two probe | Matching coordinates |
+| --- | ---: |
+| One trailing row, 2, 4, 7, and 8 epochs | 36 / 36 at each count |
+| Two trailing rows, 2 and 8 epochs | 36 / 36 at each count |
+| Two trailing rows across four slices, 8 epochs | 48 / 48 |
 
-The previous maximum for the one-row, eight-epoch fixture was
-`0.5040512`. The difference is within six float32 steps. The
-window-one and linked-last-row controls still match exactly.
+The window-one and linked-last-row controls also match exactly.
 
 The public wheel returns a Numba typed list. This implementation uses a
 Python list of float32 NumPy arrays. Its graph-mode mappers expose the fuzzy
